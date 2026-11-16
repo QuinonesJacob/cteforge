@@ -33,7 +33,7 @@ JsonOpt = Annotated[bool, typer.Option("--json", help="Print JSON")]
 def db_init() -> None:
     """Create the store and audit-log tables (idempotent)."""
     with context() as ctx:
-        typer.echo(f"database ready: {ctx.config.db_url}")
+        typer.echo(f"database ready: {ctx.config.display_db_url}")
         typer.echo(f"warehouse profiles: {', '.join(ctx.warehouses.names()) or '(none)'}")
 
 

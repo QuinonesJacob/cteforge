@@ -261,7 +261,11 @@ def build_server(
             str | None, Field(description="Run a saved recipe instead of `uses`.")
         ] = None,
         dialect: Annotated[
-            Dialect | None, Field(description="Target dialect; omit to use the profile's.")
+            Dialect | None,
+            Field(
+                description="Omit to use the profile's dialect. Another dialect needs "
+                "run=false: the SQL is only compiled (transpiled, labeled, no EXPLAIN)."
+            ),
         ] = None,
         profile: _Profile = None,
         run: Annotated[bool, Field(description="false = compile and label only.")] = True,
@@ -408,7 +412,7 @@ def build_server(
 
     async def propose_recipe_tool(
         recipe: Annotated[
-            Recipe,
+            propose_other.RecipeInput,
             Field(description="{id, title, description?, uses, values?, select?, dialect}"),
         ],
         mcp_context: Context,

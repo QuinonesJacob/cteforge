@@ -16,6 +16,7 @@ export function TopNav() {
 
   const links = [
     { to: "/", label: "Library", end: true },
+    { to: "/explore", label: "Explore" },
     { to: "/import", label: "Import" },
     { to: "/review", label: "Review", badge: pending },
     { to: "/audit", label: "Audit" },

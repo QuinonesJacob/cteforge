@@ -38,7 +38,7 @@ export function SignInPage() {
         </div>
         <h1 id="signin-title">Sign in</h1>
         <p className="muted">
-          Paste the API token an admin created for you (<code>cteforge users create</code> or Settings). It stays in this
+          Paste the API token an admin created for you (<code>cteforge user add</code> or Settings). It stays in this
           browser tab only.
         </p>
         <Field label="API token" htmlFor="token" error={error}>

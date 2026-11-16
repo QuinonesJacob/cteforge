@@ -13,7 +13,7 @@ from cteforge.domain.audit import AuditKind
 from cteforge.domain.errors import NotFoundError
 from cteforge.domain.models import DefinitionVersionInfo
 from cteforge.domain.users import User
-from cteforge.services import _audit
+from cteforge.services import _audit, _library
 from cteforge.services.auth import require
 from cteforge.services.cards import DefinitionCard, card_from_definition
 from cteforge.services.context import AppContext
@@ -39,15 +39,30 @@ def _not_found(ctx: AppContext, user: User, id: str, version: int | None, what: 
 
 
 def get_definition(
-    ctx: AppContext, user: User, id: str, version: int | None = None
+    ctx: AppContext,
+    user: User,
+    id: str,
+    version: int | None = None,
+    *,
+    include_source: bool = False,
 ) -> DefinitionCard:
     """The definition card (latest version unless `version`), with its full history.
-    Raises NotFoundError for an unknown id or version."""
+    `include_source` adds `source_sql` (the trusted query rebuilt from the template with
+    its original values) and `annotations` (its variables, with literal IDs addressing
+    that SQL), for editing it in a revision. Raises NotFoundError for an unknown id or
+    version."""
     _require(ctx, user, "get_definition")
     definition = ctx.store.get_definition(id, version)
     if definition is None:
         _not_found(ctx, user, id, version, "get_definition")
     card = card_from_definition(definition, ctx.store.definition_history(id))
+    if include_source:
+        card = card.model_copy(
+            update={
+                "source_sql": _library.original_sql(definition),
+                "annotations": _library.annotations_of(definition),
+            }
+        )
     _audit.record(
         ctx,
         user,

@@ -184,6 +184,27 @@ def driver_error(context: str, exc: BaseException, sensitive: Sensitive) -> Ware
     return WarehouseError(f"{context}: {detail}")
 
 
+# SQLSTATE "query_canceled": Postgres statement_timeout, Snowflake statement timeout.
+_QUERY_CANCELED_SQLSTATE = "57014"
+_TIMEOUT_CLASS_NAMES = frozenset({"QueryCanceled", "DeadlineExceeded", "Timeout"})
+
+
+def timeout_error(seconds: int | float | None) -> WarehouseError:
+    """The one error every connector raises for a statement that hit its timeout."""
+    return WarehouseError(f"query timed out after {seconds:g}s")
+
+
+def is_timeout(exc: BaseException) -> bool:
+    """True when a driver exception says the statement was cancelled by a timeout:
+    SQLSTATE 57014 (Postgres, Snowflake), a TimeoutError (BigQuery's job.result), or a
+    driver timeout class (QueryCanceled, DeadlineExceeded)."""
+    if isinstance(exc, TimeoutError):
+        return True
+    if getattr(exc, "sqlstate", None) == _QUERY_CANCELED_SQLSTATE:
+        return True
+    return type(exc).__name__ in _TIMEOUT_CLASS_NAMES
+
+
 def effective_limit(requested: int, max_rows: int) -> int:
     """The row limit actually applied: never above the profile cap, never negative."""
     return max(0, min(requested, max_rows))
@@ -260,6 +281,9 @@ class DbApiSession:
     `execute_options` are passed to every `cursor.execute` (e.g. to make the driver refuse
     multi-statement strings). With `rollback_after`, every call ends its transaction with
     a rollback, so per-transaction settings (Postgres READ ONLY) apply to each call anew.
+    `prelude(cursor)` runs first in every call (e.g. Postgres' transaction-local
+    statement_timeout). A driver error that `is_timeout` becomes
+    `timeout_error(timeout_s)`.
     """
 
     def __init__(
@@ -269,17 +293,23 @@ class DbApiSession:
         *,
         execute_options: Mapping[str, Any] | None = None,
         rollback_after: bool = False,
+        prelude: Callable[[Any], None] | None = None,
+        timeout_s: int | None = None,
     ) -> None:
         self._con = con
         self._sensitive = sensitive
         self._options = dict(execute_options or {})
         self._rollback_after = rollback_after
+        self._prelude = prelude
+        self._timeout_s = timeout_s
 
     def call(self, context: str, action: Callable[[Any], T]) -> T:
         """Run `action(cursor)`; any driver exception becomes a scrubbed WarehouseError."""
         try:
             cursor = self._con.cursor()
             try:
+                if self._prelude is not None:
+                    self._prelude(cursor)
                 return action(cursor)
             finally:
                 cursor.close()
@@ -288,6 +318,8 @@ class DbApiSession:
         except WarehouseError as exc:
             raise WarehouseError(self._sensitive.scrub(str(exc))) from None
         except Exception as exc:
+            if self._timeout_s is not None and is_timeout(exc):
+                raise timeout_error(self._timeout_s) from None
             raise driver_error(context, exc, self._sensitive) from None
 
     def execute(self, cursor: Any, sql: str, params: Sequence[Any] | None = None) -> None:

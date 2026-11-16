@@ -38,11 +38,19 @@ class FakeIterator:
 class FakeJob:
     def __init__(self, client):
         self.client = client
+        self.cancelled = False
+        client.jobs.append(self)
 
-    def result(self, max_results=None):
+    def result(self, max_results=None, timeout=None):
         self.client.max_results.append(max_results)
+        self.client.timeouts.append(timeout)
+        if self.client.result_error is not None:
+            raise self.client.result_error
         rows = self.client.rows if max_results is None else self.client.rows[:max_results]
         return FakeIterator(rows, self.client.result_schema)
+
+    def cancel(self):
+        self.cancelled = True
 
 
 class FakeClient:
@@ -52,6 +60,9 @@ class FakeClient:
         self.credentials = credentials
         self.queries: list[tuple] = []
         self.max_results: list[int | None] = []
+        self.timeouts: list[int | None] = []
+        self.jobs: list = []
+        self.result_error: Exception | None = None
         self.tables: dict[str, list] = {}
         self.table_requests: list[str] = []
         self.rows: list[FakeRow] = []
@@ -79,6 +90,8 @@ class FakeClient:
 
 
 class FakeQueryJobConfig:
+    job_timeout_ms = None  # a client version that supports server-side job timeouts
+
     def __init__(self, **kwargs):
         self.dry_run = False
         self.use_query_cache = True
@@ -247,3 +260,31 @@ def test_missing_driver_gives_install_hint(monkeypatch):
     monkeypatch.setitem(sys.modules, "google.cloud.bigquery", None)
     with pytest.raises(WarehouseError, match=r"cteforge\[bigquery\]"):
         BigQueryWarehouse(profile())
+
+
+# --- statement timeout ----------------------------------------------------------------
+
+
+def test_run_waits_at_most_the_timeout_and_sets_job_timeout(bq):
+    wh = BigQueryWarehouse(profile(statement_timeout_s=7))
+    wh.run("SELECT 1", limit=10)
+    c = client(bq)
+    assert c.timeouts == [7]
+    assert c.queries[0][1].job_timeout_ms == 7000
+
+
+def test_run_timeout_cancels_job_and_raises_timed_out(bq):
+    wh = BigQueryWarehouse(profile(statement_timeout_s=3))
+    c = client(bq)
+    c.result_error = TimeoutError()
+    with pytest.raises(WarehouseError, match=r"^query timed out after 3s$"):
+        wh.run("SELECT 1", limit=10)
+    assert c.jobs[0].cancelled is True
+
+
+def test_no_timeout_when_profile_turns_it_off(bq):
+    wh = BigQueryWarehouse(profile(statement_timeout_s=None))
+    wh.run("SELECT 1", limit=10)
+    c = client(bq)
+    assert c.timeouts == [None]
+    assert c.queries[0][1].job_timeout_ms is None

@@ -130,3 +130,65 @@ def test_run_cannot_read_files_outside_the_database(wh, tmp_path):
 def test_single_selects_still_run_and_explain(wh, sql):
     wh.explain(sql)
     assert wh.run(sql, limit=1).rows
+
+
+# --- host paths in errors, statement timeout --------------------------------------------
+
+
+def test_errors_do_not_reveal_home_directory_or_os_user(db_path, monkeypatch):
+    import getpass
+
+    import cteforge.warehouse.duckdb as duck
+
+    home = db_path.parent / "home" / "jdoe-host"
+    monkeypatch.setattr(duck.Path, "home", classmethod(lambda cls: home))
+    monkeypatch.setattr(getpass, "getuser", lambda: "jdoe-host")
+    wh = DuckDBWarehouse(db_path)
+    try:
+        for call in (
+            lambda: wh.run(f"SELECT * FROM read_csv('{home}/secret.csv')", limit=1),
+            lambda: wh.explain(f"SELECT * FROM read_csv('{db_path.parent}/x.csv')"),
+            lambda: wh.run('SELECT * FROM jdoe_host_table, "jdoe-host"', limit=1),
+        ):
+            with pytest.raises(WarehouseError) as err:
+                call()
+            message = str(err.value)
+            assert str(home) not in message
+            assert str(db_path.parent) not in message
+            assert "jdoe-host" not in message
+        with pytest.raises(WarehouseError, match="~/secret.csv"):
+            wh.run(f"SELECT * FROM read_csv('{home}/secret.csv')", limit=1)
+    finally:
+        wh.close()
+
+
+def test_slow_query_is_interrupted_with_timeout_error(db_path):
+    wh = DuckDBWarehouse(db_path, statement_timeout_s=0.2)
+    try:
+        slow = "SELECT count(*) FROM range(100000000000) a"
+        with pytest.raises(WarehouseError, match=r"^query timed out after 0.2s$"):
+            wh.run(slow, limit=1)
+        # The connection still works afterwards, and a late timer does not interrupt it.
+        assert wh.run("SELECT 1", limit=1).rows == [(1,)]
+    finally:
+        wh.close()
+
+
+def test_profile_timeout_reaches_the_connector(db_path):
+    profile = WarehouseProfile(
+        name="d", dialect=Dialect.DUCKDB, options={"path": str(db_path)}, statement_timeout_s=1
+    )
+    wh = DuckDBWarehouse.from_profile(profile)
+    try:
+        with pytest.raises(WarehouseError, match=r"^query timed out after 1s$"):
+            wh.run("SELECT count(*) FROM range(100000000000) a", limit=1)
+    finally:
+        wh.close()
+
+
+def test_profile_timeout_defaults_to_60_and_can_be_turned_off():
+    base = {"name": "d", "dialect": Dialect.DUCKDB}
+    assert WarehouseProfile(**base).statement_timeout_s == 60
+    assert WarehouseProfile(**base, statement_timeout_s=None).statement_timeout_s is None
+    with pytest.raises(ValueError):
+        WarehouseProfile(**base, statement_timeout_s=0)

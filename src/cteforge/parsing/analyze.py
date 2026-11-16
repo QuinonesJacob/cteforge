@@ -301,6 +301,12 @@ def parse(sql: str, dialect: Dialect) -> exp.Expression:
     return statements[0]
 
 
+def transpile(sql: str, source: Dialect, target: Dialect) -> str:
+    """One statement written in `source`, as `target` SQL (sqlglot transpile; ADR 0013).
+    Raises SqlParseError when it does not parse."""
+    return parse(sql, source).sql(dialect=str(target), pretty=True)
+
+
 @dataclass(frozen=True)
 class Scope:
     name: str

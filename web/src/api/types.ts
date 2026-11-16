@@ -115,6 +115,10 @@ export interface DefinitionCard {
   template: string;
   /** Full history from GET /definitions/{id}; may be null elsewhere. */
   history?: DefinitionVersionInfo[] | null;
+  /** Only with ?include_source=true (revise flow): the trusted SQL rebuilt from the template
+   * with its original values, and the variables as annotations addressing that SQL. */
+  source_sql?: string | null;
+  annotations?: Annotation[] | null;
 }
 
 export interface SearchHit {
@@ -271,6 +275,70 @@ export interface RunRequest {
   question?: string;
 }
 
+export interface CheckRequest {
+  sql: string;
+  profile?: string;
+  run: boolean;
+  limit: number;
+  question?: string;
+}
+
+// ── Catalog (domain/models.py Recipe / JoinEdge, services/cards.py TableCard) ───
+export interface Recipe {
+  id: string;
+  version: number;
+  title: string;
+  description: string;
+  uses: Record<string, DefinitionRef>;
+  values: Record<string, Record<string, unknown>>;
+  select?: string | null;
+  dialect: Dialect;
+  state: DefinitionState;
+}
+
+/** POST /proposals/recipes `recipe` (services/propose_other.py RecipeInput): cteforge sets
+ * version, state and schema_version. */
+export interface RecipeInput {
+  id: string;
+  title: string;
+  description: string;
+  uses: Record<string, DefinitionRef>;
+  values: Record<string, Record<string, unknown>>;
+  select?: string;
+  dialect: Dialect;
+}
+
+export interface JoinKey {
+  left: string;
+  right: string;
+}
+
+export interface JoinEdge {
+  id: string;
+  left_table: string;
+  right_table: string;
+  keys: JoinKey[];
+  join_type: string;
+  relationship?: string | null;
+  usage_count: number;
+  traps: string[];
+  state: DefinitionState;
+}
+
+export interface ColumnCard {
+  name: string;
+  type: string;
+}
+
+export interface TableCard {
+  name: string;
+  found: boolean;
+  columns: ColumnCard[];
+  used_by: string[];
+  joins: string[];
+  units: Record<string, string>;
+}
+
 // ── Proposals (domain/proposals.py, services/review.py) ────────────────────────
 export type ProposalKind = "new_definition" | "revise_definition" | "new_recipe" | "new_join";
 export type ProposalStatus = "pending" | "approved" | "rejected" | "withdrawn";
@@ -305,6 +373,16 @@ export interface ProposeDefinitionRequest {
   metadata: DefinitionMetadata;
   annotations: Annotation[];
   profile?: string;
+  summary: string;
+}
+
+/** POST /proposals/definitions/{id}/revise: only what changes (DESIGN §18). */
+export interface ReviseDefinitionRequest {
+  base_version: number;
+  sql?: string;
+  dialect?: Dialect;
+  metadata?: Partial<DefinitionMetadata> & { profile?: string | null };
+  annotations?: Annotation[];
   summary: string;
 }
 

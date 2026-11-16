@@ -1,6 +1,9 @@
-import { useEffect, useMemo, useState } from "react";
-import { parseQuery, proposeDefinition } from "../api/endpoints";
-import type { Dialect, ParseReport, ProposalOutcome } from "../api/types";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { Link, useSearchParams } from "react-router-dom";
+import { getDefinition, parseQuery, proposeDefinition, reviseDefinition } from "../api/endpoints";
+import type { DefinitionCard, Dialect, ParseReport, ProposalOutcome } from "../api/types";
+import { ErrorState } from "../components/ErrorState";
+import { Loading } from "../components/Loading";
 import { ImportResult } from "../components/ImportResult";
 import { ImportReviewStep } from "../components/ImportReviewStep";
 import { GrainTable } from "../components/GrainTable";
@@ -25,9 +28,11 @@ import {
   type MetadataDraft,
   type VariableDraft,
 } from "../lib/importBuilder";
+import { changedMetadata, draftFromAnnotation, metadataFromCard, seedDrafts } from "../lib/revise";
 import { canPropose } from "../lib/roles";
 import { useAuth } from "../state/AuthContext";
 import { useToast } from "../state/ToastContext";
+import { useAsync } from "../state/useAsync";
 import { notifyProposalsChanged } from "../state/usePendingCount";
 
 const STEPS = ["Paste SQL", "Variables", "Describe", "Submit"];
@@ -39,7 +44,14 @@ interface ParsedInput {
   profile: string;
 }
 
+/** /import, or /import?revise=<id> to propose the next version of a stored definition. */
 export function ImportPage() {
+  const [params] = useSearchParams();
+  const reviseId = params.get("revise");
+  return <ImportFlow key={reviseId ?? ""} reviseId={reviseId} />;
+}
+
+function ImportFlow({ reviseId }: { reviseId: string | null }) {
   const { user } = useAuth();
   const toast = useToast();
   const [step, setStep] = useState(0);
@@ -60,6 +72,12 @@ export function ImportPage() {
   const [submitting, setSubmitting] = useState(false);
   const [outcome, setOutcome] = useState<ProposalOutcome | null>(null);
   const [submitError, setSubmitError] = useState<ApiError | null>(null);
+  // Revise mode: the stored definition with its rebuilt SQL and variables (include_source).
+  const base = useAsync<DefinitionCard | null>(
+    (signal) => (reviseId ? getDefinition(reviseId, undefined, { signal, includeSource: true }) : Promise.resolve(null)),
+    [reviseId],
+  );
+  const seeded = useRef(false);
 
   const byId = useMemo(() => Object.fromEntries((report?.literals ?? []).map((l) => [l.id, l])), [report]);
   const ranges = report?.ranges ?? [];
@@ -79,15 +97,56 @@ export function ImportPage() {
   }, [drafts, editing]);
   const metaErrors = validateMetadata(meta);
 
-  // Default the owner to the signed-in person once known (they can change it).
+  // Default the owner to the signed-in person once known (they can change it). Not when
+  // revising: the stored owner (possibly none) stays unless the person changes it.
   useEffect(() => {
-    if (user?.name) setMeta((m) => (m.owner ? m : { ...m, owner: user.name }));
-  }, [user?.name]);
+    if (user?.name && !reviseId) setMeta((m) => (m.owner ? m : { ...m, owner: user.name }));
+  }, [user?.name, reviseId]);
+
+  // Revise mode: fill every step from the stored version, and parse its SQL once so the
+  // stored variables (whose literal IDs address that SQL) become editable drafts.
+  useEffect(() => {
+    const card = base.data;
+    if (!card || seeded.current || !canPropose(user)) return;
+    seeded.current = true;
+    const input: ParsedInput = { sql: card.source_sql ?? "", dialect: card.source_dialect, profile: card.profile ?? "" };
+    setSql(input.sql);
+    setDialect(input.dialect);
+    setProfile(input.profile);
+    setMeta(metadataFromCard(card));
+    setIdTouched(true);
+    if (!input.sql) return;
+    setParsing(true);
+    parseQuery({ sql: input.sql, dialect: input.dialect, profile: input.profile || undefined })
+      .then((r) => {
+        const { kept, dropped } = seedDrafts((card.annotations ?? []).map(draftFromAnnotation), r);
+        if (dropped.length > 0)
+          toast.push({
+            kind: "warning",
+            title: `${dropped.length} stored variable${dropped.length > 1 ? "s" : ""} could not be matched`,
+            message: `${dropped.map((d) => d.name).join(", ")}: make ${dropped.length > 1 ? "them" : "it"} again.`,
+          });
+        setReport(r);
+        setParsed(input);
+        setDrafts(kept);
+        setMaxStep(3);
+      })
+      .catch((err: unknown) => {
+        if (err instanceof ApiError) setParseError(err);
+        else toast.error(err, "Parse failed");
+      })
+      .finally(() => setParsing(false));
+  }, [base.data, user, toast]);
+
+  if (reviseId && base.loading && !base.data) return <Loading label="Loading definition…" />;
+  if (reviseId && base.error)
+    return <ErrorState error={base.error} title={`Could not load ${reviseId}`} onRetry={base.reload} />;
+  const card = base.data ?? null;
 
   if (!canPropose(user))
     return (
       <div className="page">
-        <PageHeader title="Import SQL" />
+        <PageHeader title={card ? `Revise ${card.title}` : "Import SQL"} />
         <p className="callout callout-info">Your role ({user?.role}) can't propose definitions. Ask an admin for contributor access.</p>
       </div>
     );
@@ -155,14 +214,26 @@ export function ImportPage() {
     setSubmitting(true);
     setSubmitError(null);
     try {
-      const result = await proposeDefinition({
-        sql: parsed.sql,
-        dialect: parsed.dialect,
-        metadata: toMetadata(meta),
-        annotations: drafts.map(toAnnotation),
-        profile: parsed.profile || undefined,
-        summary: meta.summary.trim() || `Import ${meta.title.trim()}`,
-      });
+      const result = card
+        ? await reviseDefinition(card.id, {
+            base_version: card.version,
+            sql: parsed.sql,
+            dialect: parsed.dialect,
+            metadata: {
+              ...changedMetadata(metadataFromCard(card), meta),
+              ...(parsed.profile && parsed.profile !== (card.profile ?? "") ? { profile: parsed.profile } : {}),
+            },
+            annotations: drafts.map(toAnnotation),
+            summary: meta.summary.trim() || `Revise ${card.id} (SQL and variables)`,
+          })
+        : await proposeDefinition({
+            sql: parsed.sql,
+            dialect: parsed.dialect,
+            metadata: toMetadata(meta),
+            annotations: drafts.map(toAnnotation),
+            profile: parsed.profile || undefined,
+            summary: meta.summary.trim() || `Import ${meta.title.trim()}`,
+          });
       setOutcome(result);
       notifyProposalsChanged();
     } catch (err) {
@@ -193,10 +264,22 @@ export function ImportPage() {
 
   return (
     <div className="page">
-      <PageHeader
-        title="Import SQL"
-        subtitle="Paste a query you already trust. You decide which values become variables; nothing changes by default."
-      />
+      {card ? (
+        <>
+          <p className="small">
+            <Link to={`/definitions/${encodeURIComponent(card.id)}`}>← {card.id}</Link>
+          </p>
+          <PageHeader
+            title={`Revise ${card.title}`}
+            subtitle={`Proposes v${card.version + 1} of ${card.id}: change the SQL, the variables or the description. Every check runs again.`}
+          />
+        </>
+      ) : (
+        <PageHeader
+          title="Import SQL"
+          subtitle="Paste a query you already trust. You decide which values become variables; nothing changes by default."
+        />
+      )}
       <Stepper steps={STEPS} current={step} maxReachable={outcome ? -1 : stale ? 0 : maxStep} onSelect={go} />
 
       {step === 0 && (
@@ -324,6 +407,7 @@ export function ImportPage() {
             showErrors={showMetaErrors}
             idTouched={idTouched}
             onIdTouched={() => setIdTouched(true)}
+            idLocked={card !== null}
           />
           <div className="btn-row">
             <button type="button" className="btn" onClick={() => go(1)}>
@@ -360,12 +444,14 @@ export function ImportPage() {
 
       {step === 3 && outcome && (
         <div className="stack">
-          <ImportResult outcome={outcome} />
-          <div className="btn-row">
-            <button type="button" className="btn" onClick={restart}>
-              Import another query
-            </button>
-          </div>
+          <ImportResult outcome={outcome} revision={card !== null} />
+          {!card && (
+            <div className="btn-row">
+              <button type="button" className="btn" onClick={restart}>
+                Import another query
+              </button>
+            </div>
+          )}
         </div>
       )}
     </div>

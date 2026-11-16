@@ -39,6 +39,7 @@ export function UsersTable({ users, me, busy, onRole, onRotate }: Props) {
                 </label>
                 <select
                   id={`role-${u.name}`}
+                  className="select-inline"
                   value={u.role}
                   disabled={busy === u.name || u.name === me}
                   title={u.name === me ? "You can't change your own role" : undefined}

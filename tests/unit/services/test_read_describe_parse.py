@@ -13,7 +13,7 @@ from cteforge.domain.audit import AuditKind, AuditOutcome
 from cteforge.domain.connections import WarehouseProfile
 from cteforge.domain.dialects import Dialect
 from cteforge.domain.errors import NotFoundError, PermissionDeniedError, SqlParseError
-from cteforge.domain.issues import IssueCode
+from cteforge.domain.issues import IssueCode, Severity
 from cteforge.domain.models import Definition, DefinitionState
 from cteforge.domain.users import ActorKind, User, UserRole
 from cteforge.files.definitions import load_definition
@@ -81,6 +81,21 @@ def test_get_definition_card_with_history(ctx: AppContext) -> None:
     assert last_event(ctx).definitions == ["realization_rate@1"]
 
 
+def test_include_source_adds_sql_and_annotations_that_parse_back(ctx: AppContext) -> None:
+    ctx.store.add_definition_version(example("realization_rate"), author="analyst")
+    plain = get_definition(ctx, AGENT, "realization_rate")
+    assert plain.source_sql is None and plain.annotations is None
+    card = get_definition(ctx, AGENT, "realization_rate", include_source=True)
+    assert card.source_sql and "closed_won" in card.source_sql
+    assert card.annotations is not None
+    names = {a.name: a for a in card.annotations}
+    assert set(names) == {v.name for v in card.variables}
+    # The literal IDs address the rebuilt SQL (what the revise flow parses first).
+    report = parse_query(ctx, AGENT, card.source_sql, Dialect.DUCKDB, profile="demo")
+    ids = {lit["id"] for lit in report.literals} | {g["id"] for g in report.grains or []}
+    assert all(set(a.literals) <= ids for a in card.annotations)
+
+
 def test_drafts_can_be_described(ctx: AppContext) -> None:
     ctx.store.add_definition_version(
         example("realization_rate", state=DefinitionState.DRAFT), author="a"
@@ -126,12 +141,14 @@ def test_parse_with_warehouse_types(ctx: AppContext) -> None:
     assert "closed_won" not in event.model_dump_json()
 
 
-def test_parse_dialect_mismatch_has_no_types(ctx: AppContext) -> None:
+def test_parse_dialect_mismatch_still_reads_types_with_a_warning(ctx: AppContext) -> None:
     report = parse_query(ctx, AGENT, SQL, Dialect.POSTGRES, profile="demo")
-    assert not report.schema_found
-    assert [i.code for i in report.issues] == [IssueCode.DIALECT_MISMATCH]
+    assert report.schema_found
+    assert [(i.code, i.severity) for i in report.issues] == [
+        (IssueCode.DIALECT_MISMATCH, Severity.WARNING)
+    ]
     lits = {lit["id"]: lit for lit in report.literals}
-    assert lits["closed_deals.L1"]["compared_type"] is None
+    assert lits["closed_deals.L1"]["compared_type"] == "TIMESTAMP"
     assert report.dialect is Dialect.POSTGRES
 
 

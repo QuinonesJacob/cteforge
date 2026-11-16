@@ -2,7 +2,7 @@ import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { ParseReport, ProposalOutcome } from "../api/types";
+import type { DefinitionCard, ParseReport, ProposalOutcome } from "../api/types";
 import { AuthProvider } from "../state/AuthContext";
 import { ToastProvider } from "../state/ToastContext";
 import { mockApi } from "../test/fetchMock";
@@ -221,5 +221,70 @@ describe("ImportPage", () => {
       </MemoryRouter>,
     );
     expect(await screen.findByText(/can't propose definitions/)).toBeInTheDocument();
+  });
+
+  it("revise mode: prefills SQL, variables and metadata, then posts a revision", async () => {
+    const user = userEvent.setup();
+    const card: DefinitionCard = {
+      id: "closed_deals", version: 4, title: "Closed deals", meaning: "One row per deal", keywords: ["deals"],
+      use_when: "", dont_use_when: "", source_dialect: "duckdb", profile: null, state: "verified", owner: "ana",
+      join_keys: [], outputs: ["deal_id"], tables: ["deals"], variables: [], template: "SELECT 1",
+      source_sql: "SELECT * FROM deals WHERE closed_at >= '2026-01-01'",
+      annotations: [
+        { name: "period", type: "date_range", role: "changeable", literals: ["main.L1", "main.L2"], description: "" },
+        { name: "gone", type: "text", role: "fixed", literals: ["main.L7"], description: "" },
+      ],
+    };
+    const outcome: ProposalOutcome = {
+      proposal: { id: "p2", kind: "revise_definition", target_id: "closed_deals", payload: {}, checks: [], summary: "", author: "jq", author_kind: "human", created_at: "2026-11-16T00:00:00Z", status: "pending", auto_applied: false, comment: "" },
+      definition: null,
+      issues: [],
+      auto_applied: false,
+    };
+    const api = mockApi({
+      "GET /me": () => ({ body: { name: "jq", role: "contributor", kind: "human" } }),
+      "GET /profiles": () => ({ body: [] }),
+      "GET /definitions/closed_deals": () => ({ body: card }),
+      "POST /parse": () => ({ body: report }),
+      "POST /proposals/definitions/closed_deals/revise": () => ({ body: outcome }),
+      "GET /proposals/count": () => ({ body: { count: 0 } }),
+    });
+    render(
+      <MemoryRouter initialEntries={["/import?revise=closed_deals"]}>
+        <ToastProvider>
+          <AuthProvider>
+            <ImportPage />
+            <ToastViewport />
+          </AuthProvider>
+        </ToastProvider>
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByRole("heading", { name: "Revise Closed deals" })).toBeInTheDocument();
+    const sql = (await screen.findByLabelText(/Trusted SQL/)) as HTMLTextAreaElement;
+    await waitFor(() => expect(sql.value).toBe(card.source_sql));
+    await waitFor(() => expect(api.calls.some((c) => c.path === "/parse")).toBe(true));
+    expect(api.calls.find((c) => c.path === "/definitions/closed_deals")?.headers).toBeDefined();
+    expect(api.fn.mock.calls.some(([u]) => String(u).includes("include_source=true"))).toBe(true);
+    // The stored variable whose literal no longer exists is dropped with a warning.
+    expect(await screen.findByText(/could not be matched/)).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Back to variables" }));
+    expect(await screen.findByText("period")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Continue" }));
+    const id = screen.getByLabelText(/^ID/) as HTMLInputElement;
+    expect(id.value).toBe("closed_deals");
+    expect(id.readOnly).toBe(true);
+    await user.type(screen.getByLabelText(/Keywords/), ", won");
+    await user.click(screen.getByRole("button", { name: "Continue" }));
+    await user.click(await screen.findByRole("button", { name: /Submit|Propose/ }));
+
+    await waitFor(() => expect(api.calls.some((c) => c.path === "/proposals/definitions/closed_deals/revise")).toBe(true));
+    const body = api.calls.find((c) => c.path === "/proposals/definitions/closed_deals/revise")?.body as Record<string, unknown>;
+    expect(body.base_version).toBe(4);
+    expect(body.sql).toBe(card.source_sql);
+    expect(body.dialect).toBe("duckdb");
+    expect(body.metadata).toEqual({ keywords: ["deals", "won"] });
+    expect((body.annotations as { name: string }[]).map((a) => a.name)).toEqual(["period"]);
   });
 });

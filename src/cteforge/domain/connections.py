@@ -21,3 +21,7 @@ class WarehouseProfile(BaseModel):
     secrets_env: dict[str, str] = Field(default_factory=dict)
     max_rows: int = 10_000
     maximum_bytes_billed: int | None = None  # BigQuery dry-run/run cap.
+    # Per-statement timeout in seconds, enforced by each connector where the driver
+    # supports it (warehouse/); None turns it off. A timed-out statement raises
+    # WarehouseError("query timed out after Ns").
+    statement_timeout_s: int | None = Field(default=60, gt=0)

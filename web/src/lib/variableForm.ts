@@ -1,7 +1,7 @@
 // Run-form state per variable type ↔ the strict JSON input formats (DESIGN §4).
 // The backend (domain/variables.py) is the validator; this only checks the form is filled in
 // and produces exactly the JSON shape each type expects.
-import type { DefinitionCard, RunRequest, VariableCard, VariableType } from "../api/types";
+import type { DefinitionCard, DefinitionRef, RunRequest, VariableCard, VariableType } from "../api/types";
 
 export const GRAINS = ["day", "week", "month", "quarter", "year"] as const;
 export type Grain = (typeof GRAINS)[number];
@@ -184,4 +184,67 @@ export function buildRunRequest(
   };
   if (opts.profile) req.profile = opts.profile;
   return req;
+}
+
+// ── Composition and recipes (DESIGN §17): several definitions by alias ──────────────
+
+/** One definition in a composition, with its run-form state. `cards` is null until loaded. */
+export interface ComposePart {
+  alias: string;
+  ref: DefinitionRef;
+  cards: VariableCard[] | null;
+  form: Record<string, FormValue>;
+  overrides: ReadonlySet<string>;
+}
+
+/** Form state for a definition's variables, starting from saved values (a recipe's) when
+ * given, else each variable's original value. */
+export function initialForm(cards: VariableCard[], saved: Record<string, unknown> = {}): Record<string, FormValue> {
+  return Object.fromEntries(
+    cards.map((c) => [c.name, c.name in saved ? formValueFrom(c.type, saved[c.name]) : initialFormValue(c)]),
+  );
+}
+
+/** Fixed variables a recipe sets: they stay overridden when the recipe is opened. */
+export function savedOverrides(cards: VariableCard[], saved: Record<string, unknown> = {}): Set<string> {
+  return new Set(cards.filter((c) => c.role === "fixed" && c.name in saved).map((c) => c.name));
+}
+
+/**
+ * POST /run body for a composition: `uses` alias → {id, version?} (no version = float on the
+ * latest usable one), `values` per alias as buildRunValues makes them, optional final SELECT.
+ * Errors are keyed "<alias>.<variable>".
+ */
+export function buildComposeRequest(
+  parts: ComposePart[],
+  select: string,
+  opts: { run: boolean; limit: number; profile?: string },
+): { request: RunRequest; errors: Record<string, string> } {
+  const request: RunRequest = { uses: {}, values: {}, run: opts.run, limit: opts.limit };
+  const errors: Record<string, string> = {};
+  for (const part of parts) {
+    request.uses![part.alias] = part.ref.version != null ? { id: part.ref.id, version: part.ref.version } : { id: part.ref.id };
+    const built = buildRunValues(part.cards ?? [], part.form, part.overrides);
+    request.values[part.alias] = built.values;
+    for (const [name, message] of Object.entries(built.errors)) errors[`${part.alias}.${name}`] = message;
+  }
+  if (select.trim()) request.select = select;
+  if (opts.profile) request.profile = opts.profile;
+  return { request, errors };
+}
+
+/** POST /run body for a saved recipe with its own values (DESIGN §6 compile_and_run(recipe_id)). */
+export function buildRecipeRunRequest(recipeId: string, opts: { run: boolean; limit: number; profile?: string }): RunRequest {
+  const req: RunRequest = { recipe_id: recipeId, values: {}, run: opts.run, limit: opts.limit };
+  if (opts.profile) req.profile = opts.profile;
+  return req;
+}
+
+/** A unique lower_snake_case alias for a definition id within a composition. */
+export function nextAlias(id: string, taken: string[]): string {
+  const base = id.toLowerCase().replace(/[^a-z0-9_]+/g, "_").replace(/^_+|_+$/g, "") || "part";
+  const start = /^[a-z]/.test(base) ? base : `d_${base}`;
+  let alias = start;
+  for (let n = 2; taken.includes(alias); n++) alias = `${start}_${n}`;
+  return alias;
 }

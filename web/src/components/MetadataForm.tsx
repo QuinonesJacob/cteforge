@@ -9,10 +9,12 @@ interface Props {
   showErrors: boolean;
   idTouched: boolean;
   onIdTouched: () => void;
+  /** Revising: the ID is fixed (a definition's id never changes). */
+  idLocked?: boolean;
 }
 
 /** Step 3: what the definition means and when to use it. */
-export function MetadataForm({ value, onChange, errors, showErrors, idTouched, onIdTouched }: Props) {
+export function MetadataForm({ value, onChange, errors, showErrors, idTouched, onIdTouched, idLocked = false }: Props) {
   const set = <K extends keyof MetadataDraft>(key: K, v: MetadataDraft[K]) => onChange({ ...value, [key]: v });
   const err = (k: keyof MetadataDraft) => (showErrors ? errors[k] : undefined);
   return (
@@ -24,15 +26,22 @@ export function MetadataForm({ value, onChange, errors, showErrors, idTouched, o
             type="text"
             value={value.title}
             onChange={(e) =>
-              onChange({ ...value, title: e.target.value, id: idTouched ? value.id : slugify(e.target.value) })
+              onChange({ ...value, title: e.target.value, id: idTouched || idLocked ? value.id : slugify(e.target.value) })
             }
           />
         </Field>
-        <Field label="ID" htmlFor="md-id" required hint="Stable slug agents call it by." error={err("id")}>
+        <Field
+          label="ID"
+          htmlFor="md-id"
+          required
+          hint={idLocked ? "A definition's ID never changes." : "Stable slug agents call it by."}
+          error={err("id")}
+        >
           <input
             id="md-id"
             type="text"
             className="mono"
+            readOnly={idLocked}
             value={value.id}
             onChange={(e) => {
               onIdTouched();

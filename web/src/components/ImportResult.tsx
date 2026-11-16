@@ -5,18 +5,21 @@ import { IssueList } from "./IssueList";
 import { StateBadge } from "./StateBadge";
 
 /** Step 4 outcome: checks, and whether the proposal was auto-applied or waits for review. */
-export function ImportResult({ outcome }: { outcome: ProposalOutcome }) {
+export function ImportResult({ outcome, revision = false }: { outcome: ProposalOutcome; revision?: boolean }) {
   const { proposal, definition } = outcome;
   const checks = outcome.issues.length ? outcome.issues : proposal.checks;
   const hasErrors = checks.some((i) => i.severity === "error");
   return (
     <section className="card import-result" aria-live="polite">
       <h2>
-        {outcome.auto_applied ? "Imported" : proposal.status === "pending" ? "Proposal submitted" : `Proposal ${proposal.status}`}
+        {outcome.auto_applied ? (revision ? "Revision applied" : "Imported") : proposal.status === "pending" ? "Proposal submitted" : `Proposal ${proposal.status}`}
       </h2>
       <p>
         {outcome.auto_applied ? (
-          <>Checks passed and the team is in open mode, so the definition was applied immediately.</>
+          <>
+            Checks passed and the team is in open mode, so the {revision ? "new version" : "definition"} was applied
+            immediately.
+          </>
         ) : proposal.status === "pending" ? (
           <>The proposal waits for an approver{hasErrors ? " (and its failing checks need fixing)" : ""}.</>
         ) : null}

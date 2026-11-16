@@ -16,8 +16,9 @@ cteforge. Project root: ../../../CLAUDE.md
 - `users.py` — User, UserRole, ActorKind (ADR 0018). No tokens or hashes here.
 - `proposals.py` — Proposal, ProposalKind, ProposalStatus (DESIGN §18).
 - `audit.py` — AuditEvent, AuditKind, AuditOutcome (ADR 0008).
-- `connections.py` — WarehouseProfile: connection options + env-var NAMES of secrets
-  (ADR 0020). Never secret values.
+- `connections.py` — WarehouseProfile: connection options + env-var NAMES of secrets,
+  row/byte caps and `statement_timeout_s` (default 60, None = off; ADR 0020). Never
+  secret values.
 
 If something does not clearly fit one of the above, it does not belong here.
 "Not forbidden" is not the same as "allowed."

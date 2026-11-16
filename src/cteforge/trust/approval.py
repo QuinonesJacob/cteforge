@@ -55,15 +55,18 @@ def allowed(user: User, action: Action) -> bool:
 
 
 def _own_work(user: User, author: str | None) -> bool:
-    """Four-eyes rule (ADR 0018 addendum): `user` authored the work and is not an admin
-    (admins are exempt so single-user local mode stays workable)."""
-    return author is not None and author == user.name and user.role is not UserRole.ADMIN
+    """Four-eyes rule (ADR 0018 addendum): `user` authored the work and is not a human
+    admin. Only human admins are exempt (so single-user local mode stays workable); an
+    agent admin never approves or verifies its own work."""
+    if author is None or author != user.name:
+        return False
+    return not (user.role is UserRole.ADMIN and not _is_agent(user))
 
 
 def can_approve(user: User, target: Definition | None, *, author: str | None = None) -> bool:
     """Approver/admin, or the target definition's owner. Changes to a verified definition
     always need a human (ADR 0007). `target=None` means a new definition. `author` is the
-    proposal's author: nobody but an admin may approve their own proposal (four-eyes rule,
+    proposal's author: nobody but a human admin may approve their own proposal (four-eyes rule,
     ADR 0018 addendum); None skips that check."""
     if target is not None and target.state is DefinitionState.VERIFIED and _is_agent(user):
         return False
@@ -76,7 +79,7 @@ def can_verify(user: User, target: Definition | None, *, author: str | None = No
     """Humans only (ADR 0007), and only approver/admin (ADR 0018). Owning a definition does
     not grant verify: `owner` comes from the proposed YAML, so a proposer could otherwise
     name themselves owner and verify their own work. `author` is the author of the version
-    being verified: nobody but an admin may verify their own version (four-eyes rule,
+    being verified: nobody but a human admin may verify their own version (four-eyes rule,
     ADR 0018 addendum); None skips that check. `target` does not widen the check."""
     del target
     return allowed(user, Action.VERIFY) and not _own_work(user, author)

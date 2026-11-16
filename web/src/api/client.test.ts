@@ -73,6 +73,12 @@ describe("JSON bodies and query strings", () => {
     );
   });
 
+  it("repeats array query values and drops empty ones", () => {
+    expect(buildUrl("/tables", { name: ["deals", "", "accounts"], profile: "" })).toBe(
+      "/api/v1/tables?name=deals&name=accounts",
+    );
+  });
+
   it("search passes q and include_drafts", async () => {
     const fetchFn = mockFetch(200, []);
     await searchDefinitions("revenue by month", true);

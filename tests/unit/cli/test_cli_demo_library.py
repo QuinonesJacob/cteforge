@@ -127,6 +127,36 @@ def test_run_compile_only_with_select(demo_cli: Invoke):
     assert "WITH" in result.output and "cteforge" in result.output  # tagged SQL shown
 
 
+BY_REGION = (
+    "SELECT rr.region, AVG(rr.realization_rate) AS avg_rate, MAX(bc.collected) AS collected "
+    "FROM rr JOIN bc ON rr.region = bc.region GROUP BY rr.region"
+)
+
+
+def test_demo_definitions_declare_join_keys_so_composition_keeps_trust(demo_cli: Invoke):
+    """Regression: without join_keys every join of two demo definitions was exploratory."""
+    result = demo_cli(
+        "run", "--use", "rr=realization_rate", "--use", "bc=booked_vs_collected",
+        "--select", BY_REGION, "--json",
+    )  # fmt: skip
+    assert result.exit_code == 0, result.output
+    outcome = json.loads(result.stdout)
+    assert outcome["label"] == "llm_annotated"
+    assert "unknown_join" not in {i["code"] for i in outcome["issues"]}
+    assert outcome["ran"] is True and outcome["rows"]  # the default regions of both parts
+
+
+def test_verified_demo_parts_compose_to_built_from_verified_parts(fresh_demo: Invoke):
+    for id_ in ("realization_rate", "booked_vs_collected"):
+        assert fresh_demo("verify", id_, "1").exit_code == 0
+    result = fresh_demo(
+        "run", "--use", "rr=realization_rate", "--use", "bc=booked_vs_collected",
+        "--select", BY_REGION, "--json",
+    )  # fmt: skip
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout)["label"] == "built_from_verified_parts"
+
+
 def test_run_input_errors(demo_cli: Invoke):
     assert demo_cli("run", "--use", "realization_rate").exit_code == 2
     assert demo_cli("run", "--use", "rr=realization_rate@x").exit_code == 2

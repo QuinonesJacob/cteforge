@@ -11,6 +11,10 @@ has USAGE on the warehouse/database/schemas and SELECT on the tables, e.g.
 
 Single statement: every execute passes ``num_statements=1`` (MULTI_STATEMENT_COUNT), so
 Snowflake refuses a string holding more than one statement whatever the account default.
+
+Timeout: the profile's ``statement_timeout_s`` is set as the session parameter
+``STATEMENT_TIMEOUT_IN_SECONDS`` at connect time (server-side cancel); a cancelled
+statement (SQLSTATE 57014) raises ``query timed out after Ns``.
 """
 
 from __future__ import annotations
@@ -45,11 +49,17 @@ class SnowflakeWarehouse:
         secrets = resolve_secrets(profile)
         sensitive = sensitive_values(profile, secrets)
         self._max_rows = profile.max_rows
+        kwargs = connect_kwargs(profile, secrets)
+        timeout_s = profile.statement_timeout_s
+        if timeout_s is not None:
+            kwargs["session_parameters"] = {"STATEMENT_TIMEOUT_IN_SECONDS": timeout_s}
         try:
-            con = driver.connect(**connect_kwargs(profile, secrets))
+            con = driver.connect(**kwargs)
         except Exception as exc:
             raise driver_error("Could not connect to Snowflake", exc, sensitive) from None
-        self._session = DbApiSession(con, sensitive, execute_options=EXECUTE_OPTIONS)
+        self._session = DbApiSession(
+            con, sensitive, execute_options=EXECUTE_OPTIONS, timeout_s=timeout_s
+        )
 
     def close(self) -> None:
         self._session.close()

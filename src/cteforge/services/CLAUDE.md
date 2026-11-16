@@ -9,13 +9,16 @@ Support modules (shared by use-cases; not use-cases themselves):
   `CTEFORGE_CONNECTIONS` path to connections.yml, `CTEFORGE_DEFAULT_PROFILE`,
   `CTEFORGE_AUTH` on|off, `CTEFORGE_USER` for stdio/local) and `AppContext` (store, audit
   log, warehouse registry, config). `open_context(config) -> AppContext`; `close()`.
+  `redact_db_url(url)` / `AppConfig.display_db_url`: the URL with its password (and
+  secret-named query parameters) as `***` — the only form ever printed or logged.
 - `connections.py` — warehouse registry: profile name → lazily opened `Warehouse`
   (dispatch on dialect to warehouse/ connectors), each wrapped in `SerializedWarehouse`
   (one call at a time per warehouse: connectors share one driver connection, so concurrent
   execute+fetch would mix result sets; a caller waits at most `BUSY_TIMEOUT_SECONDS` for
   the lock, then gets WarehouseError "busy"; `close()` waits at most
-  `CLOSE_TIMEOUT_SECONDS`); `open_warehouse(path)` kept for the M1 CLI. No per-statement
-  timeout/cancel yet: that needs the connectors (warehouse/, hardened).
+  `CLOSE_TIMEOUT_SECONDS`); `open_warehouse(path)` kept for the M1 CLI. Per-statement
+  timeouts are enforced by the connectors (profile `statement_timeout_s`, default 60 s;
+  warehouse/), not here.
 - `auth.py` — token → User (SHA-256 lookup), `require(user, action)` via trust.approval,
   local-mode user (`local_user`: the stored CTEFORGE_USER as is; created as a human admin
   only while the store has no users and `create=True` (CLI, auth-off HTTP), never for
@@ -46,20 +49,26 @@ Support modules (shared by use-cases; not use-cases themselves):
   DRAFT proposal; refreshes the join map), diff/impact `view`, `validation_detail`. DRAFT
   definition proposals are never auto-applied. Join proposals are checked on the default
   profile (`join_checks`: tables and key columns exist) and carry `payload.base_join`
-  (stale → StaleVersionError). Decisions are serialized in-process (`DECISIONS`, the stored
+  (stale → StaleVersionError). `ensure_read_only` (called first by `checked_definition`)
+  refuses definition SQL that is not one read-only SELECT/UNION (compose.checks.
+  ensure_query) with PolicyError + a `not_read_only` issue, before any check runs.
+  Decisions are serialized in-process (`DECISIONS`, the stored
   proposal is re-read and must be pending); separate processes are not covered.
 - `import_query.py` — the checks engine for a trusted query + annotations (DESIGN §7:
   same query back, types, EXPLAIN, result comparison): `import_query`, `fetch_schema`,
   `analyze_query`; plus the M1 file-based `import_files` / `analyze_file` used by the CLI.
   Runtime (not EXPLAIN) failures of check runs keep only the error class: driver messages
-  can quote data values and proposal issues are readable by any viewer.
+  can quote data values and proposal issues are readable by any viewer. SQL in another
+  dialect than the warehouse's is checked transpiled to it (`dialect_mismatch` warning;
+  ADR 0013 addendum).
   Support module: parse_query, propose, revalidate and library_io build on it.
 - `render_definition.py` — M1 file-based render/run (CLI). No ctx/user (pre-M3 path).
 Use-cases (one file each; a use-case never imports another use-case — share via support
 modules or the core):
 - `search.py` — `search(ctx, user, query, *, limit=10, include_drafts=False, question=None) -> list[SearchHit]` (DESIGN §19, ADR 0017).
-- `describe.py` — `get_definition(ctx, user, id, version=None) -> DefinitionCard` (with
-  history); `definition_history(ctx, user, id) -> list[DefinitionVersionInfo]`.
+- `describe.py` — `get_definition(ctx, user, id, version=None, *, include_source=False)
+  -> DefinitionCard` (with history; `include_source` adds `source_sql` and `annotations`
+  for the GUI's revise flow); `definition_history(ctx, user, id) -> list[DefinitionVersionInfo]`.
 - `parse_query.py` — `parse_query(ctx, user, sql, dialect, profile=None) -> ParseReport`.
 - `propose.py` — `propose_definition(ctx, user, *, sql, dialect, metadata, annotations,
   profile=None, summary="")`, `revise_definition(ctx, user, *, id, base_version, sql=None,
@@ -67,7 +76,9 @@ modules or the core):
   Stale base → raises StaleVersionError with the `stale_base_version` Issue on `.issues`.
 - `propose_other.py` — `propose_join(ctx, user, *, left_table, right_table, keys,
   join_type="inner", relationship=None, traps=(), summary="")`,
-  `propose_recipe(ctx, user, *, recipe, summary="")` → ProposalOutcome.
+  `propose_recipe(ctx, user, *, recipe, summary="")` → ProposalOutcome. `RecipeInput` is
+  the caller's recipe (MCP/API schema); a mapping setting `version`, `state` or
+  `schema_version` raises CodecError (cteforge sets them on apply).
 - `review.py` — `list_proposals(ctx, user, status=None)`, `get_proposal(ctx, user, id)` →
   ProposalView (diff + impact); `approve(ctx, user, id, *, verify=False, comment="")` →
   ProposalOutcome; `reject(ctx, user, id, comment)`, `withdraw(ctx, user, id)` →
@@ -77,6 +88,10 @@ modules or the core):
   select=None, dialect=None, profile=None, run=True, limit=100, question=None)`,
   `check_and_run(ctx, user, sql, *, profile=None, run=True, limit=100, question=None)` →
   RunOutcome (render → compose → trust → explain → run → audit; SQL tagged per ADR 0008).
+  A `dialect` other than the profile's is compile-only (`run=False`; no EXPLAIN,
+  `checks_incomplete`); with `run=True` it is a PolicyError (DESIGN §12).
+  check_and_run adds a `matches_definition` info issue when the SQL is AST-equal to a
+  usable definition's original query (use compile_and_run with that id instead).
 - `catalog.py` — discovery: `list_recipes(ctx, user, *, query="", include_drafts=False)`
   → list[Recipe]; `list_joins(ctx, user, *, table=None, include_drafts=False)` →
   list[JoinEdge]; `describe_tables(ctx, user, tables=None, *, profile=None)` →

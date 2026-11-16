@@ -13,17 +13,24 @@ React 18 + TypeScript (strict) + Vite GUI (ADR 0019). Talks only to the HTTP API
   `endpoints.ts` (one function per route).
 - `src/lib/` — pure, framework-free logic (no React, no fetch, no DOM) so it is unit-testable:
   variable form values ↔ JSON, import variable-building rules (type suggestion, ADR 0015
-  description rule), diff line classification, trust/state badge mapping, display-only SQL
-  tokenizer, formatting helpers, role checks.
+  description rule), revise helpers (`revise.ts`: card → drafts/metadata, changed keys
+  only), composition/recipe run requests (`variableForm.ts`), diff line classification,
+  trust/state badge mapping, display-only SQL tokenizer, formatting helpers, role checks.
 - `src/state/` — React context providers and hooks (auth, toasts, theme, async loading).
-- `src/pages/` — one file per route: SignIn, Library, Definition, Import, Review (list +
-  detail), Audit, Settings, NotFound.
+- `src/pages/` — one file per route: SignIn, Library, Definition (Overview, Run, History,
+  Edit), Import (also revise mode: `/import?revise=<id>`), Explore (Recipes, Compose, Join
+  map, Tables, SQL), Review (list + detail), Audit, Settings, NotFound.
 - `src/components/` — shared UI pieces, one component per file (SQL viewer, variable form,
   issue list, trust badge, diff viewer, literal table, …).
 - `src/styles/` — plain CSS: `tokens.css` (light/dark custom properties), `base.css`,
   `components.css`, `pages.css`.
 - `src/test/` — vitest setup and test helpers (`fetchMock.ts`). Tests sit next to the code
   as `*.test.ts(x)`.
+- `playwright.config.ts` and `e2e/` — real-browser end-to-end tests (Playwright on the
+  installed Google Chrome): `global-setup.ts` (build, `cteforge demo`, `cteforge serve`,
+  second approver; returns the teardown), `helpers.ts` (fixtures, sign-in, API calls,
+  screenshots), `NN-<area>.spec.ts` (run in file order; they share one server's state).
+  `e2e/screenshots/`, `test-results/` are output (gitignored).
 
 If something does not clearly fit one of the above, it does not belong here.
 "Not forbidden" is not the same as "allowed."
@@ -43,7 +50,9 @@ If something does not clearly fit one of the above, it does not belong here.
 - No component libraries. Keep files small: one component per file.
 - Dependencies: react, react-dom, react-router-dom, vite, typescript, @vitejs/plugin-react,
   vitest. Test-only: jsdom, @testing-library/react, @testing-library/jest-dom,
-  @testing-library/user-event (DOM tests), @types/* (typings). Exact versions pinned.
+  @testing-library/user-event (DOM tests), @types/* (typings), @playwright/test (e2e/ only:
+  drives the real GUI in Chrome against a real `cteforge serve`; browsers are never
+  downloaded, `channel: "chrome"` uses the installed Google Chrome). Exact versions pinned.
   Nothing else without a reason in this file.
 
 ## Contract notes (from services/cards.py)
@@ -55,6 +64,17 @@ If something does not clearly fit one of the above, it does not belong here.
 - `/run` also takes `profile` and `question`; `GET /definitions` takes `limit` (the GUI sends
   100; the API default is 10). `RunOutcome.used` lists each definition version with its
   state and verifier + date; the run result shows it.
+- Revise: `GET /definitions/{id}?include_source=true` adds `source_sql` (template rendered
+  with its original values) and `annotations` (literal IDs addressing that SQL). The Edit
+  tab sends `POST /proposals/definitions/{id}/revise {base_version, metadata: <changed keys
+  only>, summary}`; revise mode in Import sends `{base_version, sql, dialect, metadata
+  (changed keys, + profile if changed), annotations, summary}`.
+- Explore: `GET /recipes?q=&include_drafts=`, `GET /joins?table=&include_drafts=`,
+  `GET /tables?name=&name=&profile=` (array query values repeat the key), `POST /check
+  {sql, profile?, run, limit}`, `POST /run {recipe_id, values: {}, run, limit, profile?}`,
+  compose `POST /run {uses: {<alias>: {id, version?}}, values, select?, ...}`,
+  `POST /proposals/recipes {recipe: {id, title, description, uses, values, select?, dialect},
+  summary}`. Recipe/join proposals carry `payload.recipe` / `payload.join`.
 - The GUI's request bodies and the fields it reads are pinned by
   `tests/e2e/test_gui_contract.py` against the real API: change both together.
 - Parse report: `literals[].id` is `<scope>.L<n>` and `grains[].id` is `<scope>.G<n>`; both are
@@ -68,6 +88,10 @@ If something does not clearly fit one of the above, it does not belong here.
   GET /proposals builds diffs and writes an audit event per call: the Review page only.
 - Verify is offered only on the latest version of an `llm_annotated` definition; approval is
   disabled while checks have errors; "also verify" is disabled on `checks_incomplete`.
+- Four-eyes (ADR 0018 addendum; `lib/roles.ts` `isOwnWork`, `versionAuthors` mirror
+  trust/approval.py and services/review.py): the author of a proposal is not offered
+  Approve (only Reject/Withdraw), and Verify is hidden from anyone who wrote any part of
+  the version, unless they are a human admin. The server still enforces it (403).
 
 ## Commands (run in web/)
 - `npm install` — install
@@ -75,6 +99,18 @@ If something does not clearly fit one of the above, it does not belong here.
 - `npm run typecheck` — `tsc -b`
 - `npm test` — vitest (jsdom)
 - `npm run build` — typecheck + build to `web/dist`
+- `npm run e2e` — Playwright end-to-end suite in the installed Google Chrome (needs `uv`
+  and Chrome at /Applications/Google Chrome.app or the platform default; never run
+  `playwright install`). globalSetup runs `npm run build`, `cteforge demo <tmp>` (captures
+  the printed admin/agent tokens), starts `cteforge serve --port <free>` with the demo's
+  env.sh values and `CTEFORGE_AUTH=on`, waits for `GET /api/v1/me` → 401, and creates the
+  human approver `ben`; teardown stops the server (SIGINT) and deletes the temp dir
+  (`E2E_KEEP_TMP=1` keeps it, with `serve.log`). Specs: sign-in, library search, run form
+  (+ validation), import → auto-apply → run, strict mode + review + four-eyes, audit
+  filters, theme toggle and 375px layout, Edit-tab and SQL revisions, Explore (compose →
+  save recipe → run recipe, join map, tables, exploratory SQL). Screenshots of each page land in
+  `e2e/screenshots/`. One spec: `npx playwright test 04`; debug: `--headed` or
+  `npx playwright show-trace test-results/<test>/trace.zip` (kept on failure).
 
 ## Common misplacements
 - Any SQL logic — the backend owns it; the GUI calls the API.

@@ -41,7 +41,14 @@ _SECRET_KEY = re.compile(
 _URL_WITH_PASSWORD = re.compile(r"[a-z][a-z0-9+.-]*://[^/\s@]*:[^/\s@]*@", re.IGNORECASE)
 _ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _PROFILE_NAME = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.-]*")
-_PROFILE_KEYS = {"dialect", "options", "secrets_env", "max_rows", "maximum_bytes_billed"}
+_PROFILE_KEYS = {
+    "dialect",
+    "options",
+    "secrets_env",
+    "max_rows",
+    "maximum_bytes_billed",
+    "statement_timeout_s",
+}
 _USE_SECRETS_ENV = (
     "put secrets in environment variables and reference them by name in secrets_env, "
     "e.g. secrets_env: {password: PG_PASSWORD}"

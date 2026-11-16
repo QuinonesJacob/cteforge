@@ -14,6 +14,12 @@ yet validated against a live warehouse). Services refuse non-SELECT SQL before `
 
 Column types come from the driver metadata API (``cursor.columns``), not from SQL text.
 EXPLAIN reports planning errors as plan text instead of raising, so it is inspected.
+
+Timeout: the profile's ``statement_timeout_s`` is passed as the session configuration
+``STATEMENT_TIMEOUT`` (seconds; a Databricks SQL configuration parameter), so the
+warehouse cancels longer statements. Not yet validated against a live warehouse: how the
+driver reports that cancel is unverified; errors it marks as a timeout (``is_timeout``)
+raise ``query timed out after Ns``, anything else the scrubbed driver message.
 """
 
 from __future__ import annotations
@@ -47,11 +53,15 @@ class DatabricksWarehouse:
         secrets = resolve_secrets(profile)
         sensitive = sensitive_values(profile, secrets)
         self._max_rows = profile.max_rows
+        kwargs = connect_kwargs(profile, secrets)
+        timeout_s = profile.statement_timeout_s
+        if timeout_s is not None:
+            kwargs["session_configuration"] = {"STATEMENT_TIMEOUT": str(timeout_s)}
         try:
-            con = driver.connect(**connect_kwargs(profile, secrets))
+            con = driver.connect(**kwargs)
         except Exception as exc:
             raise driver_error("Could not connect to Databricks", exc, sensitive) from None
-        self._session = DbApiSession(con, sensitive)
+        self._session = DbApiSession(con, sensitive, timeout_s=timeout_s)
 
     def close(self) -> None:
         self._session.close()

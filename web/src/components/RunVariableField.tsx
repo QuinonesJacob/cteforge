@@ -10,11 +10,13 @@ interface Props {
   overridden: boolean;
   onOverride: (on: boolean) => void;
   error?: string;
+  /** Prefix of the input id; distinct per definition when several share one form. */
+  idPrefix?: string;
 }
 
 /** One variable in the run form. Fixed variables are read-only unless explicitly overridden. */
-export function RunVariableField({ card, value, onChange, overridden, onOverride, error }: Props) {
-  const id = `var-${card.name}`;
+export function RunVariableField({ card, value, onChange, overridden, onOverride, error, idPrefix = "var" }: Props) {
+  const id = `${idPrefix}-${card.name}`;
   const fixed = card.role === "fixed";
   const locked = fixed && !overridden;
   const serialized = serializeValue(value);

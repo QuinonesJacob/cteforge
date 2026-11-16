@@ -101,6 +101,19 @@ def test_credentials_file_path_option_is_allowed() -> None:
     assert profile.options["credentials_file"] == "/k.json"
 
 
+def test_statement_timeout_is_read_and_defaults_to_60() -> None:
+    text = (
+        "profiles:\n"
+        "  slow: {dialect: duckdb, options: {path: /x.duckdb}, statement_timeout_s: 300}\n"
+        "  plain: {dialect: duckdb, options: {path: /y.duckdb}}\n"
+        "  unlimited: {dialect: duckdb, options: {path: /z.duckdb}, statement_timeout_s: null}\n"
+    )
+    slow, plain, unlimited = profiles_from_yaml(text)
+    assert slow.statement_timeout_s == 300
+    assert plain.statement_timeout_s == 60
+    assert unlimited.statement_timeout_s is None
+
+
 def test_url_with_embedded_password_is_refused() -> None:
     text = (
         "profiles:\n  pg:\n    dialect: postgres\n    options: {host: 'postgres://u:s3cr3t@db/x'}\n"

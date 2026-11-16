@@ -7,7 +7,7 @@
   checks hold an error cannot be approved (PolicyError): revise it instead. The base version
   is re-checked: a target that moved on raises StaleVersionError (stale_base_version issue
   on `.issues`) and the proposal stays pending.
-- Four-eyes rule (ADR 0018 addendum): nobody but an admin may approve their own proposal
+- Four-eyes rule (ADR 0018 addendum): nobody but a human admin may approve their own proposal
   (`can_approve(..., author=proposal.author)`) or verify a definition version they
   authored any part of (`can_verify(..., author=...)` for each of `_version_authors`:
   the author of the newest logic-changing version up to it and of every metadata-only
@@ -97,7 +97,8 @@ def _require_decide(user: User, proposal: Proposal, target: _Target) -> None:
 
 
 def _require_not_own_proposal(user: User, proposal: Proposal, target: _Target) -> None:
-    """Four-eyes rule (ADR 0018 addendum): only an admin may approve their own proposal."""
+    """Four-eyes rule (ADR 0018 addendum): only a human admin may approve their own
+    proposal; an agent admin never may."""
     if not can_approve(user, target.definition, author=proposal.author):
         raise PermissionDeniedError(
             f"User '{user.name}' authored proposal '{proposal.id}' and may not approve it "
@@ -106,7 +107,7 @@ def _require_not_own_proposal(user: User, proposal: Proposal, target: _Target) -
 
 
 def _require_not_own_version(user: User, authors: Iterable[str | None], what: str) -> None:
-    """Four-eyes rule (ADR 0018 addendum): only an admin may verify a version they wrote
+    """Four-eyes rule (ADR 0018 addendum): only a human admin may verify a version they wrote
     any part of (see `_version_authors`)."""
     for author in authors:
         if not can_verify(user, None, author=author):

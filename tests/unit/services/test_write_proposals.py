@@ -28,6 +28,7 @@ from cteforge.domain.users import ActorKind, User, UserRole
 from cteforge.services import review
 from cteforge.services.context import AppConfig, AppContext, open_context, set_team_mode
 from cteforge.services.propose import propose_definition, revise_definition
+from cteforge.services.run import compile_and_run
 
 EXAMPLES = Path(__file__).resolve().parents[3] / "examples"
 FIXED = dt.datetime(2026, 11, 16, 9, 30, tzinfo=dt.UTC)
@@ -102,6 +103,21 @@ def test_open_mode_auto_applies_as_llm_annotated(ctx: AppContext) -> None:
     event = ctx.audit.list_events(kind=AuditKind.PROPOSE)[0]
     assert event.actor == "alice" and event.definitions == ["realization_rate@1"]
     assert event.extra["auto_applied"] is True
+
+
+def test_sql_in_another_dialect_is_checked_transpiled_and_runs_labeled(ctx: AppContext) -> None:
+    # DESIGN §12 / ADR 0013: Postgres SQL against the DuckDB profile is checked on the
+    # transpiled SQL (dialect_mismatch warning), not left as an unapprovable error.
+    out = propose_definition(
+        ctx, ALICE, sql=SQL, dialect="postgres", metadata=_meta(), annotations=_annotations()
+    )
+    assert [i.code for i in out.issues] == [IssueCode.DIALECT_MISMATCH]
+    assert out.auto_applied
+    stored = ctx.store.get_definition("realization_rate")
+    assert stored is not None and stored.source_dialect is Dialect.POSTGRES
+    run = compile_and_run(ctx, ALICE, uses={"rr": {"id": "realization_rate"}})
+    assert run.ran and run.dialect is Dialect.DUCKDB
+    assert IssueCode.TRANSPILED in {i.code for i in run.issues}
 
 
 def test_strict_mode_keeps_it_pending(ctx: AppContext) -> None:
@@ -589,6 +605,21 @@ def test_admin_may_approve_and_verify_own_work(ctx: AppContext) -> None:
     assert out.definition.state is DefinitionState.VERIFIED and out.definition.verified_by == "root"
 
 
+def test_agent_admin_may_not_approve_or_verify_own_work(ctx: AppContext) -> None:
+    """Regression (ADR 0018 addendum): the admin exemption is for human admins only."""
+    agent_admin = User(name="botadmin", role=UserRole.ADMIN, kind=ActorKind.AGENT)
+    _strict(ctx)
+    own = _propose(ctx, agent_admin)
+    with pytest.raises(PermissionDeniedError, match="four-eyes"):
+        review.approve(ctx, agent_admin, own.proposal.id)
+    with pytest.raises(PermissionDeniedError):
+        review.approve(ctx, agent_admin, own.proposal.id, verify=True)
+    assert ctx.store.get_proposal(own.proposal.id).status is ProposalStatus.PENDING
+    review.approve(ctx, BO, own.proposal.id)
+    with pytest.raises(PermissionDeniedError):
+        review.verify_definition(ctx, agent_admin, "realization_rate", 1)
+
+
 def test_cannot_verify_a_version_you_authored(ctx: AppContext) -> None:
     _strict(ctx)
     own = _propose(ctx, APPROVER)  # version 1 will be authored by ann
@@ -790,3 +821,46 @@ def test_compile_errors_in_proposal_checks_keep_their_message(ctx: AppContext) -
     )
     messages = " ".join(i.message for i in out.issues)
     assert "no_such_column" in messages  # schema facts help fix the SQL
+
+
+# ── read-only SQL only ────────────────────────────────────────────────────────────────
+
+
+def _no_checks(*args: Any, **kwargs: Any) -> Any:
+    raise AssertionError("checks ran for non-read-only SQL")
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "DELETE FROM sales WHERE region = 'APAC'",
+        "WITH gone AS (DELETE FROM sales RETURNING *) SELECT * FROM gone",
+        "SELECT * INTO copy_of_sales FROM sales",
+    ],
+)
+def test_propose_refuses_non_read_only_sql_before_checks(
+    ctx: AppContext, monkeypatch: pytest.MonkeyPatch, sql: str
+) -> None:
+    from cteforge.services import _apply
+
+    monkeypatch.setattr(_apply, "import_query", _no_checks)
+    with pytest.raises(PolicyError) as info:
+        propose_definition(ctx, ALICE, sql=sql, dialect="duckdb", metadata=_meta(), annotations=[])
+    assert [i.code for i in info.value.issues] == [IssueCode.NOT_READ_ONLY]
+    assert ctx.store.list_proposals() == []
+    assert ctx.audit.list_events(kind=AuditKind.PROPOSE)[0].outcome is AuditOutcome.REJECTED
+
+
+def test_revise_refuses_non_read_only_sql(ctx: AppContext) -> None:
+    _propose(ctx)
+    with pytest.raises(PolicyError) as info:
+        revise_definition(
+            ctx,
+            ALICE,
+            id="realization_rate",
+            base_version=1,
+            sql="UPDATE sales SET amount = 0",
+            annotations=[],
+        )
+    assert [i.code for i in info.value.issues] == [IssueCode.NOT_READ_ONLY]
+    assert ctx.store.latest_version("realization_rate") == 1

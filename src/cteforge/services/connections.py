@@ -66,8 +66,9 @@ class SerializedWarehouse:
     raises WarehouseError ("busy") instead of queueing behind a long query, so one slow
     query cannot pile up every other caller's worker thread. `close()` waits at most
     `close_timeout` seconds; when a call still holds the connection it is left open (the
-    process is shutting down) rather than hanging. The query that holds the lock is NOT
-    cancelled here: a per-statement timeout needs the connector (warehouse/, hardened).
+    process is shutting down) rather than hanging. The query that holds the lock is not
+    cancelled here: each connector enforces the profile's `statement_timeout_s` itself
+    (warehouse/), which bounds how long the lock is held where the driver supports it.
     """
 
     def __init__(

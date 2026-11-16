@@ -18,6 +18,7 @@ from cteforge.services.context import (
     AppConfig,
     AuthMode,
     open_context,
+    redact_db_url,
     set_team_mode,
     team_mode,
 )
@@ -153,3 +154,26 @@ def test_team_mode_default_set_and_fail_safe() -> None:
         assert team_mode(ctx) is TeamMode.OPEN
         ctx.store.set_setting(MODE_SETTING, "garbage")
         assert team_mode(ctx) is TeamMode.STRICT
+
+
+@pytest.mark.parametrize(
+    ("url", "shown"),
+    [
+        (
+            "postgresql+psycopg://user:hunter2@host/db",
+            "postgresql+psycopg://user:***@host/db",
+        ),
+        ("postgresql://u:p%40ss@db.example:5432/lib", "postgresql://u:***@db.example:5432/lib"),
+        ("postgresql://u:pa/ss@h/db", "postgresql://u:***@h/db"),  # unencoded '/'
+        (
+            "postgresql://h/db?password=hunter2&sslmode=require",
+            "postgresql://h/db?password=***&sslmode=require",
+        ),
+        ("postgresql://u@h/db", "postgresql://u@h/db"),
+        ("sqlite:///cteforge.db", "sqlite:///cteforge.db"),
+        ("sqlite://", "sqlite://"),
+    ],
+)
+def test_redact_db_url(url: str, shown: str) -> None:
+    assert redact_db_url(url) == shown
+    assert AppConfig(db_url=url).display_db_url == shown

@@ -19,7 +19,9 @@ export class ApiError extends Error {
   }
 }
 
-type Query = Record<string, string | number | boolean | null | undefined>;
+type QueryValue = string | number | boolean | null | undefined;
+/** An array repeats the key (`?name=a&name=b`); empty values are dropped. */
+type Query = Record<string, QueryValue | QueryValue[]>;
 
 export interface RequestOptions {
   query?: Query;
@@ -40,9 +42,11 @@ export function onUnauthorized(handler: (() => void) | null): void {
 
 export function buildUrl(path: string, query?: Query): string {
   const params = new URLSearchParams();
-  for (const [key, value] of Object.entries(query ?? {})) {
-    if (value === undefined || value === null || value === "") continue;
-    params.set(key, String(value));
+  for (const [key, raw] of Object.entries(query ?? {})) {
+    for (const value of Array.isArray(raw) ? raw : [raw]) {
+      if (value === undefined || value === null || value === "") continue;
+      params.append(key, String(value));
+    }
   }
   const qs = params.toString();
   return `${API_BASE}${path}${qs ? `?${qs}` : ""}`;

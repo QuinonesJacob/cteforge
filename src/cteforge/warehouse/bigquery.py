@@ -12,6 +12,11 @@ and ``roles/bigquery.jobUser`` on the project.
 Every job sets ``maximum_bytes_billed``: the profile's value, else
 DEFAULT_MAXIMUM_BYTES_BILLED (10 GiB). ``explain`` is a dry run (no cache, nothing billed).
 Column types come from ``client.get_table(...).schema``, not from SQL text.
+
+Timeout: with the profile's ``statement_timeout_s``, every query job sets
+``job_timeout_ms`` (server-side cancel, where the installed client supports it) and
+``run`` waits at most that long in ``job.result(timeout=...)``; on timeout the job is
+cancelled (best effort) and ``query timed out after Ns`` is raised.
 """
 
 from __future__ import annotations
@@ -26,10 +31,12 @@ from cteforge.warehouse.base import (
     QueryResult,
     driver_error,
     effective_limit,
+    is_timeout,
     load_driver,
     resolve_secrets,
     sensitive_values,
     split_table,
+    timeout_error,
 )
 
 DEFAULT_MAXIMUM_BYTES_BILLED = 10 * 1024**3  # 10 GiB when the profile sets none.
@@ -45,6 +52,7 @@ class BigQueryWarehouse:
         self._sensitive = sensitive_values(profile, secrets)
         self._max_rows = profile.max_rows
         self._max_bytes = profile.maximum_bytes_billed or DEFAULT_MAXIMUM_BYTES_BILLED
+        self._timeout_s = profile.statement_timeout_s
         dataset = profile.options.get("dataset")
         self._dataset = dataset if isinstance(dataset, str) and dataset else None
         try:
@@ -91,17 +99,23 @@ class BigQueryWarehouse:
 
     def run(self, sql: str, limit: int) -> QueryResult:
         limit = effective_limit(limit, self._max_rows)
+        job = None
         try:
             job = self._client.query(sql, job_config=self._job_config())
-            iterator = job.result(max_results=limit + 1)
+            iterator = job.result(max_results=limit + 1, timeout=self._timeout_s)
             rows = [tuple(row.values()) for row in iterator]
             columns = [field.name for field in iterator.schema or []]
         except Exception as exc:
+            if self._timeout_s is not None and is_timeout(exc):
+                _cancel(job)
+                raise timeout_error(self._timeout_s) from None
             raise self._error("Query failed", exc) from None
         return QueryResult(columns=columns, rows=rows[:limit], truncated=len(rows) > limit)
 
     def _job_config(self, **kwargs: Any) -> Any:
         config = self._bq.QueryJobConfig(maximum_bytes_billed=self._max_bytes, **kwargs)
+        if self._timeout_s is not None and hasattr(self._bq.QueryJobConfig, "job_timeout_ms"):
+            config.job_timeout_ms = self._timeout_s * 1000
         if self._dataset is not None:
             qualified = "." in self._dataset
             config.default_dataset = (
@@ -123,6 +137,16 @@ class BigQueryWarehouse:
 
     def _error(self, context: str, exc: BaseException) -> WarehouseError:
         return driver_error(context, exc, self._sensitive)
+
+
+def _cancel(job: Any) -> None:
+    """Best-effort cancel of a job that outlived its timeout (it keeps running otherwise)."""
+    if job is None:
+        return
+    try:
+        job.cancel()
+    except Exception:  # noqa: S110 - the timeout error is what the caller needs
+        pass
 
 
 def _field_type(field: Any) -> str:

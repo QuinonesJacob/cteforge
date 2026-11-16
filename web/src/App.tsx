@@ -4,6 +4,7 @@ import { Loading } from "./components/Loading";
 import { ToastViewport } from "./components/ToastViewport";
 import { AuditPage } from "./pages/AuditPage";
 import { DefinitionPage } from "./pages/DefinitionPage";
+import { ExplorePage } from "./pages/ExplorePage";
 import { ImportPage } from "./pages/ImportPage";
 import { LibraryPage } from "./pages/LibraryPage";
 import { NotFoundPage } from "./pages/NotFoundPage";
@@ -33,6 +34,7 @@ export function App() {
       <Routes>
         <Route path="/" element={<LibraryPage />} />
         <Route path="/definitions/:id" element={<DefinitionPage />} />
+        <Route path="/explore" element={<ExplorePage />} />
         <Route path="/import" element={<ImportPage />} />
         <Route path="/review" element={<ReviewPage />} />
         <Route path="/review/:id" element={<ProposalPage />} />

@@ -132,6 +132,21 @@ async def test_lists_the_tools_with_sane_schemas(ctx: AppContext) -> None:
     assert by_name["parse_query"].inputSchema["required"] == ["sql", "dialect"]
     propose = by_name["propose_definition"].inputSchema
     assert {"sql", "dialect", "metadata", "annotations"} <= set(propose["required"])
+    recipe_tool = by_name["propose_recipe"].inputSchema
+    ref = recipe_tool["properties"]["recipe"].get("$ref") or json.dumps(
+        recipe_tool["properties"]["recipe"]
+    )
+    recipe_schema = recipe_tool["$defs"][ref.rsplit("/", 1)[-1]]
+    assert set(recipe_schema["properties"]) == {
+        "id",
+        "title",
+        "description",
+        "uses",
+        "values",
+        "select",
+        "dialect",
+    }  # version, state and schema_version are set by cteforge, not by the caller
+    assert recipe_schema["additionalProperties"] is False
     assert by_name["search"].annotations.readOnlyHint is True
     assert by_name["propose_definition"].annotations.readOnlyHint is False
 

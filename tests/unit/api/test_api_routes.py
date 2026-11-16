@@ -260,6 +260,10 @@ def test_propose_recipe(rr, check_error) -> None:
     assert response.json()["proposal"]["kind"] == "new_recipe"
     assert response.json()["issues"] == []
     check_error(rr.post("/proposals/recipes", "bot", {"recipe": {"id": "x"}}), 422, "CodecError")
+    for reserved in ({"state": "verified"}, {"version": 9}, {"schema_version": 2}):
+        refused = rr.post("/proposals/recipes", "bot", {"recipe": recipe | reserved})
+        check_error(refused, 422, "CodecError")
+        assert "cannot be set by a proposal" in refused.json()["error"]["message"]
 
 
 def test_list_get_and_count_proposals(rr, check_error) -> None:
@@ -416,4 +420,8 @@ def test_recipes_joins_and_tables(rr, check_error) -> None:
     tables = rr.get("/tables", "vic", params=[("name", "deals"), ("name", "nope")]).json()
     assert [(t["name"], t["found"]) for t in tables] == [("deals", True), ("nope", False)]
     assert "closed_at" in {c["name"] for c in tables[0]["columns"]}
-    check_error(rr.client.get("/api/v1/joins"), 401, "Unauthorized")
+    for path in ("/api/v1/recipes", "/api/v1/joins", "/api/v1/tables"):
+        check_error(rr.client.get(path), 401, "Unauthorized")
+    # Drafts are listed only on request, as in search and the MCP tools.
+    drafts = rr.get("/recipes", "vic", params={"include_drafts": "true"}).json()
+    assert {r["id"] for r in recipes} <= {r["id"] for r in drafts}

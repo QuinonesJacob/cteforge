@@ -1,9 +1,10 @@
 """Use-case: parse a trusted query for annotation (DESIGN §6 "parse_query").
 
 Reports literals with IDs, structure, range/grain suggestions and joins. Column types come
-from the warehouse of `profile` (or the default profile) when its dialect is the SQL's
-dialect; otherwise there are no types and an issue says why:
-- profile dialect differs → `dialect_mismatch` (warning), nothing is read from it;
+from the warehouse of `profile` (or the default profile); otherwise there are no types and
+an issue says why:
+- profile dialect differs → `dialect_mismatch` (warning): types are still read from it, and
+  the proposal's checks will run transpiled to its dialect (import_query, ADR 0013);
 - no profile configured → `checks_incomplete` (warning);
 - the schema lookup fails → `checks_incomplete` (warning; error class only, no driver text);
 - a table the warehouse does not know → `type_unknown` (warning).
@@ -56,18 +57,17 @@ def _schema(
             ],
         )
     summary = ctx.warehouses.summary(name)
+    mismatch: list[Issue] = []
     if summary.dialect is not dialect:
-        return (
-            {},
-            name,
-            [
-                _issue(
-                    IssueCode.DIALECT_MISMATCH,
-                    f"The SQL is {dialect} but profile '{name}' is {summary.dialect}; "
-                    "column types were not read. Use a profile of the same dialect.",
-                )
-            ],
-        )
+        mismatch = [
+            _issue(
+                IssueCode.DIALECT_MISMATCH,
+                f"The SQL is {dialect} but profile '{name}' is {summary.dialect}: column "
+                "types were read from it, and the proposal's checks will run on the SQL "
+                f"transpiled to {summary.dialect} (labeled, lower trust; ADR 0013). Use a "
+                "profile of the same dialect for native checks.",
+            )
+        ]
     try:
         schema = fetch_schema(sql, dialect, ctx.warehouses.get(name))
     except WarehouseError as exc:
@@ -75,14 +75,15 @@ def _schema(
             {},
             name,
             [
+                *mismatch,
                 _issue(
                     IssueCode.CHECKS_INCOMPLETE,
                     f"Could not read column types from profile '{name}' "
                     f"({type(exc).__name__}); literals are reported without types.",
-                )
+                ),
             ],
         )
-    issues = [
+    issues = mismatch + [
         _issue(
             IssueCode.TYPE_UNKNOWN,
             f"Table '{table}' was not found in profile '{name}'; its column types are unknown.",

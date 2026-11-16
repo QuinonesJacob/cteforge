@@ -75,6 +75,22 @@ DEFINITION_CARD = {
     "template",
     "history",
 }
+# Only with ?include_source=true (the revise flow): DefinitionCard.source_sql / annotations.
+SOURCE = {"source_sql", "annotations"}
+ANNOTATION = {"name", "type", "role", "literals", "column", "description", "allowed", "format"}
+RECIPE = {"id", "version", "title", "description", "uses", "values", "select", "dialect", "state"}
+JOIN_EDGE = {
+    "id",
+    "left_table",
+    "right_table",
+    "keys",
+    "join_type",
+    "relationship",
+    "usage_count",
+    "traps",
+    "state",
+}
+TABLE_CARD = {"name", "found", "columns", "used_by", "joins", "units"}
 LITERAL = {
     "id",
     "scope",
@@ -395,6 +411,197 @@ def test_import_library_definition_and_run(gui: Gui, example) -> None:
     error = fields(bad["error"], {"type", "message", "issues"}, "ApiError body")
     assert error["type"] == "VariableValueError"
     each(error["issues"], {"code", "severity", "message"}, "Issue")
+
+
+def test_revise_from_the_definition_page(gui: Gui, example) -> None:
+    sql, ann = example("realization_rate")
+    gui.call(
+        "POST", "/proposals/definitions", "alice", body=gui_proposal(sql, ann, "alice", "demo")
+    )
+
+    # Edit tab (DefinitionEditPanel): only the changed metadata keys, no SQL.
+    edited = fields(
+        gui.call(
+            "POST",
+            "/proposals/definitions/realization_rate/revise",
+            "alice",
+            body={
+                "base_version": 1,
+                "metadata": {"use_when": "cash questions", "keywords": ["rr", "cash"]},
+                "summary": "Edit use_when, keywords of realization_rate",
+            },
+        ),
+        PROPOSAL_OUTCOME,
+        "ProposalOutcome",
+    )
+    assert edited["auto_applied"] is True
+    card = fields(edited["definition"], DEFINITION_CARD, "DefinitionCard")
+    assert card["version"] == 2 and card["use_when"] == "cash questions"
+
+    # Import page in revise mode: GET /definitions/{id}?include_source=true …
+    source = fields(
+        gui.call("GET", "/definitions/realization_rate", "alice", query={"include_source": True}),
+        DEFINITION_CARD | SOURCE,
+        "DefinitionCard (include_source)",
+    )
+    annotations = each(source["annotations"], ANNOTATION, "Annotation")
+    assert {a["name"] for a in annotations} == {v["name"] for v in source["variables"]}
+    assert gui.call("GET", "/definitions/realization_rate", "alice")["source_sql"] is None
+    # … parse the rebuilt SQL (the stored literal IDs must exist in it) …
+    report = gui.call(
+        "POST",
+        "/parse",
+        "alice",
+        body={"sql": source["source_sql"], "dialect": "duckdb", "profile": "demo"},
+    )
+    ids = {lit["id"] for lit in report["literals"]} | {g["id"] for g in report["grains"] or []}
+    assert all(set(a["literals"]) <= ids for a in annotations)
+    # … and POST the revision with SQL, dialect, changed metadata and the annotations.
+    revised = fields(
+        gui.call(
+            "POST",
+            "/proposals/definitions/realization_rate/revise",
+            "alice",
+            body={
+                "base_version": 2,
+                "sql": source["source_sql"],
+                "dialect": "duckdb",
+                "metadata": {},
+                "annotations": [gui_annotation(a) for a in annotations],
+                "summary": "Revise realization_rate (SQL and variables)",
+            },
+        ),
+        PROPOSAL_OUTCOME,
+        "ProposalOutcome",
+    )
+    assert revised["issues"] == [] and revised["definition"]["version"] == 3
+    # A stale base version comes back as a structured 409 the page shows.
+    stale = gui.call(
+        "POST",
+        "/proposals/definitions/realization_rate/revise",
+        "alice",
+        body={"base_version": 1, "metadata": {"title": "x"}, "summary": ""},
+        status=409,
+    )
+    assert stale["error"]["issues"][0]["code"] == "stale_base_version"
+
+
+def test_explore_recipes_compose_joins_tables_and_check(gui: Gui, example) -> None:
+    sql, ann = example("realization_rate")
+    gui.call(
+        "POST", "/proposals/definitions", "alice", body=gui_proposal(sql, ann, "alice", "demo")
+    )
+    select = "SELECT region, AVG(realization_rate) AS avg_rate FROM rr GROUP BY region"
+
+    # Compose tab: lib/variableForm.ts buildComposeRequest (floating refs, final SELECT).
+    composed = fields(
+        gui.call(
+            "POST",
+            "/run",
+            "alice",
+            body={
+                "uses": {"rr": {"id": "realization_rate"}},
+                "values": {"rr": Q3_APAC},
+                "select": select,
+                "run": True,
+                "limit": 100,
+                "profile": "demo",
+            },
+        ),
+        RUN_OUTCOME,
+        "RunOutcome",
+    )
+    assert composed["ran"] and composed["columns"] == ["region", "avg_rate"]
+
+    # SaveRecipeForm: POST /proposals/recipes {recipe, summary}.
+    saved = fields(
+        gui.call(
+            "POST",
+            "/proposals/recipes",
+            "alice",
+            body={
+                "recipe": {
+                    "id": "apac_q3_rr",
+                    "title": "APAC Q3 realization",
+                    "description": "",
+                    "uses": {"rr": {"id": "realization_rate"}},
+                    "values": {"rr": Q3_APAC},
+                    "select": select,
+                    "dialect": composed["dialect"],
+                },
+                "summary": "Recipe apac_q3_rr",
+            },
+        ),
+        PROPOSAL_OUTCOME,
+        "ProposalOutcome",
+    )
+    assert saved["auto_applied"] is True
+    # Review page shows payload.recipe for recipe proposals.
+    view = gui.call("GET", f"/proposals/{saved['proposal']['id']}", "alice")
+    fields(view["payload"]["recipe"], RECIPE, "Recipe (proposal payload)")
+
+    # Recipes tab: GET /recipes?q=&include_drafts= → Recipe[]; run one by id.
+    recipes = each(
+        gui.call("GET", "/recipes", "alice", query={"q": "", "include_drafts": False}),
+        RECIPE,
+        "Recipe",
+    )
+    assert [r["id"] for r in recipes] == ["apac_q3_rr"]
+    assert recipes[0]["uses"] == {"rr": {"id": "realization_rate", "version": None}}
+    ran = fields(
+        gui.call(
+            "POST",
+            "/run",
+            "alice",
+            body={"recipe_id": "apac_q3_rr", "values": {}, "run": True, "limit": 100},
+        ),
+        RUN_OUTCOME,
+        "RunOutcome",
+    )
+    assert ran["ran"] and ran["rows"] == composed["rows"]
+
+    # Join map tab: GET /joins?table=&include_drafts= → JoinEdge[].
+    joins = each(
+        gui.call("GET", "/joins", "alice", query={"table": "", "include_drafts": False}),
+        JOIN_EDGE,
+        "JoinEdge",
+    )
+    assert joins and all(fields(k, {"left", "right"}, "JoinKey") for j in joins for k in j["keys"])
+    edge = joins[0]
+    by_table = gui.call("GET", "/joins", "alice", query={"table": edge["left_table"]})
+    assert edge["id"] in {j["id"] for j in by_table}
+
+    # Tables tab: GET /tables (every library table) and ?name=&name=&profile=.
+    tables = each(gui.call("GET", "/tables", "alice"), TABLE_CARD, "TableCard")
+    assert "deals" in {t["name"] for t in tables}
+    params = [("name", "deals"), ("name", "accounts"), ("profile", "demo")]
+    response = gui.client.get(
+        "/api/v1/tables",
+        params=params,
+        headers={"Authorization": f"Bearer {gui.tokens['alice']}"},
+    )
+    assert response.status_code == 200
+    named = each(response.json(), TABLE_CARD, "TableCard")
+    assert [t["name"] for t in named] == ["deals", "accounts"]
+    each(named[0]["columns"], {"name", "type"}, "ColumnCard")
+    assert "realization_rate" in named[0]["used_by"]
+
+    # SQL tab: POST /check {sql, run, limit} → RunOutcome labeled by the join map.
+    checked = fields(
+        gui.call(
+            "POST",
+            "/check",
+            "alice",
+            body={
+                "sql": "SELECT region, COUNT(*) AS n FROM accounts GROUP BY region",
+                "run": True,
+                "limit": 100,
+            },
+        ),
+        RUN_OUTCOME,
+        "RunOutcome",
+    )
+    assert checked["ran"] and checked["label"] in {"new_logic_on_known_joins", "exploratory"}
 
 
 def test_review_queue_four_eyes_verify_and_audit(gui: Gui, example) -> None:

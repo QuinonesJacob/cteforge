@@ -39,6 +39,16 @@ EXAMPLE_DEFINITIONS = [
     ("realization_rate_grain", "realization_rate"),
 ]
 
+# Output columns other definitions may join on (DESIGN §17), per example definition id. A
+# final SELECT joining two demo definitions on these keys is labeled from their states
+# (built_from_verified_parts / llm_annotated) instead of exploratory. An annotation file
+# that declares its own `join_keys` wins.
+DEMO_JOIN_KEYS: dict[str, list[str]] = {
+    "realization_rate": ["month", "region"],
+    "realization_rate_by_grain": ["month", "region"],
+    "booked_vs_collected": ["region"],
+}
+
 CONNECTIONS_YML = f"""\
 # Written by `cteforge demo`. Synthetic data only. See examples/connections.example.yml.
 profiles:
@@ -125,17 +135,20 @@ def demo(
         agent_user, agent_token = create_user(
             ctx, admin_user, agent, UserRole.CONTRIBUTOR, ActorKind.AGENT
         )
-        typer.echo(f"database: {config.db_url}")
+        typer.echo(f"database: {config.display_db_url}")
         typer.echo(f"users: {admin_user.name} (human admin), {agent_user.name} (agent contributor)")
         typer.echo("\nproposing example definitions:")
         for annotations, query in EXAMPLE_DEFINITIONS:
             sql, data = _example(source, annotations, query)
+            metadata = {k: v for k, v in data.items() if k != "variables"}
+            if "join_keys" not in metadata and metadata.get("id") in DEMO_JOIN_KEYS:
+                metadata["join_keys"] = DEMO_JOIN_KEYS[metadata["id"]]
             outcome = propose_definition(
                 ctx,
                 admin_user,
                 sql=sql,
                 dialect=Dialect.DUCKDB,
-                metadata={k: v for k, v in data.items() if k != "variables"},
+                metadata=metadata,
                 annotations=data.get("variables") or [],
                 profile=PROFILE,
                 summary=f"Demo: examples/queries/{query}.sql",

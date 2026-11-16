@@ -40,9 +40,14 @@ Typer CLI: the local admin tool. Thin adapter over services. Project root: ../..
   examples/seed_warehouse.py by path (runpy), writes DIR/connections.yml (profile `demo`)
   and DIR/env.sh (CTEFORGE_* exports, shell-quoted, no tokens), bootstraps the admin,
   creates the agent (contributor), proposes the example queries + annotation files through
-  services.propose (auto-applied in open mode), prints both tokens once and next steps
+  services.propose (auto-applied in open mode; `DEMO_JOIN_KEYS` adds join_keys such as
+  month/region unless the annotation file declares its own, so composing two demo
+  definitions keeps their trust label), prints both tokens once and next steps
   (incl. a Claude Code `mcpServers` snippet acting as the agent). Refuses an existing
   DIR/cteforge.db unless --force. Needs a source checkout (examples/ next to src/).
+
+Database URLs are printed only as `AppConfig.display_db_url` (password redacted; `serve`,
+`db init`, `demo`).
 
 Exit codes: 0 ok, 1 cteforge error / refusal / error issues, 2 bad command-line input.
 Errors print `error: <message>` (and any Issues) on stderr, never a traceback.

@@ -1,6 +1,6 @@
 // Role checks for showing/hiding actions (ADR 0018). The server enforces permissions; this
 // only avoids offering buttons that would be refused.
-import type { DefinitionState, ProposalKind, User, UserRole } from "../api/types";
+import type { DefinitionState, DefinitionVersionInfo, ProposalKind, User, UserRole } from "../api/types";
 
 export const ROLES: UserRole[] = ["viewer", "contributor", "approver", "admin"];
 
@@ -14,6 +14,29 @@ export const canApprove = (u: User | null) => roleAtLeast(u?.role, "approver");
 /** Agents can never verify (ADR 0007), whatever their role. */
 export const canVerify = (u: User | null) => canApprove(u) && u?.kind === "human";
 export const isAdmin = (u: User | null) => u?.role === "admin";
+
+/**
+ * Four-eyes rule (ADR 0018 addendum, trust/approval.py _own_work): the person wrote this work
+ * and is not a human admin, so they may not approve or verify it themselves.
+ */
+export function isOwnWork(u: User | null, author: string | null | undefined): boolean {
+  if (!u || !author || author !== u.name) return false;
+  return !(u.role === "admin" && u.kind === "human");
+}
+
+/**
+ * Everyone who wrote what `version` contains (services/review.py _version_authors): the
+ * author of the newest logic-changing version up to it and of every metadata-only one since.
+ */
+export function versionAuthors(history: Pick<DefinitionVersionInfo, "version" | "author" | "logic_changed">[], version: number): string[] {
+  const authors: string[] = [];
+  for (const info of [...history].sort((a, b) => b.version - a.version)) {
+    if (info.version > version) continue;
+    if (!authors.includes(info.author)) authors.push(info.author);
+    if (info.logic_changed) break;
+  }
+  return authors;
+}
 
 const DEFINITION_KINDS: ProposalKind[] = ["new_definition", "revise_definition"];
 

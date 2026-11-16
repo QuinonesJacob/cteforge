@@ -25,7 +25,7 @@ If something does not clearly fit one of the above, it does not belong here.
 
 ## Routes (all under /api/v1, JSON)
 GET /me · GET /profiles (name + dialect only) ·
-GET /definitions?q=&include_drafts=&limit= · GET /definitions/{id}?version= ·
+GET /definitions?q=&include_drafts=&limit= · GET /definitions/{id}?version=&include_source= (adds `source_sql` + `annotations`, for revising) ·
 GET /definitions/{id}/history · POST /definitions/{id}/verify {version} ·
 POST /parse {sql, dialect, profile?} ·
 POST /run {uses? | recipe_id?, values, select?, dialect?, profile?, run, limit, question?} ·

@@ -5,7 +5,8 @@
 > decision, update this file and the relevant ADR in the same commit.
 
 Status: pre-alpha. M1–M5 built and wired end to end (`cteforge demo` → `cteforge serve`: GUI, HTTP API, MCP over
-stdio and streamable HTTP); M6 connectors other than DuckDB unverified against real warehouses (see §16).
+stdio and streamable HTTP); M6 connectors built, but those other than DuckDB are unverified against real
+warehouses (see §16).
 
 ---
 
@@ -106,7 +107,7 @@ Rules:
 | `search(query)` — ranked definitions + their variables | `parse_query(sql, dialect)` — literals with IDs, columns + types, structural facts, range/grain suggestions, joins |
 | `get_definition(id)` — full card: meaning, variables with input formats, outputs, grain | `propose_definition(sql, dialect, metadata, annotations)` |
 | `compile_and_run(uses, values, select?)` or `(recipe_id, values)` | `revise_definition(id, base_version, sql?, metadata?, annotations?)` |
-| `check_and_run(sql)` — exploratory, labeled | `propose_join(...)` · `propose_recipe(...)` |
+| `check_and_run(sql)` — exploratory, labeled; SQL that is a definition's original query gets a `matches_definition` hint to use `compile_and_run` instead | `propose_join(...)` · `propose_recipe(...)` (`version`, `state`, `schema_version` are set by cteforge, never by the caller) |
 | `list_recipes(query?)` · `list_joins(table?)` · `describe_tables(tables?)` — discovery: saved recipes, join-map keys, columns + types (+ units the library declares) | |
 
 Approving and verifying are not MCP tools: they happen in the GUI, HTTP API or CLI by a
@@ -114,7 +115,9 @@ person (ADR 0007, 0018). The GUI (M5) drives the same services; MCP and HTTP are
 
 ## 7. Proposal checks
 
-Run automatically on every proposed/revised definition:
+Run automatically on every proposed/revised definition. SQL that is not one read-only
+SELECT/UNION (the same rule as composition, §17) is refused first (`not_read_only`), before
+anything reaches the warehouse.
 1. **Same query back** — serialize template → re-parse → render with the original values →
    AST-equal to the parsed original. Then run both on the warehouse and compare results
    (the result comparison is the real proof; the AST check catches most errors cheaply).
@@ -178,7 +181,13 @@ See ADR 0008.
 
 A definition records its **source dialect** and renders natively in it. Rendering for a
 different dialect (via sqlglot transpile) is allowed but labeled and lowers trust, because
-transpilation can subtly change semantics. See ADR 0013.
+transpilation can subtly change semantics. See ADR 0013. Where it happens:
+- Running a definition on a profile of another dialect transpiles it (`transpiled` issue).
+- `compile_and_run(dialect=X, run=false)` compiles for X even when the profile's dialect
+  differs (no EXPLAIN: `checks_incomplete`); running is always in the profile's dialect.
+- Importing SQL in another dialect than the checking profile's runs the §7 checks on the
+  SQL transpiled to the profile's dialect, with a `dialect_mismatch` warning; the
+  definition keeps its source dialect.
 
 ## 13. Time & NULL semantics
 
@@ -211,14 +220,20 @@ transpilation can subtly change semantics. See ADR 0013.
 - Warehouse connections should use read-only roles. Row limits on results; byte caps where
   supported (BigQuery `maximum_bytes_billed`); returned rows are also capped by size
   (8 MiB of JSON per call, `row_limit_reached`). One query at a time per profile; other
-  callers wait at most 30 s, then get a "busy" error. Per-statement timeouts / cancel on
-  disconnect are not built yet (they need the connectors) — a long query still occupies
-  its profile until it ends, and a wide result is still fetched in full by the connector.
+  callers wait at most 30 s, then get a "busy" error. Every statement has a per-profile
+  timeout (`statement_timeout_s`, default 60 s; ADR 0020 addendum), enforced by the
+  connector (DuckDB interrupt, Postgres transaction-local `statement_timeout`, Snowflake
+  `STATEMENT_TIMEOUT_IN_SECONDS`, BigQuery job timeout + cancel, Databricks
+  `STATEMENT_TIMEOUT`; only DuckDB's is checked against a real engine). There is no cancel
+  on client disconnect yet, and a wide result is still fetched in full by the connector.
 - Proposal check runs never return the warehouse's runtime error text (it can quote data
   values, and proposals are readable by every viewer, also in strict mode); only its class.
 - `CTEFORGE_AUTH=off` accepts only connections whose socket is loopback (peer and local
   address), whatever the Host header says (ADR 0018).
 - Credentials: environment/profile only, never logged, never returned over MCP/HTTP.
+  Database URLs are printed with the password redacted (`postgresql+psycopg://user:***@host/db`).
+  Warehouse error messages are scrubbed of connection details; DuckDB's also of host
+  paths (home directory, database location) and the OS user name.
 
 ## 15. Identity & versioning
 
@@ -233,13 +248,13 @@ transpilation can subtly change semantics. See ADR 0013.
 | | Scope | Status |
 |---|---|---|
 | M1 | Parse → typed template → "same query back" → render for Snowflake/BigQuery/Postgres → run on DuckDB; definition file format; CLI | done |
-| M1.1 | Fix pass: ADR 0014/0015 (wrappers, structural facts, range pairing, `format`, `unit`, multi-place variables, structured issues), case-insensitive types, finite numbers | in progress |
+| M1.1 | Fix pass: ADR 0014/0015 (wrappers, structural facts, range pairing, `format`, `unit`, multi-place variables, structured issues), case-insensitive types, finite numbers | done |
 | M1.5 | `grain` variable | done |
 | M2 | Compose definitions (§17); trust labels (§8) | done |
 | M3 | Store (SQLite/Postgres), proposals (§18), versions, permissions (incl. four-eyes), audit | done (Postgres untested in CI; SQLite tested) |
 | M4 | MCP server (§6) | done (stdio + streamable HTTP at `/mcp`; e2e-tested) |
-| M5 | HTTP API + GUI (import flow, library, review queue) | done; GUI↔API contract e2e-tested |
-| M6 | Snowflake/BigQuery/Postgres/Databricks connectors, EXPLAIN/dry-run, drift check | connectors and drift check built; only DuckDB verified, the others unverified against real warehouses |
+| M5 | HTTP API + GUI (import flow, library, revise, explore: recipes/compose/join map/tables/SQL, review queue) | done; GUI↔API contract e2e-tested |
+| M6 | Snowflake/BigQuery/Postgres/Databricks connectors, EXPLAIN/dry-run, statement timeouts, drift check | built; only DuckDB verified against a real engine. The other connectors (incl. their timeouts and read-only setup) are unit-tested against fake drivers only and unverified against real warehouses |
 
 ## 17. Composition (M2)
 
@@ -263,9 +278,10 @@ and optionally a final SELECT written by the agent over those aliases.
   unverified definition is applied immediately as `llm_annotated`. Everything else waits.
 - Changes to a **verified** definition always wait for a person (approver or the
   definition's owner). Approving can also verify (human only). Rejections keep a comment.
-- **Four-eyes rule** (ADR 0018 addendum): nobody may approve their own proposal or verify
-  a definition version they authored any part of, unless they are an admin (so
-  single-user local mode keeps working). A version's authors are the author of the newest
+- **Four-eyes rule** (ADR 0018 addenda): nobody may approve their own proposal or verify
+  a definition version they authored any part of, unless they are a **human** admin (so
+  single-user local mode keeps working). An agent admin never approves its own proposals
+  and never verifies. A version's authors are the author of the newest
   logic-changing version up to it and of every metadata-only version since, so a cosmetic
   revision by someone else does not let the logic's author verify it. Auto-apply is not an
   approval and is unaffected.

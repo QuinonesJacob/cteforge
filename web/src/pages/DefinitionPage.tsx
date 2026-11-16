@@ -2,6 +2,7 @@ import { useState } from "react";
 import { useParams, useSearchParams } from "react-router-dom";
 import { getDefinition, getDefinitionHistory, verifyDefinition } from "../api/endpoints";
 import type { DefinitionCard } from "../api/types";
+import { DefinitionEditPanel } from "../components/DefinitionEditPanel";
 import { DefinitionOverview } from "../components/DefinitionOverview";
 import { ErrorState } from "../components/ErrorState";
 import { HistoryTable } from "../components/HistoryTable";
@@ -11,12 +12,12 @@ import { RunPanel } from "../components/RunPanel";
 import { StateBadge } from "../components/StateBadge";
 import { Tabs } from "../components/Tabs";
 import { formatDate } from "../lib/format";
-import { canVerify } from "../lib/roles";
+import { canPropose, canVerify, isOwnWork, versionAuthors } from "../lib/roles";
 import { useAuth } from "../state/AuthContext";
 import { useToast } from "../state/ToastContext";
 import { useAsync } from "../state/useAsync";
 
-type TabKey = "overview" | "run" | "history";
+type TabKey = "overview" | "run" | "history" | "edit";
 
 export function DefinitionPage() {
   const { id = "" } = useParams();
@@ -44,6 +45,11 @@ export function DefinitionPage() {
   const fullHistory = d.history?.length ? d.history : (history.data ?? []);
   const versions = fullHistory.map((h) => h.version).sort((a, b) => b - a);
   const latest = versions[0] ?? d.version;
+  // Revisions are proposed against the latest version only (stale_base_version otherwise).
+  const editable = canPropose(user) && d.version === latest;
+  const activeTab: TabKey = tab === "edit" && !editable ? "overview" : tab;
+  // Four-eyes: nobody but a human admin verifies a version they wrote any part of.
+  const ownVersion = versionAuthors(fullHistory, d.version).some((a) => isOwnWork(user, a));
 
   async function verify() {
     setVerifying(true);
@@ -97,7 +103,7 @@ export function DefinitionPage() {
                 </option>
               ))}
             </select>
-            {canVerify(user) && d.state === "llm_annotated" && d.version === latest && (
+            {canVerify(user) && !ownVersion && d.state === "llm_annotated" && d.version === latest && (
               <button type="button" className="btn btn-primary" onClick={() => void verify()} disabled={verifying}>
                 {verifying ? "Verifying…" : `Verify v${d.version}`}
               </button>
@@ -116,18 +122,29 @@ export function DefinitionPage() {
       <Tabs<TabKey>
         idPrefix="def"
         label="Definition sections"
-        active={tab}
+        active={activeTab}
         onChange={(k) => setParam("tab", k === "overview" ? null : k)}
         items={[
           { key: "overview", label: "Overview" },
           { key: "run", label: "Run" },
           { key: "history", label: "History", badge: versions.length || null },
+          ...(editable ? [{ key: "edit" as const, label: "Edit" }] : []),
         ]}
       />
-      <div role="tabpanel" id={`def-panel-${tab}`} aria-labelledby={`def-tab-${tab}`} className="tab-panel">
-        {tab === "overview" && <DefinitionOverview d={d} />}
-        {tab === "run" && <RunPanel key={`${d.id}@${d.version}`} def={d} />}
-        {tab === "history" &&
+      <div role="tabpanel" id={`def-panel-${activeTab}`} aria-labelledby={`def-tab-${activeTab}`} className="tab-panel">
+        {activeTab === "overview" && <DefinitionOverview d={d} />}
+        {activeTab === "run" && <RunPanel key={`${d.id}@${d.version}`} def={d} />}
+        {activeTab === "edit" && (
+          <DefinitionEditPanel
+            key={`${d.id}@${d.version}`}
+            def={d}
+            onApplied={() => {
+              def.reload();
+              history.reload();
+            }}
+          />
+        )}
+        {activeTab === "history" &&
           (history.loading && fullHistory.length === 0 ? (
             <Loading />
           ) : (

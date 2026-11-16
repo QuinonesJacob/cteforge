@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import datetime as dt
 import os
+import re
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
@@ -30,6 +31,31 @@ DEFAULT_USER = "local"
 MODE_SETTING = "mode"  # Store setting key holding the TeamMode.
 
 Clock = Callable[[], dt.datetime]
+
+_REDACTED = "***"
+# Query parameters whose values are secrets (e.g. ?password=... in a SQLAlchemy URL).
+_SECRET_PARAM = re.compile(
+    r"([?&](?:password|passwd|pwd|secret|token|access_token|api_key|sslpassword)=)[^&#]*",
+    re.IGNORECASE,
+)
+
+
+def redact_db_url(url: str) -> str:
+    """A database URL safe to print or log: the password (and secret-named query
+    parameters) replaced by ***, e.g. postgresql+psycopg://user:***@host/db.
+    The user, host and database are kept; URLs without credentials are unchanged."""
+    scheme, sep, rest = url.partition("://")
+    if sep:
+        stops = [i for i in (rest.find(c) for c in "/?#") if i != -1]
+        at = rest.rfind("@", 0, min(stops, default=len(rest)))
+        if at == -1:
+            at = rest.find("@")  # a password with an unencoded '/', '?' or '#'
+        if at != -1:
+            user, has_password, _ = rest[:at].partition(":")
+            if has_password:
+                rest = f"{user}:{_REDACTED}{rest[at:]}"
+        url = f"{scheme}{sep}{rest}"
+    return _SECRET_PARAM.sub(lambda m: m.group(1) + _REDACTED, url)
 
 
 def utc_now() -> dt.datetime:
@@ -56,6 +82,11 @@ class AppConfig(BaseModel):
         if not value.strip():
             raise ValueError("user must not be blank")
         return value.strip()
+
+    @property
+    def display_db_url(self) -> str:
+        """`db_url` with its password redacted, for printing and logs."""
+        return redact_db_url(self.db_url)
 
     @property
     def auth_enabled(self) -> bool:

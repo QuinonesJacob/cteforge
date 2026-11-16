@@ -348,6 +348,9 @@ legend { font-weight: 650; margin-bottom: var(--s2); padding: 0; }
 
 /* Tables */
 .table-wrap {
+  /* Positioned so absolutely positioned children (.visually-hidden labels in cells) are
+     clipped by this scroller instead of widening the page on narrow screens. */
+  position: relative;
   overflow-x: auto;
   border: 1px solid var(--border);
   border-radius: var(--radius);

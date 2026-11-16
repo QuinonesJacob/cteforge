@@ -44,8 +44,11 @@ uv run cteforge serve                     # GUI + API + MCP on http://127.0.0.1:
 ```
 
 Open <http://127.0.0.1:8765> and sign in with the admin token. The GUI has the Library,
-a run form per definition, Import (paste SQL, mark the literals that are variables, check,
-propose), the Review queue, the Audit log and Settings (users, tokens, team mode).
+a run form and an Edit tab per definition (revise its description, or its SQL and variables
+in the import builder), Explore (saved recipes, combining definitions with a final SELECT
+and saving it as a recipe, the join map, table schemas, exploratory SQL), Import (paste SQL,
+mark the literals that are variables, check, propose), the Review queue, the Audit log and
+Settings (users, tokens, team mode).
 
 ### Connect Claude Code (or any MCP client)
 
@@ -108,8 +111,8 @@ is no approve or verify tool: people do that (GUI, API, CLI).
   `llm_annotated`; changes to a **verified** definition always wait for a person. **Strict**
   mode only runs verified definitions.
 - **Four-eyes** — nobody approves their own proposal or verifies a version they authored,
-  unless they are an admin (so single-user local mode works). Agents never verify,
-  whatever their role (ADR 0007, ADR 0018).
+  unless they are a human admin (so single-user local mode works). Agents never verify and
+  never approve their own proposals, whatever their role (ADR 0007, ADR 0018).
 - **Join map and recipes** — joins are mined from trusted SQL (also through CTEs) and used to
   label new SQL; recipes save definitions + values + a final SELECT by reference.
 - **Audit** — cteforge logs its own calls (actor, definitions + versions, values, label, row
@@ -154,7 +157,13 @@ profiles:
     dialect: postgres
     options: {host: db.internal, port: 5432, dbname: analytics, user: cteforge_ro}
     secrets_env: {password: PG_PASSWORD}
+    statement_timeout_s: 120   # default 60; null turns it off
 ```
+
+Every statement is cut off after the profile's `statement_timeout_s` and fails with
+`query timed out after Ns` (DuckDB: interrupt; Postgres: transaction-local
+`statement_timeout`; Snowflake: `STATEMENT_TIMEOUT_IN_SECONDS`; BigQuery: job timeout and
+cancel; Databricks: `STATEMENT_TIMEOUT` session configuration).
 
 **Always connect as a dedicated read-only role.** cteforge refuses non-SELECT SQL, enforces
 row limits and uses read-only sessions where the warehouse has them, but grants are the real
@@ -221,16 +230,16 @@ call the GUI makes.
 
 - Pre-alpha: APIs, the database schema and the file format may change.
 - Only **DuckDB** is tested against a real warehouse. The Postgres/Redshift, Snowflake,
-  BigQuery and Databricks connectors are unit-tested against fake drivers and still need
-  validation on real warehouses. The library store is tested on SQLite; Postgres is untested
-  in CI.
+  BigQuery and Databricks connectors (including their statement timeouts) are unit-tested
+  against fake drivers and still need validation on real warehouses. The library store is
+  tested on SQLite; Postgres is untested in CI.
+- A query is not cancelled when the client disconnects; it runs until it finishes or hits
+  its profile's `statement_timeout_s`.
 - Cross-dialect rendering uses sqlglot (pinned at 30.31.0) and is labeled and lowers trust.
   Known transpile defects (kept visible in `tests/golden/`): Postgres has no
   `ROUND(double precision, int)`; BigQuery gets `TIMESTAMP_TRUNC` / `PARSE_TIMESTAMP` on
   `DATETIME` columns; Postgres `TO_TIMESTAMP` is zone-aware against naive columns. Week
   starts differ by warehouse (DESIGN §13). Prefer rendering in the source dialect.
-- The HTTP API does not yet serve `GET /recipes` or `GET /joins`; recipes and joins are
-  proposed and used through MCP, the API and the CLI.
 - `cteforge demo` needs a source checkout (it reads `examples/`).
 
 ## License

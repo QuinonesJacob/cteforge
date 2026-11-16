@@ -38,6 +38,25 @@ def test_date_range_rejects_non_iso_and_bad_shapes(raw):
         validate_value("period", VariableType.DATE_RANGE, raw)
 
 
+@pytest.mark.parametrize(
+    ("raw", "reason"),
+    [
+        ({"start": "2026-07-01"}, "Reason: missing 'end'"),
+        ({"end": "2026-07-01"}, "Reason: missing 'start'"),
+        ({}, "Reason: missing 'start' and missing 'end'"),
+        (
+            {"start": "2026-07-01", "end": "2026-10-01", "shape": "x"},
+            "Reason: unexpected key(s) ['shape']; only 'start' and 'end'",
+        ),
+    ],
+)
+def test_date_range_names_the_missing_or_extra_key(raw, reason):
+    """Regression: a missing key used to report 'expected an ISO date string'."""
+    with pytest.raises(VariableValueError) as err:
+        validate_value("period", VariableType.DATE_RANGE, raw)
+    assert str(err.value).endswith(reason)
+
+
 def test_error_message_names_expected_format():
     with pytest.raises(VariableValueError) as err:
         validate_value("period", VariableType.DATE_RANGE, "2026-Q3")

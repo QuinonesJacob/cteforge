@@ -1,14 +1,19 @@
 import { describe, expect, it } from "vitest";
 import type { VariableCard } from "../api/types";
 import {
+  buildComposeRequest,
+  buildRecipeRunRequest,
   buildRunRequest,
   buildRunValues,
   canonicalDecimal,
   emptyFormValue,
   formValueFrom,
+  initialForm,
   initialFormValue,
   isIsoDate,
+  nextAlias,
   outsideAllowed,
+  savedOverrides,
   serializeValue,
 } from "./variableForm";
 
@@ -164,5 +169,49 @@ describe("run values", () => {
     expect(outsideAllowed(["EMEA", "LATAM"], ["EMEA", "APAC"])).toBe(true);
     expect(outsideAllowed(5, [5, 10])).toBe(false);
     expect(outsideAllowed("x", null)).toBe(false);
+  });
+});
+
+describe("composition and recipe requests", () => {
+  const period = card({ name: "period", type: "date_range", original_value: { start: "2025-01-01", end: "2025-04-01" } });
+  const fixedMin = card({ name: "min", type: "number", role: "fixed", original_value: 5 });
+
+  it("builds uses/values per alias, pins only given versions, keeps the SELECT", () => {
+    const saved = { period: { start: "2025-07-01", end: "2025-10-01" }, min: 10 };
+    const parts = [
+      { alias: "rr", ref: { id: "realization_rate" }, cards: [period, fixedMin], form: initialForm([period, fixedMin], saved), overrides: savedOverrides([period, fixedMin], saved) },
+      { alias: "b", ref: { id: "booked", version: 2 }, cards: [period], form: initialForm([period]), overrides: new Set<string>() },
+    ];
+    const { request, errors } = buildComposeRequest(parts, "SELECT * FROM rr JOIN b USING (region)", { run: true, limit: 10, profile: "demo" });
+    expect(errors).toEqual({});
+    expect(request).toEqual({
+      uses: { rr: { id: "realization_rate" }, b: { id: "booked", version: 2 } },
+      values: {
+        rr: { period: { start: "2025-07-01", end: "2025-10-01" }, min: 10 },
+        b: { period: { start: "2025-01-01", end: "2025-04-01" } },
+      },
+      select: "SELECT * FROM rr JOIN b USING (region)",
+      run: true,
+      limit: 10,
+      profile: "demo",
+    });
+  });
+
+  it("reports form errors per alias.variable and omits a blank SELECT", () => {
+    const parts = [{ alias: "rr", ref: { id: "x" }, cards: [period], form: { period: { kind: "date_range" as const, start: "", end: "" } }, overrides: new Set<string>() }];
+    const { request, errors } = buildComposeRequest(parts, "  ", { run: false, limit: 100 });
+    expect(Object.keys(errors)).toEqual(["rr.period"]);
+    expect(request.select).toBeUndefined();
+    expect(request.profile).toBeUndefined();
+  });
+
+  it("runs a recipe by id with its own values", () => {
+    expect(buildRecipeRunRequest("apac_q3", { run: false, limit: 100 })).toEqual({ recipe_id: "apac_q3", values: {}, run: false, limit: 100 });
+  });
+
+  it("makes unique lower_snake_case aliases", () => {
+    expect(nextAlias("realization_rate", [])).toBe("realization_rate");
+    expect(nextAlias("realization_rate", ["realization_rate"])).toBe("realization_rate_2");
+    expect(nextAlias("9lives", [])).toBe("d_9lives");
   });
 });

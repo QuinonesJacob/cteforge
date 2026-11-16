@@ -25,6 +25,7 @@ from cteforge.domain.dialects import Dialect
 from cteforge.domain.errors import CteforgeError
 from cteforge.domain.issues import Issue
 from cteforge.domain.models import (
+    Annotation,
     Definition,
     DefinitionState,
     DefinitionVersionInfo,
@@ -176,6 +177,11 @@ class DefinitionCard(BaseModel):
     variables: list[VariableCard] = Field(default_factory=list)
     template: str
     history: list[DefinitionVersionInfo] | None = None
+    # Only when asked for (`get_definition(include_source=True)`, the GUI's revise flow):
+    # the trusted query rebuilt from the template with its original values, and the
+    # variables as annotations whose literal IDs address that SQL.
+    source_sql: str | None = None
+    annotations: list[Annotation] | None = None
 
 
 def card_from_definition(

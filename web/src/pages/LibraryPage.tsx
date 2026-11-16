@@ -74,7 +74,7 @@ export function LibraryPage() {
         <ErrorState error={error} title="Search failed" onRetry={reload} />
       ) : data && data.length === 0 ? (
         <EmptyState
-          title={q ? `Nothing matches “${q}”` : "The library is empty"}
+          title={q ? `Nothing matches “${q}”` : drafts ? "The library is empty" : "No usable definitions"}
           action={
             canPropose(user) && (
               <Link to="/import" className="btn btn-primary">
@@ -83,7 +83,11 @@ export function LibraryPage() {
             )
           }
         >
-          {q ? "Try other words, or include drafts." : "Paste SQL you already trust to create the first definition."}
+          {q
+            ? "Try other words, or include drafts."
+            : drafts
+              ? "Paste SQL you already trust to create the first definition."
+              : "In strict team mode only verified definitions are listed. Include drafts to see unverified ones, or paste SQL you already trust."}
         </EmptyState>
       ) : (
         <>

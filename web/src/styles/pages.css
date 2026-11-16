@@ -238,6 +238,10 @@ button.step-btn:hover { border-color: var(--accent); }
 }
 
 /* Responsive */
+/* Explore: one fieldset per composed definition */
+.compose-part { border: 1px solid var(--border); border-radius: var(--radius); padding: var(--s3); margin-bottom: var(--s3); }
+.compose-part legend { padding: 0 var(--s2); overflow-wrap: anywhere; }
+
 @media (max-width: 900px) {
   .detail-grid { grid-template-columns: minmax(0, 1fr); }
   .grid-3 { grid-template-columns: repeat(2, minmax(0, 1fr)); }

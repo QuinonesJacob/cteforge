@@ -313,6 +313,21 @@ def test_malformed_recipe_raises(with_rr: AppContext) -> None:
         propose_recipe(with_rr, ALICE, recipe={"id": "x"})
 
 
+@pytest.mark.parametrize(
+    "reserved",
+    [{"state": "verified"}, {"version": 7}, {"schema_version": 99}],
+)
+def test_recipe_input_cannot_set_state_version_or_schema(
+    with_rr: AppContext, reserved: dict[str, Any]
+) -> None:
+    """Regression: these were accepted and silently ignored."""
+    (key,) = reserved
+    before = len(with_rr.store.list_proposals())
+    with pytest.raises(CodecError, match=f"'{key}'.*cannot be set by a proposal"):
+        propose_recipe(with_rr, ALICE, recipe=_recipe(**reserved))
+    assert len(with_rr.store.list_proposals()) == before
+
+
 def test_recipe_diff_against_previous_version(with_rr: AppContext) -> None:
     ctx = with_rr
     propose_recipe(ctx, ALICE, recipe=_recipe())

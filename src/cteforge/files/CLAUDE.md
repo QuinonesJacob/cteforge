@@ -6,7 +6,8 @@ I/O adapter: definition files on disk. Project root: ../../../CLAUDE.md
 - `definitions.py` — load/save Definition and annotation YAML files (via domain/codec.py),
   and read trusted-query `.sql` files.
 - `connections.py` — `load_profiles(path) -> list[WarehouseProfile]` from `connections.yml`
-  (`profiles: {name: {dialect, options, secrets_env, max_rows, maximum_bytes_billed}}`,
+  (`profiles: {name: {dialect, options, secrets_env, max_rows, maximum_bytes_billed,
+  statement_timeout_s}}`,
   ADR 0020); refuses inline secrets (secret-looking option names, URLs with passwords,
   secrets_env values that aren't env-var names) with CodecError, never echoing values.
   Relative DuckDB `options.path` resolves next to the file.

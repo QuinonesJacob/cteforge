@@ -223,6 +223,22 @@ def warehouse_for(ctx: AppContext, name: str | None) -> tuple[str | None, Wareho
 # ── Definition checks ────────────────────────────────────────────────────────────────
 
 
+def ensure_read_only(sql: str, dialect: Dialect) -> None:
+    """Refuse a proposed definition's SQL unless it is one read-only SELECT/UNION
+    (compose.checks.ensure_query), before any check touches the warehouse. Raises
+    PolicyError carrying a `not_read_only` Issue on `.issues`; SqlParseError when the SQL
+    does not parse as one statement."""
+    try:
+        ensure_query(parse(sql, dialect), "definition's SQL")
+    except RenderError as exc:
+        message = str(exc)
+        error = PolicyError(f"not_read_only: {message}")
+        error.issues = [  # type: ignore[attr-defined]
+            Issue(code=IssueCode.NOT_READ_ONLY, severity=Severity.ERROR, message=message)
+        ]
+        raise error from None
+
+
 def checked_definition(
     sql: str,
     dialect: Dialect,
@@ -233,7 +249,10 @@ def checked_definition(
     """Run the checks engine (DESIGN §7) and return the definition with `metadata` (id,
     title, meaning, keywords, use_when, dont_use_when, grain, join_keys, owner, profile,
     version) applied, plus the issues. State is what the checks earned, never VERIFIED.
-    Raises AnnotationError / SqlParseError when no template can be built."""
+    Non-read-only SQL is refused first (`ensure_read_only`, PolicyError), so it never
+    reaches EXPLAIN or a check run. Raises AnnotationError / SqlParseError when no
+    template can be built."""
+    ensure_read_only(sql, dialect)
     header = {k: metadata[k] for k in AnnotationFile.model_fields if k in metadata}
     try:
         ann_file = AnnotationFile.model_validate(header | {"variables": annotations})

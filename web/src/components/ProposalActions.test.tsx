@@ -2,7 +2,7 @@ import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ProposalView, User } from "../api/types";
-import { canDecide } from "../lib/roles";
+import { canDecide, isOwnWork, versionAuthors } from "../lib/roles";
 import { ToastProvider } from "../state/ToastContext";
 import { mockApi } from "../test/fetchMock";
 import { ProposalActions } from "./ProposalActions";
@@ -75,5 +75,39 @@ describe("ProposalActions", () => {
   it("says it is checking while the owner is loading", () => {
     renderActions({ target: null, targetLoading: true });
     expect(screen.getByText(/Checking who can decide/)).toBeInTheDocument();
+  });
+
+  it("never offers the author approval of their own proposal (four-eyes), but keeps withdraw", () => {
+    renderActions({ user: { name: "ana", role: "approver", kind: "human" } });
+    expect(screen.getByText(/another approver must approve it/)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /^Approve/ })).not.toBeInTheDocument();
+    expect(screen.queryByLabelText(/Also verify/)).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Withdraw" })).toBeEnabled();
+  });
+
+  it("lets a human admin approve their own proposal (single-user mode)", () => {
+    renderActions({ user: { name: "ana", role: "admin", kind: "human" } });
+    expect(screen.getByRole("button", { name: "Approve" })).toBeEnabled();
+  });
+});
+
+describe("four-eyes helpers", () => {
+  it("isOwnWork exempts only human admins", () => {
+    expect(isOwnWork({ name: "ana", role: "approver", kind: "human" }, "ana")).toBe(true);
+    expect(isOwnWork({ name: "ana", role: "admin", kind: "human" }, "ana")).toBe(false);
+    expect(isOwnWork({ name: "bot", role: "admin", kind: "agent" }, "bot")).toBe(true);
+    expect(isOwnWork({ name: "ana", role: "approver", kind: "human" }, "ben")).toBe(false);
+    expect(isOwnWork(null, "ana")).toBe(false);
+  });
+  it("versionAuthors walks back through metadata-only versions to the last logic change", () => {
+    const history = [
+      { version: 1, author: "ana", logic_changed: true },
+      { version: 2, author: "ben", logic_changed: true },
+      { version: 3, author: "bot", logic_changed: false },
+      { version: 4, author: "cy", logic_changed: true },
+    ];
+    expect(versionAuthors(history, 3)).toEqual(["bot", "ben"]);
+    expect(versionAuthors(history, 2)).toEqual(["ben"]);
+    expect(versionAuthors(history, 4)).toEqual(["cy"]);
   });
 });

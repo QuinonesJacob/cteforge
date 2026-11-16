@@ -17,6 +17,19 @@ Status: accepted · 2026-11-16
   services additionally refuse non-SELECT statements before calling `run`.
 - Nightly drift check = re-run each definition's checks against its profile.
 
+## Addendum (2026-11-16): statement timeouts
+- Each profile has `statement_timeout_s` (default 60; `null` turns it off), enforced inside
+  the connector: DuckDB interrupts the connection from a timer thread; Postgres sets a
+  transaction-local `statement_timeout` (`set_config(..., true)`) in every READ ONLY
+  transaction; Snowflake sets the session parameter `STATEMENT_TIMEOUT_IN_SECONDS`;
+  BigQuery sets `job_timeout_ms` (where the client supports it), waits at most that long
+  in `job.result(timeout=...)` and cancels the job on timeout; Databricks passes the
+  session configuration `STATEMENT_TIMEOUT`. A timed-out statement raises
+  `WarehouseError("query timed out after Ns")`. Only the DuckDB timeout is exercised
+  against a real engine; the others are unit-tested against fake drivers.
+- DuckDB error messages are scrubbed of host paths (database file and directory, home
+  directory) and the OS user name before they reach a client.
+
 ## Consequences
 - Only DuckDB is integration-tested in CI; other connectors are unit-tested against fake
   driver modules and need a real warehouse to validate.

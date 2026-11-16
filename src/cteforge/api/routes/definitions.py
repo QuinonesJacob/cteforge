@@ -32,9 +32,13 @@ def search_definitions(
 
 @router.get("/definitions/{id}", response_model=DefinitionCard)
 def get_definition(
-    ctx: Ctx, user: CurrentUser, id: str, version: int | None = None
+    ctx: Ctx,
+    user: CurrentUser,
+    id: str,
+    version: int | None = None,
+    include_source: bool = False,
 ) -> DefinitionCard:
-    return describe.get_definition(ctx, user, id, version)
+    return describe.get_definition(ctx, user, id, version, include_source=include_source)
 
 
 @router.get("/definitions/{id}/history", response_model=list[DefinitionVersionInfo])

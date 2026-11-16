@@ -27,6 +27,8 @@ If something does not clearly fit one of the above, it does not belong here.
 search · get_definition · compile_and_run · check_and_run · parse_query ·
 propose_definition · revise_definition · propose_join · propose_recipe · list_recipes ·
 list_joins · describe_tables.
+propose_recipe's `recipe` argument is `services.propose_other.RecipeInput` (no `version`,
+`state` or `schema_version`: cteforge sets them).
 No approve/verify tools (ADR 0007). Errors are returned as tool errors carrying the
 CteforgeError message and any Issues, never stack traces or credentials:
 text `"<ErrorType>: message"` + `"\nissues: <JSON list>"` when there are issues;

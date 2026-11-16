@@ -37,3 +37,8 @@ attributed for permissions and audit.
   process at the other end is an MCP client, usually an agent, and must not become the
   first human admin. A person creates users first (`cteforge user add --bootstrap`). The
   CLI and auth-off HTTP (a person at this machine) still create the first local admin.
+
+## Addendum (2026-11-16): the admin exemption is for human admins only
+- The four-eyes exemption above applies only to admins with `actor_kind=human`. An agent
+  with the `admin` role never approves its own proposal (whatever the target's state) and,
+  as before, never verifies anything (ADR 0007).

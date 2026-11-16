@@ -54,13 +54,26 @@ def test_without_warehouse_stays_draft_with_checks_incomplete(sample_sql, sample
     assert (IssueCode.TYPE_UNKNOWN, Severity.WARNING) in _codes(outcome)
 
 
-def test_warehouse_of_another_dialect_runs_nothing(sample_sql, sample_annotations, warehouse):
-    spy = Spy(warehouse, dialect=Dialect.SNOWFLAKE)
-    outcome = import_query(sample_sql, D, sample_annotations, spy)
-    assert spy.calls == []
-    assert (IssueCode.DIALECT_MISMATCH, Severity.ERROR) in _codes(outcome)
+def test_sql_of_another_dialect_is_checked_transpiled(sample_sql, sample_annotations, warehouse):
+    # Postgres SQL on a DuckDB warehouse (DESIGN §12, ADR 0013): the checks run on the
+    # transpiled SQL and a dialect_mismatch warning says so.
+    spy = Spy(warehouse)
+    outcome = import_query(sample_sql, Dialect.POSTGRES, sample_annotations, spy)
+    assert spy.calls.count("run") == 2 and "explain" in spy.calls
+    assert _codes(outcome) == [(IssueCode.DIALECT_MISMATCH, Severity.WARNING)]
+    assert outcome.results_match is True
+    assert outcome.definition.source_dialect is Dialect.POSTGRES
+    assert outcome.definition.state is DefinitionState.LLM_ANNOTATED
+
+
+def test_transpiled_check_still_catches_differing_results(
+    sample_sql, sample_annotations, warehouse
+):
+    spy = Spy(warehouse, tamper=True)
+    outcome = import_query(sample_sql, Dialect.POSTGRES, sample_annotations, spy)
+    assert outcome.results_match is False
+    assert (IssueCode.ROUNDTRIP_RESULTS_DIFFER, Severity.ERROR) in _codes(outcome)
     assert outcome.definition.state is DefinitionState.DRAFT
-    assert outcome.results_match is None
 
 
 def test_different_results_are_an_error(sample_sql, sample_annotations, warehouse):

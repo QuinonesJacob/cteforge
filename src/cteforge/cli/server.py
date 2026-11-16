@@ -48,7 +48,9 @@ def serve(
 
     os.environ[BIND_HOST_ENV] = host
     auth = "on (bearer tokens)" if config.auth_enabled else f"OFF (acting as '{config.user}')"
-    typer.echo(f"cteforge serving on http://{host}:{port}  (auth {auth}; db {config.db_url})")
+    typer.echo(
+        f"cteforge serving on http://{host}:{port}  (auth {auth}; db {config.display_db_url})"
+    )
     uvicorn.run(APP_FACTORY, factory=True, host=host, port=port, reload=reload)
 
 

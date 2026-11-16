@@ -257,3 +257,49 @@ def test_wide_results_are_capped_by_size(ctx: AppContext, monkeypatch) -> None:
     assert out.ran and out.usable and out.truncated
     assert 0 < out.row_count < 50 and out.row_count == len(out.rows)
     assert IssueCode.ROW_LIMIT_REACHED in {i.code for i in out.issues}
+
+
+# ── a definition's original SQL → hint to compile_and_run ─────────────────────────────
+
+
+def _propose_realization_rate(ctx: AppContext) -> str:
+    import yaml
+
+    from cteforge.services.propose import propose_definition
+
+    examples = Path(__file__).resolve().parents[3] / "examples"
+    sql = (examples / "queries" / "realization_rate.sql").read_text()
+    ann = yaml.safe_load(
+        (examples / "definitions" / "realization_rate.annotations.yml").read_text()
+    )
+    admin = User(name="root", role=UserRole.ADMIN)
+    out = propose_definition(
+        ctx,
+        admin,
+        sql=sql,
+        dialect="duckdb",
+        metadata={k: v for k, v in ann.items() if k != "variables"},
+        annotations=ann["variables"],
+    )
+    assert out.auto_applied
+    return sql
+
+
+def test_definition_sql_gets_a_compile_and_run_hint(ctx: AppContext) -> None:
+    sql = _propose_realization_rate(ctx)
+    reformatted = "\n".join(line.strip() for line in sql.splitlines())  # same AST
+    out = check_and_run(ctx, AGENT, reformatted, run=False)
+    hints = [i for i in out.issues if i.code is IssueCode.MATCHES_DEFINITION]
+    assert len(hints) == 1 and hints[0].severity == "info"
+    assert "'realization_rate'" in hints[0].message and "compile_and_run" in hints[0].message
+    # The hint never raises the label: raw SQL stays raw SQL.
+    assert out.label in (TrustLabel.NEW_LOGIC_KNOWN_JOINS, TrustLabel.EXPLORATORY)
+
+
+def test_changed_sql_gets_no_hint(ctx: AppContext) -> None:
+    sql = _propose_realization_rate(ctx)
+    changed = sql.rstrip().rstrip(";") + "\nLIMIT 5"
+    out = check_and_run(ctx, AGENT, changed, run=False)
+    assert IssueCode.MATCHES_DEFINITION not in {i.code for i in out.issues}
+    other = check_and_run(ctx, AGENT, JOIN_SQL, run=False)
+    assert IssueCode.MATCHES_DEFINITION not in {i.code for i in other.issues}

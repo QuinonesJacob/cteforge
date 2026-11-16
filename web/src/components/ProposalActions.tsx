@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { approveProposal, rejectProposal, withdrawProposal } from "../api/endpoints";
 import type { ProposalView, User } from "../api/types";
-import { canApprove, canDecide, canVerify, type DecideTarget } from "../lib/roles";
+import { canApprove, canDecide, canVerify, isOwnWork, type DecideTarget } from "../lib/roles";
 import { useToast } from "../state/ToastContext";
 import { notifyProposalsChanged } from "../state/usePendingCount";
 import { Field } from "./Field";
@@ -27,6 +27,9 @@ export function ProposalActions({ proposal, user, target = null, targetLoading =
   const isAuthor = user?.name === proposal.author;
   const decider = canDecide(user, proposal.kind, target);
   const ownerOnly = decider && !canApprove(user);
+  // Four-eyes: the author (unless a human admin) may reject or withdraw, never approve.
+  const ownWork = isOwnWork(user, proposal.author);
+  const mayApprove = decider && !ownWork;
   if (!decider && !isAuthor) {
     if (targetLoading) return <p className="muted small">Checking who can decide…</p>;
     return <p className="muted small">Only approvers (or the definition's owner) can decide this proposal.</p>;
@@ -60,11 +63,17 @@ export function ProposalActions({ proposal, user, target = null, targetLoading =
       <h3>Decision</h3>
       {decider && (
         <>
-          {ownerOnly && <p className="muted small">You own this definition, so you may approve or reject this proposal.</p>}
+          {ownWork ? (
+            <p className="callout callout-info small" role="note">
+              You wrote this proposal, so another approver must approve it (four-eyes rule). You can still withdraw it.
+            </p>
+          ) : (
+            ownerOnly && <p className="muted small">You own this definition, so you may approve or reject this proposal.</p>
+          )}
           <Field label="Comment" htmlFor="pa-comment" hint="Kept with the proposal. Required to reject.">
             <textarea id="pa-comment" rows={2} value={comment} onChange={(e) => setComment(e.target.value)} />
           </Field>
-          {proposal.kind !== "new_join" && proposal.kind !== "new_recipe" && !ownerOnly && (
+          {mayApprove && proposal.kind !== "new_join" && proposal.kind !== "new_recipe" && !ownerOnly && (
             <label className="check">
               <input
                 type="checkbox"
@@ -81,7 +90,7 @@ export function ProposalActions({ proposal, user, target = null, targetLoading =
               </span>
             </label>
           )}
-          {hasErrors && (
+          {hasErrors && mayApprove && (
             <p className="field-warn" role="status">
               This proposal has failing checks, so it can't be approved. Reject it or ask the author for a revision.
             </p>
@@ -91,14 +100,16 @@ export function ProposalActions({ proposal, user, target = null, targetLoading =
       <div className="btn-row mt">
         {decider && (
           <>
-            <button
-              type="button"
-              className="btn btn-primary"
-              disabled={busy !== null || hasErrors}
-              onClick={() => void act("approve")}
-            >
-              {busy === "approve" ? "Approving…" : verify && verifyAllowed ? "Approve and verify" : "Approve"}
-            </button>
+            {mayApprove && (
+              <button
+                type="button"
+                className="btn btn-primary"
+                disabled={busy !== null || hasErrors}
+                onClick={() => void act("approve")}
+              >
+                {busy === "approve" ? "Approving…" : verify && verifyAllowed ? "Approve and verify" : "Approve"}
+              </button>
+            )}
             <button type="button" className="btn btn-danger" disabled={busy !== null} onClick={() => void act("reject")}>
               {busy === "reject" ? "Rejecting…" : "Reject"}
             </button>

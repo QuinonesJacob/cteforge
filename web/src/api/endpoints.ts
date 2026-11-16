@@ -2,6 +2,12 @@
 import { request } from "./client";
 import type {
   AuditEvent,
+  CheckRequest,
+  JoinEdge,
+  Recipe,
+  RecipeInput,
+  ReviseDefinitionRequest,
+  TableCard,
   AuditPage,
   CreatedUser,
   DefinitionCard,
@@ -34,8 +40,11 @@ export const listProfiles = (opts: Opts = {}) => request<Profile[]>("GET", "/pro
 // ── Definitions ──
 export const searchDefinitions = (q: string, includeDrafts: boolean, opts: Opts = {}) =>
   request<SearchHit[]>("GET", "/definitions", { ...opts, query: { q, include_drafts: includeDrafts, limit: 100 } });
-export const getDefinition = (id: string, version?: number, opts: Opts = {}) =>
-  request<DefinitionCard>("GET", `/definitions/${enc(id)}`, { ...opts, query: { version } });
+export const getDefinition = (id: string, version?: number, opts: Opts & { includeSource?: boolean } = {}) =>
+  request<DefinitionCard>("GET", `/definitions/${enc(id)}`, {
+    signal: opts.signal,
+    query: { version, include_source: opts.includeSource || undefined },
+  });
 export const getDefinitionHistory = (id: string, opts: Opts = {}) =>
   request<DefinitionVersionInfo[]>("GET", `/definitions/${enc(id)}/history`, opts);
 export const verifyDefinition = (id: string, version: number) =>
@@ -46,9 +55,24 @@ export const parseQuery = (body: { sql: string; dialect: Dialect; profile?: stri
   request<ParseReport>("POST", "/parse", { body });
 export const proposeDefinition = (body: ProposeDefinitionRequest) =>
   request<ProposalOutcome>("POST", "/proposals/definitions", { body });
+export const reviseDefinition = (id: string, body: ReviseDefinitionRequest) =>
+  request<ProposalOutcome>("POST", `/proposals/definitions/${enc(id)}/revise`, { body });
+export const proposeRecipe = (recipe: RecipeInput, summary: string) =>
+  request<ProposalOutcome>("POST", "/proposals/recipes", { body: { recipe, summary } });
+
+// ── Catalog: recipes, join map, tables (DESIGN §3, §6) ──
+export const listRecipes = (q: string, includeDrafts: boolean, opts: Opts = {}) =>
+  request<Recipe[]>("GET", "/recipes", { ...opts, query: { q, include_drafts: includeDrafts } });
+export const listJoins = (table: string, includeDrafts: boolean, opts: Opts = {}) =>
+  request<JoinEdge[]>("GET", "/joins", { ...opts, query: { table, include_drafts: includeDrafts } });
+/** No names: every table the library reads (at most 50). */
+export const describeTables = (names: string[], profile: string, opts: Opts = {}) =>
+  request<TableCard[]>("GET", "/tables", { ...opts, query: { name: names, profile } });
 
 // ── Run ──
 export const runQuery = (body: RunRequest) => request<RunOutcome>("POST", "/run", { body });
+/** Exploratory SQL (check_and_run): labeled new_logic_on_known_joins or exploratory. */
+export const checkSql = (body: CheckRequest) => request<RunOutcome>("POST", "/check", { body });
 
 // ── Proposals ──
 export const listProposals = (status: ProposalStatus, opts: Opts = {}) =>

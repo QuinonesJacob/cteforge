@@ -105,6 +105,10 @@ them. Join aliases only on their declared join keys; joins that are not known lo
 label to exploratory.
 - Or `recipe_id` (+ optional `values` overrides) instead of `uses` and `select`.
 - `run=false` compiles and labels without running. `limit` caps returned rows.
+- `dialect` (rare): with `run=false`, compile the SQL for another warehouse dialect than \
+the profile's (e.g. to hand it to someone on Snowflake). Definitions written in another \
+dialect are transpiled: a `transpiled` warning lowers the label, and nothing is checked \
+with EXPLAIN. Running always uses the profile's own dialect.
 
 Returns rows, columns, the executed `sql` (tagged for the audit log), `label`, `reasons`, \
 `used`, `values_used` and `issues`. If `usable` is false (refused, or the warehouse failed: \

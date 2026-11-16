@@ -40,8 +40,8 @@ def _value_issues(spec: VariableSpec, value: TypedValue, overridden: bool) -> li
             Issue(
                 code=IssueCode.FIXED_OVERRIDE,
                 severity=Severity.WARNING,
-                message=f"'{spec.name}' is fixed business logic; overriding it means the "
-                "result is no longer the verified definition.",
+                message=f"'{spec.name}' is fixed business logic: overriding fixed business "
+                "logic; the result no longer matches the definition as written.",
                 variable=spec.name,
             )
         )

@@ -152,6 +152,16 @@ def test_fixed_override_and_allowed_values_warn(sample_definition):
     ]
 
 
+def test_fixed_override_message_does_not_claim_the_definition_is_verified(sample_definition):
+    """Regression: the warning said "no longer the verified definition" even for
+    llm_annotated definitions."""
+    result = render(sample_definition, {"won_statuses": ["open"]})
+    (issue,) = result.issues
+    assert "verified" not in issue.message
+    assert "overriding fixed business logic" in issue.message
+    assert "no longer matches the definition as written" in issue.message
+
+
 def test_passing_a_fixed_value_unchanged_does_not_warn(sample_definition):
     result = render(sample_definition, {"won_statuses": ["closed_won", "closed_won_renewal"]})
     assert result.issues == []

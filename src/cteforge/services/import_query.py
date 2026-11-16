@@ -7,6 +7,12 @@ AND the warehouse checks actually ran — results compared and every compared ty
 Otherwise it stays DRAFT (with `checks_incomplete` saying what did not run). Never VERIFIED:
 only a person can verify (ADR 0007).
 
+Another dialect (DESIGN §12, ADR 0013): when the warehouse's dialect is not the SQL's, the
+checks still run, on SQL transpiled to the warehouse's dialect (the original query and the
+template rendered with its original values, both transpiled), and a `dialect_mismatch`
+warning says so. Column types are read from that warehouse. The definition keeps its
+source dialect; running it on that profile transpiles it again and lowers the label.
+
 Check runs never hand back the warehouse's runtime error text (`_run_failure`): it can
 quote data values, and proposal issues are stored and readable by any viewer, also in
 strict mode where exploratory queries are refused. EXPLAIN (compile) errors are kept.
@@ -24,7 +30,13 @@ from cteforge.domain.errors import WarehouseError
 from cteforge.domain.issues import Issue, IssueCode, Severity, has_errors
 from cteforge.domain.models import Definition, DefinitionState
 from cteforge.files.definitions import load_annotations, load_sql, save_definition
-from cteforge.parsing.analyze import QueryAnalysis, Schema, analyze, referenced_tables
+from cteforge.parsing.analyze import (
+    QueryAnalysis,
+    Schema,
+    analyze,
+    referenced_tables,
+    transpile,
+)
 from cteforge.templating.render import render
 from cteforge.templating.roundtrip import RoundTripReport, roundtrip_check
 from cteforge.templating.template import apply_annotations
@@ -60,22 +72,20 @@ def _same_rows(a: list[tuple], b: list[tuple]) -> bool:
     return sorted(map(repr, a)) == sorted(map(repr, b))
 
 
-def _usable_warehouse(
-    dialect: Dialect, warehouse: Warehouse | None
-) -> tuple[Warehouse | None, list[Issue]]:
-    """The warehouse, unless its dialect differs from the SQL's (then nothing runs)."""
-    if warehouse is None:
-        return None, []
-    if warehouse.dialect is not dialect:
-        return None, [
-            _issue(
-                IssueCode.DIALECT_MISMATCH,
-                Severity.ERROR,
-                f"The SQL is {dialect} but the warehouse is {warehouse.dialect}; nothing was "
-                "run. Import against a warehouse of the same dialect.",
-            )
-        ]
-    return warehouse, []
+def _dialect_issues(dialect: Dialect, warehouse: Warehouse | None) -> list[Issue]:
+    """A `dialect_mismatch` warning when the checks run transpiled (ADR 0013)."""
+    if warehouse is None or warehouse.dialect is dialect:
+        return []
+    return [
+        _issue(
+            IssueCode.DIALECT_MISMATCH,
+            Severity.WARNING,
+            f"The SQL is {dialect} but the warehouse is {warehouse.dialect}: the checks ran "
+            f"on the SQL transpiled to {warehouse.dialect}, and runs on this warehouse are "
+            "transpiled too (labeled, lower trust). Import against a warehouse of the same "
+            "dialect for native checks.",
+        )
+    ]
 
 
 # "<context>: <Class> Error: ..." as connectors word it (DuckDB: "Conversion Error"); only
@@ -108,14 +118,18 @@ def _run_failure(exc: WarehouseError) -> Issue:
 def _compare_results(
     sql: str, definition: Definition, warehouse: Warehouse
 ) -> tuple[bool | None, list[Issue]]:
-    """Run the original and the rendered template; (results identical?, issues)."""
+    """Run the original and the rendered template, both in the warehouse's dialect
+    (transpiled when the SQL's differs); (results identical?, issues)."""
+    target = warehouse.dialect
+    source = definition.source_dialect
+    original_sql = sql if target is source else transpile(sql, source, target)
     try:
-        rendered_sql = render(definition, {}).sql
+        rendered_sql = render(definition, {}, target).sql
         warehouse.explain(rendered_sql)
     except WarehouseError as exc:
         return False, [_issue(IssueCode.COMPILE_FAILED, Severity.ERROR, str(exc))]
     try:
-        original = warehouse.run(sql, RESULT_COMPARE_LIMIT)
+        original = warehouse.run(original_sql, RESULT_COMPARE_LIMIT)
         rendered = warehouse.run(rendered_sql, RESULT_COMPARE_LIMIT)
     except WarehouseError as exc:
         return False, [_run_failure(exc)]
@@ -147,8 +161,8 @@ def import_query(
 
     Raises AnnotationError / SqlParseError when no template can be built at all.
     """
-    usable, issues = _usable_warehouse(dialect, warehouse)
-    analysis = analyze_query(sql, dialect, usable)
+    issues = _dialect_issues(dialect, warehouse)
+    analysis = analyze_query(sql, dialect, warehouse)
     annotated = apply_annotations(sql, dialect, analysis, annotations.variables)
     issues += annotated.issues
     definition = Definition(
@@ -172,10 +186,10 @@ def import_query(
         issues.append(_issue(IssueCode.ROUNDTRIP_SQL_DIFFERS, Severity.ERROR, message))
 
     results_match: bool | None = None
-    if usable is not None and report.identical:
-        results_match, run_issues = _compare_results(sql, definition, usable)
+    if warehouse is not None and report.identical:
+        results_match, run_issues = _compare_results(sql, definition, warehouse)
         issues += run_issues
-    elif usable is None and warehouse is None:
+    elif warehouse is None:
         message = "No warehouse: column types and query results were not checked."
         issues.append(_issue(IssueCode.CHECKS_INCOMPLETE, Severity.WARNING, message))
 
@@ -190,8 +204,7 @@ def import_query(
 def analyze_file(
     sql_path: str, dialect: Dialect, warehouse: Warehouse | None = None
 ) -> QueryAnalysis:
-    usable, _ = _usable_warehouse(dialect, warehouse)
-    return analyze_query(load_sql(sql_path), dialect, usable)
+    return analyze_query(load_sql(sql_path), dialect, warehouse)
 
 
 def import_files(

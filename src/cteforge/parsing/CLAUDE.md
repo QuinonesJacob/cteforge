@@ -7,7 +7,7 @@ Reads SQL and reports its structure. Pure. Project root: ../../../CLAUDE.md
   columns, filter literals with stable IDs, the column each literal is compared to (through
   wrappers, CTEs and derived tables), structural context facts, suggested range pairs, and
   grain candidates (date truncations, `QueryAnalysis.grains`, M1.5).
-  Also `parse`, `scopes`, `find_literals` / `FoundLiteral`, `wrapper_sql`, `find_grains` /
+  Also `parse`, `transpile` (one statement from a source to a target dialect), `scopes`, `find_literals` / `FoundLiteral`, `wrapper_sql`, `find_grains` /
   `FoundGrain`, `truncation_unit`, `identifier_units`, `COLUMN_UNIT_PREFIX` and
   `TRUNCATIONS`, shared with templating so both sides
   agree on IDs.

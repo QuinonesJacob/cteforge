@@ -17,9 +17,16 @@ dblink) are only stopped by grants. Always connect as a dedicated read-only role
 ``CREATE ROLE cteforge_ro LOGIN; GRANT USAGE ON SCHEMA s TO cteforge_ro; GRANT SELECT ON
 ALL TABLES IN SCHEMA s TO cteforge_ro;`` (Redshift: a user with only SELECT grants).
 Connection poolers in transaction mode (pgbouncer) need prepared-statement support.
+
+Timeout: every call first runs ``SELECT set_config('statement_timeout', <ms>, true)``
+(transaction-local, i.e. ``SET LOCAL``; the value is a bind parameter) inside its READ ONLY
+transaction, so the profile's ``statement_timeout_s`` applies to each statement; a
+cancelled statement (SQLSTATE 57014) raises ``query timed out after Ns``.
 """
 
 from __future__ import annotations
+
+from typing import Any
 
 from cteforge.domain.connections import WarehouseProfile
 from cteforge.domain.dialects import Dialect
@@ -39,6 +46,8 @@ from cteforge.warehouse.base import (
 # Extended query protocol for every statement: refuses multi-statement strings.
 EXECUTE_OPTIONS = {"prepare": True}
 _CURRENT_SCHEMA = "current_schema()"
+# Transaction-local (is_local = true) like SET LOCAL; SET itself takes no bind parameters.
+STATEMENT_TIMEOUT_SQL = "SELECT set_config('statement_timeout', %s, true)"
 
 
 class PostgresWarehouse:
@@ -62,9 +71,20 @@ class PostgresWarehouse:
         except Exception as exc:
             con.close()
             raise driver_error("Could not make session read-only", exc, sensitive) from None
+        timeout_s = profile.statement_timeout_s
+        self._timeout_ms = None if timeout_s is None else str(timeout_s * 1000)
         self._session = DbApiSession(
-            con, sensitive, execute_options=EXECUTE_OPTIONS, rollback_after=True
+            con,
+            sensitive,
+            execute_options=EXECUTE_OPTIONS,
+            rollback_after=True,
+            prelude=None if timeout_s is None else self._set_timeout,
+            timeout_s=timeout_s,
         )
+
+    def _set_timeout(self, cursor: Any) -> None:
+        """Runs first in every READ ONLY transaction (DbApiSession prelude)."""
+        self._session.execute(cursor, STATEMENT_TIMEOUT_SQL, [self._timeout_ms])
 
     def close(self) -> None:
         self._session.close()

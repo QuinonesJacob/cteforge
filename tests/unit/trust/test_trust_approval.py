@@ -165,7 +165,16 @@ def test_agent_admin_still_never_verifies_or_approves_verified_own_work():
     bot = user(ADMIN, AGENT, name="bot")
     assert can_verify(bot, LLM, author="bot") is False
     assert can_approve(bot, VERIFIED, author="bot") is False
-    assert can_approve(bot, LLM, author="bot") is True  # admin exemption; not verified
+    assert can_approve(bot, LLM, author="bot") is False  # exemption is for humans only
+    assert can_approve(bot, LLM, author="someone-else") is True
+
+
+def test_agent_admin_never_approves_own_unverified_proposal():
+    """ADR 0018 addendum: the admin exemption from four-eyes applies to human admins only."""
+    bot = user(ADMIN, AGENT, name="bot")
+    assert can_approve(bot, None, author="bot") is False
+    assert can_approve(bot, LLM, author="bot") is False
+    assert can_verify(bot, LLM, author="other") is False  # agents never verify
 
 
 def test_approver_may_not_verify_own_version():

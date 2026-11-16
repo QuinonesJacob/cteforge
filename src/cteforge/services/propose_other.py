@@ -10,7 +10,10 @@ target (join edge / recipe id) new or not verified. Otherwise the proposal waits
 - Recipes: validated without running anything (`_apply.recipe_checks`): every use
   resolves to an existing definition, values validate and render, the final SELECT is one
   read-only query, compose accepts it. Proposing an existing recipe id proposes its next
-  version (`base_version` = the latest, re-checked when applied).
+  version (`base_version` = the latest, re-checked when applied). Callers give only a
+  `RecipeInput` (id, title, description, uses, values, select, dialect): `version`,
+  `state` and `schema_version` are set by cteforge, and a mapping that sets them is
+  refused with CodecError instead of being silently ignored.
 """
 
 from __future__ import annotations
@@ -18,11 +21,12 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-from pydantic import ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from cteforge.domain.audit import AuditKind
+from cteforge.domain.dialects import Dialect
 from cteforge.domain.errors import CodecError
-from cteforge.domain.models import DefinitionState, JoinKey, Recipe
+from cteforge.domain.models import DefinitionRef, DefinitionState, Ident, JoinKey, Recipe
 from cteforge.domain.users import User
 from cteforge.services import _apply, _audit, _library
 from cteforge.services.auth import require
@@ -88,11 +92,43 @@ def propose_join(
     return result
 
 
-def recipe_from(raw: Recipe | Mapping[str, Any]) -> Recipe:
+# Recipe fields cteforge sets itself; a caller may not.
+RESERVED_RECIPE_FIELDS = ("version", "state", "schema_version")
+
+
+class RecipeInput(BaseModel):
+    """A recipe as proposed: definitions by reference, values, optional final SELECT."""
+
+    # The MCP/API input schema. RESERVED_RECIPE_FIELDS are deliberately absent: cteforge
+    # sets them when the recipe is applied.
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    id: Ident
+    title: str
+    description: str = ""
+    uses: dict[str, DefinitionRef]
+    values: dict[str, dict[str, Any]] = Field(default_factory=dict)
+    select: str | None = None
+    dialect: Dialect
+
+
+def recipe_from(raw: Recipe | RecipeInput | Mapping[str, Any]) -> Recipe:
     if isinstance(raw, Recipe):
         return raw
+    if isinstance(raw, Mapping):
+        reserved = [k for k in RESERVED_RECIPE_FIELDS if k in raw]
+        if reserved:
+            raise CodecError(
+                f"Invalid recipe: {reserved} cannot be set by a proposal; cteforge sets the "
+                "version and state when the recipe is applied. Remove them."
+            )
+        try:
+            raw = RecipeInput.model_validate(dict(raw))
+        except ValidationError as exc:
+            raise CodecError(f"Invalid recipe: {_apply.validation_detail(exc)}") from None
     try:
-        return Recipe.model_validate(dict(raw))
+        return Recipe.model_validate(raw.model_dump())
     except ValidationError as exc:
         raise CodecError(f"Invalid recipe: {_apply.validation_detail(exc)}") from None
 
@@ -101,11 +137,12 @@ def propose_recipe(
     ctx: AppContext,
     user: User,
     *,
-    recipe: Recipe | Mapping[str, Any],
+    recipe: Recipe | RecipeInput | Mapping[str, Any],
     summary: str = "",
 ) -> ProposalOutcome:
     """Propose a recipe (or the next version of one). Its `version` and `state` are set
-    when it is applied; checks are returned as issues (errors block approval)."""
+    when it is applied (a mapping that sets them, or `schema_version`, raises
+    CodecError); checks are returned as issues (errors block approval)."""
     with _audit.audit_failures(ctx, user, AuditKind.PROPOSE, extra={"op": "propose_recipe"}):
         require(user, Action.PROPOSE)
         proposal = _apply.recipe_proposal(ctx, user, recipe_from(recipe), summary)

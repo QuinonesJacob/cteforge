@@ -402,6 +402,22 @@ def test_run_false_without_any_warehouse_compiles_without_explain(tmp_path: Path
             compile_and_run(bare, AGENT, uses={"rr": {"id": "realization_rate"}})
 
 
+def test_run_false_compiles_for_another_dialect_without_explain(ctx: AppContext) -> None:
+    # DESIGN §12: rendering for another dialect is allowed, labeled and lowers trust.
+    add(ctx, rr_verified())
+    uses = {"rr": {"id": "realization_rate"}}
+    out = compile_and_run(
+        ctx, AGENT, uses=uses, values={"rr": Q3_APAC}, dialect=Dialect.SNOWFLAKE, run=False
+    )
+    assert out.dialect is Dialect.SNOWFLAKE and out.usable and not out.ran
+    codes = {i.code for i in out.issues}
+    assert {IssueCode.TRANSPILED, IssueCode.CHECKS_INCOMPLETE} <= codes
+    assert out.label is not TrustLabel.VERIFIED
+    assert last_event(ctx).outcome is AuditOutcome.OK
+    with pytest.raises(PolicyError, match="run=false"):
+        compile_and_run(ctx, AGENT, uses=uses, dialect=Dialect.SNOWFLAKE, run=True)
+
+
 def test_warehouse_error_returns_run_failed_and_audits_class_only(ctx: AppContext) -> None:
     add(ctx, rr_verified())
     out = compile_and_run(

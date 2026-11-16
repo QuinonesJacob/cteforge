@@ -14,10 +14,13 @@ Choices made here (documented contract):
   verified, or in open mode also llm_annotated); with none, the latest version (trust then
   says why it is refused).
 - Profile: `profile`, else the definitions' own `profile` (all must agree), else the
-  registry default. The target dialect is the profile's dialect; a `dialect` argument that
-  differs is refused (the SQL could not run there). With `run=False` and no warehouse
-  configured at all, SQL is compiled for `dialect` (or the recipe's / the definitions'
-  common source dialect) without EXPLAIN, with a `checks_incomplete` warning.
+  registry default. The target dialect is the profile's dialect. A `dialect` argument that
+  differs is refused when `run=True` (the SQL could not run there); with `run=False` the
+  SQL is only compiled for that dialect (DESIGN §12, ADR 0013: definitions in another
+  source dialect are transpiled and labeled `transpiled`), without EXPLAIN, with a
+  `checks_incomplete` warning naming why. With `run=False` and no warehouse configured at
+  all, SQL is compiled for `dialect` (or the recipe's / the definitions' common source
+  dialect) without EXPLAIN, with a `checks_incomplete` warning.
 - A recipe's own final SELECT is used; passing `select` with `recipe_id` is refused, as is a
   recipe whose dialect differs from the target. Values given with a recipe override the
   recipe's values per variable. A draft recipe is refused (`draft_not_usable`).
@@ -58,6 +61,11 @@ must be connected to the others through known joins: tables read with no known j
 between them (a comma/CROSS join, LATERAL, a subquery in FROM or WHERE, a UNION of
 different tables) make joins unknown. → `new_logic_on_known_joins` or `exploratory`
 (trust.assess, raw_sql=True). Tagged `cteforge: exploratory`.
+When the SQL is AST-equal (after sqlglot parsing in the profile's dialect) to the
+original query of a definition usable in the team mode (its template rendered with its
+original values, `_library.original_sql`; same source dialect), an info issue
+`matches_definition` names it and says to call compile_and_run with that id instead, which
+keeps the definition's trust label. The hint never changes the label.
 """
 
 from __future__ import annotations
@@ -117,6 +125,35 @@ def _warning(code: IssueCode, message: str) -> Issue:
 
 def _error(code: IssueCode, message: str) -> Issue:
     return Issue(code=code, severity=Severity.ERROR, message=message)
+
+
+def _definition_matches(ctx: AppContext, tree: Any, dialect: Dialect) -> list[Issue]:
+    """Info issues for usable definitions whose original query is `tree` (AST-equal)."""
+    states = _library.usable_states(team_mode(ctx))
+    hints: list[Issue] = []
+    for latest in ctx.store.list_definitions():
+        definition = _library.newest_in_states(ctx, latest, states)
+        if definition is None or definition.source_dialect is not dialect:
+            continue
+        try:
+            original = parse(_library.original_sql(definition), dialect)
+        except CteforgeError:
+            continue
+        if original == tree:
+            hints.append(
+                Issue(
+                    code=IssueCode.MATCHES_DEFINITION,
+                    severity=Severity.INFO,
+                    message=(
+                        f"This SQL is the original query of definition '{definition.id}' "
+                        f"v{definition.version} ({definition.state}). Call compile_and_run "
+                        f'with uses={{"{definition.id}": {{"id": "{definition.id}"}}}} '
+                        "instead: it keeps that definition's trust label and lets you change "
+                        "its variables by value."
+                    ),
+                )
+            )
+    return hints
 
 
 def _require(ctx: AppContext, user: User, kind: AuditKind, question: str | None) -> None:
@@ -346,8 +383,9 @@ def _target(
     dialect: Dialect | None,
     select_dialect: Dialect | None,
     run: bool,
-) -> tuple[str | None, Dialect]:
-    """(profile name or None, target dialect). See the module docstring."""
+) -> tuple[str | None, Dialect, str | None]:
+    """(profile name or None, target dialect, why EXPLAIN is skipped or None). See the
+    module docstring."""
     named = sorted({d.profile for d in definitions.values() if d.profile})
     if profile is None and len(named) > 1:
         raise PolicyError(f"The definitions run on different profiles {named}; pass `profile`.")
@@ -359,13 +397,21 @@ def _target(
         if run:
             raise
         name = None
+    unchecked: str | None = None
     if name is not None:
         target = ctx.warehouses.summary(name).dialect
         if dialect is not None and dialect is not target:
-            raise PolicyError(
-                f"Requested dialect {dialect} but profile '{name}' is {target}; "
-                "SQL can only run in the warehouse's own dialect."
+            if run:
+                raise PolicyError(
+                    f"Requested dialect {dialect} but profile '{name}' is {target}; "
+                    "SQL can only run in the warehouse's own dialect. Pass run=false to "
+                    f"only compile it for {dialect} (not checked with EXPLAIN)."
+                )
+            unchecked = (
+                f"Compiled for {dialect}, but profile '{name}' is {target}: the SQL was not "
+                "checked with EXPLAIN and cannot run there."
             )
+            name, target = None, dialect
     elif dialect is not None:
         target = dialect
     elif select_dialect is not None:
@@ -379,7 +425,7 @@ def _target(
         raise PolicyError(
             f"The recipe's SELECT is written in {select_dialect} but the target is {target}."
         )
-    return name, target
+    return name, target, unchecked
 
 
 def _defaults_used(alias: str, definition: Definition, given: Mapping[str, Any]) -> list[Issue]:
@@ -463,8 +509,10 @@ def _execute(
     values: dict[str, Any] | None = None,
     extra: dict[str, Any] | None = None,
     used: list[UsedDefinition] | None = None,
+    unchecked: str | None = None,
 ) -> RunOutcome:
-    """Tag, EXPLAIN, run (if `run`), audit (fail closed), and build the outcome."""
+    """Tag, EXPLAIN, run (if `run`), audit (fail closed), and build the outcome.
+    `profile=None` compiles only; `unchecked` then says why (default: no profile)."""
     compile_id = new_compile_id()
     tagged = tag_sql(sql, sql_tag(definitions, compile_id))
     issues = list(issues)
@@ -491,8 +539,9 @@ def _execute(
         issues.append(
             _warning(
                 IssueCode.CHECKS_INCOMPLETE,
-                "No warehouse profile is configured: the SQL was compiled but not checked "
-                "with EXPLAIN.",
+                unchecked
+                or "No warehouse profile is configured: the SQL was compiled but not "
+                "checked with EXPLAIN.",
             )
         )
         _audit.record(ctx, user, kind, sql=tagged, extra=extra, **audit_fields)
@@ -647,7 +696,9 @@ def _compile_and_run(
     used = list(dict.fromkeys(f"{d.id}@{d.version}" for d in definitions.values()))
     by_ref = {f"{d.id}@{d.version}": used_definition(d) for d in definitions.values()}
     used_cards = list(by_ref.values())
-    profile_name, target = _target(ctx, definitions, profile, dialect, request.select_dialect, run)
+    profile_name, target, unchecked = _target(
+        ctx, definitions, profile, dialect, request.select_dialect, run
+    )
     extra: dict[str, Any] = {"recipe": request.recipe, "aliases": sorted(definitions)}
 
     parts: list[Part] = []
@@ -748,6 +799,7 @@ def _compile_and_run(
         values=plain,
         extra=extra,
         used=used_cards,
+        unchecked=unchecked,
     )
 
 
@@ -845,6 +897,7 @@ def check_and_run(
             mode=team_mode(ctx),
         )
     )
+    issues = [*issues, *_definition_matches(ctx, tree, dialect)]  # hints; label unchanged
     if trust.blocking:
         return _refused(
             ctx,

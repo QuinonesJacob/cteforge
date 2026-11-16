@@ -9,7 +9,7 @@ from cteforge.domain.connections import WarehouseProfile
 from cteforge.domain.dialects import Dialect
 from cteforge.domain.errors import WarehouseError
 from cteforge.warehouse.databricks import DatabricksWarehouse
-from cteforge.warehouse.postgres import PostgresWarehouse
+from cteforge.warehouse.postgres import STATEMENT_TIMEOUT_SQL, PostgresWarehouse
 from cteforge.warehouse.snowflake import SnowflakeWarehouse
 
 SECRET = "hunter2-very-secret"
@@ -129,7 +129,8 @@ def test_postgres_every_call_is_its_own_read_only_transaction(pg):
     wh.run("SELECT 1", limit=1)
     wh.explain("SELECT 1")
     wh.column_types("t")
-    assert [sql for sql, _ in con.executed][:2] == ["SELECT 1", "EXPLAIN SELECT 1"]
+    statements = [sql for sql, _ in con.executed if sql != STATEMENT_TIMEOUT_SQL]
+    assert statements[:2] == ["SELECT 1", "EXPLAIN SELECT 1"]
     assert con.rollbacks == 3  # session settings changed by a SELECT never carry over
 
 
@@ -155,7 +156,7 @@ def test_postgres_statements_use_extended_protocol(pg):
     wh.explain("SELECT 1; SET SESSION CHARACTERISTICS AS TRANSACTION READ WRITE")
     wh.run("SELECT 1", limit=1)
     wh.column_types("t")
-    assert con.execute_options == [{"prepare": True}] * 3
+    assert con.execute_options == [{"prepare": True}] * 6  # 3 calls, each with its timeout
 
 
 def test_postgres_plaintext_secret_option_refused(pg):
@@ -318,6 +319,7 @@ def test_snowflake_connect_kwargs_and_secret(sf):
         "user": "CTEFORGE",
         "role": "CTEFORGE_RO",
         "password": SECRET,
+        "session_parameters": {"STATEMENT_TIMEOUT_IN_SECONDS": 60},  # profile default
     }
 
 
@@ -467,3 +469,63 @@ def test_databricks_error_scrubs_token_and_host(dbx):
         wh.run("SELECT 1", limit=1)
     assert SECRET not in str(err.value)
     assert "adb-123" not in str(err.value)
+
+
+# --- statement timeouts ---------------------------------------------------------------
+
+
+class QueryCanceled(Exception):
+    sqlstate = "57014"
+
+
+def test_postgres_sets_transaction_local_timeout_before_every_statement(pg):
+    wh = PostgresWarehouse(pg_profile(statement_timeout_s=5))
+    con = pg.connections[0]
+    wh.run("SELECT 1", limit=1)
+    wh.explain("SELECT 1")
+    assert con.executed == [
+        (STATEMENT_TIMEOUT_SQL, ["5000"]),
+        ("SELECT 1", None),
+        (STATEMENT_TIMEOUT_SQL, ["5000"]),
+        ("EXPLAIN SELECT 1", None),
+    ]
+    assert con.rollbacks == 2  # set_config(..., true) ends with each transaction
+
+
+def test_postgres_timeout_off_sends_no_setting(pg):
+    wh = PostgresWarehouse(pg_profile(statement_timeout_s=None))
+    wh.run("SELECT 1", limit=1)
+    assert pg.connections[0].executed == [("SELECT 1", None)]
+
+
+def test_postgres_cancelled_statement_reports_timeout(pg):
+    wh = PostgresWarehouse(pg_profile(statement_timeout_s=2))
+    pg.connections[0].fail_with = QueryCanceled("canceling statement due to statement timeout")
+    with pytest.raises(WarehouseError, match=r"^query timed out after 2s$"):
+        wh.run("SELECT pg_sleep(10)", limit=1)
+
+
+def test_snowflake_timeout_session_parameter_and_error(sf):
+    wh = SnowflakeWarehouse(sf_profile(statement_timeout_s=9))
+    con = sf.connections[0]
+    assert con.kwargs["session_parameters"] == {"STATEMENT_TIMEOUT_IN_SECONDS": 9}
+    con.fail_with = QueryCanceled("Statement reached its statement or warehouse timeout")
+    with pytest.raises(WarehouseError, match=r"^query timed out after 9s$"):
+        wh.run("SELECT 1", limit=1)
+
+
+def test_snowflake_timeout_off(sf):
+    SnowflakeWarehouse(sf_profile(statement_timeout_s=None))
+    assert "session_parameters" not in sf.connections[0].kwargs
+
+
+def test_databricks_timeout_session_configuration(dbx):
+    DatabricksWarehouse(dbx_profile())
+    assert dbx.connections[0].kwargs["session_configuration"] == {"STATEMENT_TIMEOUT": "60"}
+
+
+def test_other_errors_are_not_reported_as_timeouts(pg):
+    wh = PostgresWarehouse(pg_profile(statement_timeout_s=2))
+    pg.connections[0].fail_with = RuntimeError("relation does not exist")
+    with pytest.raises(WarehouseError, match="Query failed: relation does not exist"):
+        wh.run("SELECT 1", limit=1)

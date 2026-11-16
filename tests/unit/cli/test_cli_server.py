@@ -68,3 +68,11 @@ def test_mcp_runs_stdio_server(cli: Invoke, monkeypatch: pytest.MonkeyPatch):
     assert result.exit_code == 0, result.output
     assert called == [True]
     assert result.stdout == ""  # stdout belongs to the MCP protocol.
+
+
+def test_serve_never_prints_the_database_password(cli: Invoke, uvicorn_calls):
+    url = "postgresql+psycopg://cteforge:s3cret-pw@db.internal:5432/library"
+    result = cli("serve", CTEFORGE_DB_URL=url, CTEFORGE_BIND_HOST="")
+    assert result.exit_code == 0, result.output
+    assert "s3cret-pw" not in result.output
+    assert "db postgresql+psycopg://cteforge:***@db.internal:5432/library" in result.output

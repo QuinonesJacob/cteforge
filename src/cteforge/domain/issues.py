@@ -45,6 +45,7 @@ class IssueCode(StrEnum):
     STRICT_MODE_BLOCKED = "strict_mode_blocked"
     RUN_FAILED = "run_failed"
     UNUSED_ALIAS = "unused_alias"
+    MATCHES_DEFINITION = "matches_definition"  # check_and_run SQL is a definition's original.
     # Proposals / review / revalidation
     STALE_BASE_VERSION = "stale_base_version"
     PERMISSION_DENIED = "permission_denied"

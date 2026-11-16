@@ -191,6 +191,12 @@ def validate_value(name: str, vtype: VariableType, raw: Any) -> TypedValue:
             case VariableType.DATE_RANGE:
                 if not isinstance(raw, dict):
                     raise ValueError("expected an object with start and end")
+                missing = [k for k in ("start", "end") if k not in raw]
+                if missing:
+                    raise ValueError(" and ".join(f"missing '{k}'" for k in missing))
+                extra = sorted(str(k) for k in raw if k not in ("start", "end"))
+                if extra:
+                    raise ValueError(f"unexpected key(s) {extra}; only 'start' and 'end'")
                 return DateRangeValue(
                     start=_iso_date(raw.get("start")),
                     end=_iso_date(raw.get("end")),

@@ -1,14 +1,16 @@
 import { Link, useParams } from "react-router-dom";
 import { getDefinition, getProposal } from "../api/endpoints";
-import type { ProposalView } from "../api/types";
+import type { JoinEdge, ProposalView, Recipe } from "../api/types";
 import { Badge } from "../components/Badge";
 import { DiffViewer } from "../components/DiffViewer";
 import { ErrorState } from "../components/ErrorState";
 import { ImpactList } from "../components/ImpactList";
 import { IssueList } from "../components/IssueList";
+import { JoinTable } from "../components/JoinTable";
 import { Loading } from "../components/Loading";
 import { PageHeader } from "../components/PageHeader";
 import { ProposalActions } from "../components/ProposalActions";
+import { RecipeSummary } from "../components/RecipeSummary";
 import { SqlViewer } from "../components/SqlViewer";
 import { formatDateTime } from "../lib/format";
 import { canApprove, roleAtLeast, type DecideTarget } from "../lib/roles";
@@ -45,6 +47,9 @@ export function ProposalPage() {
   const p = data as ProposalView;
   const isDefinition = p.kind === "new_definition" || p.kind === "revise_definition";
   const yaml = typeof p.payload.definition_yaml === "string" ? p.payload.definition_yaml : null;
+  // Recipe and join proposals carry the object itself (services/_apply.py payloads).
+  const recipe = p.kind === "new_recipe" && isObject(p.payload.recipe) ? (p.payload.recipe as unknown as Recipe) : null;
+  const join = p.kind === "new_join" && isObject(p.payload.join) ? (p.payload.join as unknown as JoinEdge) : null;
 
   return (
     <div className="page">
@@ -90,16 +95,30 @@ export function ProposalPage() {
             <h2>Checks</h2>
             <IssueList issues={p.checks} emptyText="All checks passed." />
           </section>
-          <section>
-            <h2>Diff</h2>
-            {p.diff ? (
-              <DiffViewer diff={p.diff} />
-            ) : yaml ? (
-              <SqlViewer sql={yaml} label="Proposed definition (new, no previous version)" maxHeight={480} />
-            ) : (
-              <pre className="card mono small payload">{JSON.stringify(p.payload, null, 2)}</pre>
-            )}
-          </section>
+          {recipe && (
+            <section className="card" aria-label="Proposed recipe">
+              <h2>Recipe: {recipe.title}</h2>
+              <RecipeSummary recipe={recipe} />
+            </section>
+          )}
+          {join && (
+            <section className="card" aria-label="Proposed join">
+              <h2>Join</h2>
+              <JoinTable joins={[join]} label="Proposed join" />
+            </section>
+          )}
+          {(p.diff || yaml || (!recipe && !join)) && (
+            <section>
+              <h2>Diff</h2>
+              {p.diff ? (
+                <DiffViewer diff={p.diff} />
+              ) : yaml ? (
+                <SqlViewer sql={yaml} label="Proposed definition (new, no previous version)" maxHeight={480} />
+              ) : (
+                <pre className="card mono small payload">{JSON.stringify(p.payload, null, 2)}</pre>
+              )}
+            </section>
+          )}
         </div>
         <aside className="stack">
           <section className="card">
@@ -117,4 +136,8 @@ export function ProposalPage() {
       </div>
     </div>
   );
+}
+
+function isObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
