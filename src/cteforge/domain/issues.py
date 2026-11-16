@@ -42,6 +42,7 @@ class IssueCode(StrEnum):
     DRAFT_NOT_USABLE = "draft_not_usable"
     STRICT_MODE_BLOCKED = "strict_mode_blocked"
     RUN_FAILED = "run_failed"
+    UNUSED_ALIAS = "unused_alias"
     # Proposals / review / revalidation
     STALE_BASE_VERSION = "stale_base_version"
     PERMISSION_DENIED = "permission_denied"

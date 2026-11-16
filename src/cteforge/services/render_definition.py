@@ -19,6 +19,8 @@ from cteforge.warehouse.base import QueryResult, Warehouse
 
 
 class RenderOutcome(BaseModel):
+    """Rendered SQL (issues on `render.issues`) and, with run=True, the result rows."""
+
     model_config = ConfigDict(frozen=True)
 
     render: RenderResult
@@ -39,9 +41,11 @@ def render_definition(
         return RenderOutcome(render=rendered)
     if warehouse is None:
         raise RenderError("--run needs a warehouse")
-    if warehouse_dialect is not None and rendered.dialect is not warehouse_dialect:
+    wh_dialect = warehouse_dialect or warehouse.dialect
+    if rendered.dialect is not wh_dialect:
         raise RenderError(
-            f"Rendered for {rendered.dialect} but the warehouse is {warehouse_dialect}"
+            f"Rendered for {rendered.dialect} but the warehouse is {wh_dialect}; "
+            f"pass --dialect {wh_dialect} (lowers trust) or use a {rendered.dialect} warehouse"
         )
     warehouse.explain(rendered.sql)
     return RenderOutcome(render=rendered, result=warehouse.run(rendered.sql, limit))

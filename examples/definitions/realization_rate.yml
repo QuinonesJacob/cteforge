@@ -65,29 +65,45 @@ variables:
   role: changeable
   column: deals.closed_at
   column_type: TIMESTAMP
-  literal_form: typed
-  cast_type: TIMESTAMP
   shape: half_open
   original_value:
     start: '2026-01-01'
     end: '2026-04-01'
   description: Deal close date range (end exclusive).
+  slots:
+  - placeholder: period__start
+    field: start
+    literals:
+    - closed_deals.L1
+    literal_form: typed
+    cast_type: TIMESTAMP
+  - placeholder: period__end
+    field: end
+    literals:
+    - closed_deals.L2
+    literal_form: typed
+    cast_type: TIMESTAMP
 - name: won_statuses
   type: text_list
   role: fixed
   column: deals.status
   column_type: VARCHAR
-  literal_form: bare
   original_value:
   - closed_won
   - closed_won_renewal
   description: What counts as a won deal. Business logic — do not change.
+  slots:
+  - placeholder: won_statuses
+    field: ''
+    literals:
+    - closed_deals.L3
+    - closed_deals.L4
+    literal_form: bare
 - name: regions
   type: text_list
   role: changeable
   column: accounts.region
   column_type: VARCHAR
-  literal_form: bare
   original_value:
   - EMEA
   - NA
@@ -97,14 +113,26 @@ variables:
   - APAC
   - LATAM
   description: ''
+  slots:
+  - placeholder: regions
+    field: ''
+    literals:
+    - deals_in_region.L1
+    - deals_in_region.L2
+    literal_form: bare
 - name: paid_status
   type: text
   role: fixed
   column: invoices.status
   column_type: VARCHAR
-  literal_form: bare
   original_value: paid
   description: Only paid invoices count as collected.
+  slots:
+  - placeholder: paid_status
+    field: ''
+    literals:
+    - collected.L1
+    literal_form: bare
 tables:
 - accounts
 - deals
@@ -114,4 +142,5 @@ outputs:
 - region
 - realization_rate
 grain: one row per month per region
+join_keys: []
 state: llm_annotated

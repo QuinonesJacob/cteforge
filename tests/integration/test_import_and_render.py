@@ -15,7 +15,7 @@ def test_static_schema_matches_warehouse(warehouse, sample_schema):
 
 def test_import_proves_same_results(sample_sql, sample_annotations, warehouse):
     outcome = import_query(sample_sql, D, sample_annotations, warehouse)
-    assert outcome.problems == []
+    assert outcome.issues == []
     assert outcome.roundtrip.identical
     assert outcome.results_match is True
     assert outcome.definition.state is DefinitionState.LLM_ANNOTATED  # never auto-verified

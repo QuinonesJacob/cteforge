@@ -1,9 +1,18 @@
 import datetime as dt
+from decimal import Decimal
 
 import pytest
 
 from cteforge.domain.errors import VariableValueError
-from cteforge.domain.variables import DateRangeValue, VariableType, validate_value
+from cteforge.domain.variables import (
+    DateRangeValue,
+    VariableType,
+    placeholder_name,
+    read_date,
+    to_plain,
+    validate_value,
+    write_date,
+)
 
 
 def test_date_range_accepts_iso_dates():
@@ -57,10 +66,59 @@ def test_rejects_wrong_types(vtype, raw):
     [
         (VariableType.TEXT_LIST, ["EMEA"], ["EMEA"]),
         (VariableType.TEXT, "paid", "paid"),
-        (VariableType.NUMBER, 0.5, 0.5),
+        (VariableType.NUMBER, 0.5, Decimal("0.5")),
         (VariableType.BOOLEAN, False, False),
         (VariableType.DATE, "2026-07-01", dt.date(2026, 7, 1)),
     ],
 )
 def test_accepts_valid_values(vtype, raw, expected):
     assert validate_value("v", vtype, raw) == expected
+
+
+# ── numbers (finite, exact) ─────────────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    "raw", [float("inf"), float("-inf"), float("nan"), Decimal("NaN"), Decimal("Infinity")]
+)
+def test_number_rejects_non_finite(raw):
+    with pytest.raises(VariableValueError, match="NaN and Infinity"):
+        validate_value("n", VariableType.NUMBER, raw)
+
+
+@pytest.mark.parametrize("raw", ["1000.50", "5", None, [1], False])
+def test_number_input_is_a_json_number_only(raw):
+    with pytest.raises(VariableValueError, match="a JSON number"):
+        validate_value("n", VariableType.NUMBER, raw)
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [(1000.5, Decimal("1000.5")), (7, Decimal(7)), (Decimal("1000.50"), Decimal("1000.50"))],
+)
+def test_number_is_validated_into_exact_decimal(raw, expected):
+    value = validate_value("n", VariableType.NUMBER, raw)
+    assert isinstance(value, Decimal) and str(value) == str(expected)
+
+
+def test_number_to_plain():
+    assert to_plain(VariableType.NUMBER, Decimal("1E+3")) == 1000
+    assert isinstance(to_plain(VariableType.NUMBER, Decimal("1E+3")), int)
+    assert to_plain(VariableType.NUMBER, Decimal("1000.50")) == 1000.5
+
+
+def test_placeholder_names_per_place():
+    assert placeholder_name("period", "start") == "period__start"
+    assert placeholder_name("period", "start", 2) == "period__2__start"
+    assert placeholder_name("regions") == "regions"
+    assert placeholder_name("regions", "", 3) == "regions__3"
+
+
+def test_read_and_write_date_with_format():
+    assert read_date("03-04-2026", "%m-%d-%Y") == dt.date(2026, 3, 4)
+    assert write_date(dt.date(2026, 3, 4), "%m-%d-%Y") == "03-04-2026"
+    assert read_date("2026-03-04", None) == dt.date(2026, 3, 4)
+    with pytest.raises(ValueError, match="YYYY-MM-DD"):
+        read_date("2026-03-04 00:00:00", None)
+    with pytest.raises(ValueError, match="time of day"):
+        read_date("03-04-2026 10:30", "%m-%d-%Y %H:%M")

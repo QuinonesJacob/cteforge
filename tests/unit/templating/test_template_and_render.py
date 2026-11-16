@@ -2,6 +2,7 @@ import pytest
 
 from cteforge.domain.dialects import Dialect
 from cteforge.domain.errors import AnnotationError, RenderError, VariableValueError
+from cteforge.domain.issues import IssueCode, Severity
 from cteforge.domain.models import Annotation, LiteralForm
 from cteforge.domain.variables import RangeShape, Role, VariableType
 from cteforge.parsing.analyze import analyze
@@ -30,7 +31,13 @@ def test_variable_specs(sample_definition):
     period = sample_definition.variable("period")
     assert period.type is VariableType.DATE_RANGE
     assert period.shape is RangeShape.HALF_OPEN
-    assert period.literal_form is LiteralForm.TYPED and period.cast_type == "TIMESTAMP"
+    assert [(s.placeholder, s.field, s.literals) for s in period.slots] == [
+        ("period__start", "start", ["closed_deals.L1"]),
+        ("period__end", "end", ["closed_deals.L2"]),
+    ]
+    assert all(
+        s.literal_form is LiteralForm.TYPED and s.cast_type == "TIMESTAMP" for s in period.slots
+    )
     assert period.column == "deals.closed_at" and period.column_type == "TIMESTAMP"
     assert period.original_value == {"start": "2026-01-01", "end": "2026-04-01"}
     assert sample_definition.variable("won_statuses").role is Role.FIXED
@@ -61,15 +68,26 @@ def test_swapped_range_bounds_are_rejected(sample_sql, sample_schema):
         type=VariableType.DATE_RANGE,
         literals=["closed_deals.L2", "closed_deals.L1"],
     )
-    with pytest.raises(AnnotationError, match="not a lower/upper bound pair"):
+    with pytest.raises(AnnotationError, match="other order.*closed_deals.L1, closed_deals.L2"):
         apply_annotations(sample_sql, D, analysis, [wrong])
 
 
 def test_type_must_fit_warehouse_column(sample_schema):
+    sql = "SELECT * FROM deals WHERE status = '2026-01-01'"
+    analysis = analyze(sql, D, sample_schema)
+    wrong = Annotation(name="s", type=VariableType.DATE, literals=["main.L1"])
+    issues = apply_annotations(sql, D, analysis, [wrong]).issues
+    assert [(i.code, i.severity, i.literal) for i in issues] == [
+        (IssueCode.TYPE_MISMATCH, Severity.ERROR, "main.L1")
+    ]
+    assert "VARCHAR" in issues[0].message
+
+
+def test_non_date_text_cannot_be_a_date_variable(sample_schema):
     sql = "SELECT * FROM deals WHERE status = 'open'"
     analysis = analyze(sql, D, sample_schema)
     wrong = Annotation(name="s", type=VariableType.DATE, literals=["main.L1"])
-    with pytest.raises(AnnotationError):
+    with pytest.raises(AnnotationError, match="can't be read"):
         apply_annotations(sql, D, analysis, [wrong])
 
 
@@ -112,7 +130,7 @@ def test_render_new_values(sample_definition):
     assert "CAST('2026-07-01' AS TIMESTAMP)" in result.sql
     assert "IN ('EMEA')" in result.sql
     assert "'closed_won', 'closed_won_renewal'" in result.sql  # fixed logic untouched
-    assert result.warnings == [] and not result.transpiled
+    assert result.issues == [] and not result.transpiled
     assert "$period" not in result.sql
 
 
@@ -128,8 +146,21 @@ def test_render_rejects_unknown_variable(sample_definition):
 
 def test_fixed_override_and_allowed_values_warn(sample_definition):
     result = render(sample_definition, {"won_statuses": ["open"], "regions": ["MARS"]})
-    assert any("fixed business logic" in w for w in result.warnings)
-    assert any("outside approved values" in w for w in result.warnings)
+    assert [(i.code, i.severity, i.variable) for i in result.issues] == [
+        (IssueCode.FIXED_OVERRIDE, Severity.WARNING, "won_statuses"),
+        (IssueCode.VALUE_NOT_ALLOWED, Severity.WARNING, "regions"),
+    ]
+
+
+def test_passing_a_fixed_value_unchanged_does_not_warn(sample_definition):
+    result = render(sample_definition, {"won_statuses": ["closed_won", "closed_won_renewal"]})
+    assert result.issues == []
+
+
+def test_transpile_is_an_issue(sample_definition):
+    result = render(sample_definition, {}, Dialect.SNOWFLAKE)
+    assert result.transpiled
+    assert [i.code for i in result.issues] == [IssueCode.TRANSPILED]
 
 
 def test_values_cannot_inject_sql(sample_definition):

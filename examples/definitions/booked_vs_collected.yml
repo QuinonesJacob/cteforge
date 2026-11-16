@@ -1,0 +1,151 @@
+schema_version: 1
+id: booked_vs_collected
+version: 1
+title: Booked vs Collected (by region, one period)
+meaning: Won revenue booked in a period per region, next to the cash collected from
+  paid invoices issued in the same period. Regions below a minimum booked amount are
+  left out.
+keywords:
+- booked revenue
+- collections
+- cash collected
+- bookings
+use_when: Comparing what was booked with what was collected in the same period.
+dont_use_when: Realization of specific deals — use realization_rate (it follows each
+  deal's invoices).
+source_dialect: duckdb
+template: |-
+  /* Booked vs collected revenue per region for one period (synthetic example). */
+  /* The period appears twice: deals are filtered by close date (written as US-style text */
+  /* parsed with strptime) and invoices by invoice date (a typed TIMESTAMP literal). */
+  WITH booked AS (
+    SELECT
+      a.region,
+      SUM(d.amount) AS booked
+    FROM deals AS d
+    JOIN accounts AS a
+      ON a.account_id = d.account_id
+    WHERE
+      d.closed_at >= STRPTIME($period__start, '%m-%d-%Y')
+      AND d.closed_at < STRPTIME($period__end, '%m-%d-%Y')
+      AND d.status IN ($won_statuses)
+    GROUP BY
+      a.region
+  ), collected AS (
+    SELECT
+      a.region,
+      SUM(i.paid_amount) AS collected
+    FROM invoices AS i
+    JOIN deals AS d
+      ON d.deal_id = i.deal_id
+    JOIN accounts AS a
+      ON a.account_id = d.account_id
+    WHERE
+      i.invoiced_at >= $period__2__start
+      AND i.invoiced_at < $period__2__end
+      AND i.status = $paid_status
+    GROUP BY
+      a.region
+  )
+  SELECT
+    b.region,
+    b.booked,
+    COALESCE(c.collected, 0) AS collected
+  FROM booked AS b
+  LEFT JOIN collected AS c
+    ON c.region = b.region
+  WHERE
+    b.booked >= $min_booked * 1000
+  ORDER BY
+    b.region
+variables:
+- name: period
+  type: date_range
+  role: changeable
+  column: deals.closed_at
+  column_type: TIMESTAMP
+  shape: half_open
+  original_value:
+    start: '2025-07-01'
+    end: '2025-10-01'
+  description: Period for both deal close dates and invoice dates (end exclusive).
+  slots:
+  - placeholder: period__start
+    field: start
+    literals:
+    - booked.L1
+    literal_form: bare
+    format: '%m-%d-%Y'
+  - placeholder: period__end
+    field: end
+    literals:
+    - booked.L2
+    literal_form: bare
+    format: '%m-%d-%Y'
+  - placeholder: period__2__start
+    field: start
+    literals:
+    - collected.L1
+    literal_form: typed
+    cast_type: TIMESTAMP
+  - placeholder: period__2__end
+    field: end
+    literals:
+    - collected.L2
+    literal_form: typed
+    cast_type: TIMESTAMP
+- name: won_statuses
+  type: text_list
+  role: fixed
+  column: deals.status
+  column_type: VARCHAR
+  original_value:
+  - closed_won
+  - closed_won_renewal
+  description: What counts as a won deal. Business logic — do not change.
+  slots:
+  - placeholder: won_statuses
+    field: ''
+    literals:
+    - booked.L3
+    - booked.L4
+    literal_form: bare
+- name: paid_status
+  type: text
+  role: fixed
+  column: invoices.status
+  column_type: VARCHAR
+  original_value: paid
+  description: Only paid invoices count as collected.
+  slots:
+  - placeholder: paid_status
+    field: ''
+    literals:
+    - collected.L3
+    literal_form: bare
+- name: min_booked
+  type: number
+  role: changeable
+  column: booked.booked
+  column_type: DECIMAL(12, 2)
+  unit: thousand USD
+  original_value: 1200.5
+  description: Leave out regions that booked less than this in the period.
+  slots:
+  - placeholder: min_booked
+    field: ''
+    literals:
+    - main.L1
+    literal_form: bare
+    original_text: '1200.50'
+tables:
+- accounts
+- deals
+- invoices
+outputs:
+- region
+- booked
+- collected
+grain: one row per region
+join_keys: []
+state: llm_annotated

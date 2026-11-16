@@ -2,6 +2,10 @@
 
 Definition files carry `schema_version`; bump SCHEMA_VERSION and add a migration here
 when the format changes.
+
+Legacy layout (M1, still schema_version 1): a variable carried `literal_form` / `cast_type`
+itself and filled exactly one place. It is read by converting it to one place of `slots`
+(`_legacy_slots`); files are always written in the current layout.
 """
 
 from __future__ import annotations
@@ -13,6 +17,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from cteforge.domain.errors import CodecError
 from cteforge.domain.models import SCHEMA_VERSION, Annotation, Definition
+from cteforge.domain.variables import PLACEHOLDER_FIELDS, VariableType, placeholder_name
 
 
 class AnnotationFile(BaseModel):
@@ -44,6 +49,27 @@ def _describe(exc: ValidationError) -> str:
     return "; ".join(f"{'.'.join(str(p) for p in e['loc'])}: {e['msg']}" for e in exc.errors())
 
 
+def _legacy_slots(variable: Any) -> Any:
+    """M1 variable (literal_form/cast_type, one place) → current layout with `slots`."""
+    if not isinstance(variable, dict) or "slots" in variable:
+        return variable
+    try:
+        fields = PLACEHOLDER_FIELDS[VariableType(variable.get("type"))]
+    except ValueError:
+        return variable  # Let validation report the bad type.
+    migrated = {k: v for k, v in variable.items() if k not in ("literal_form", "cast_type")}
+    migrated["slots"] = [
+        {
+            "placeholder": placeholder_name(str(variable.get("name")), field),
+            "field": field,
+            "literal_form": variable.get("literal_form", "bare"),
+            "cast_type": variable.get("cast_type"),
+        }
+        for field in fields
+    ]
+    return migrated
+
+
 def definition_from_yaml(text: str) -> Definition:
     data = _load_yaml(text)
     version = data.get("schema_version", SCHEMA_VERSION)
@@ -51,6 +77,8 @@ def definition_from_yaml(text: str) -> Definition:
         raise CodecError(
             f"Unsupported definition schema_version {version} (expected {SCHEMA_VERSION})"
         )
+    if isinstance(data.get("variables"), list):
+        data = {**data, "variables": [_legacy_slots(v) for v in data["variables"]]}
     try:
         return Definition.model_validate(data)
     except ValidationError as exc:

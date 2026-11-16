@@ -7,6 +7,7 @@ This is the ONLY place variable values are validated. Rendering (templating/) ca
 from __future__ import annotations
 
 import datetime as dt
+from decimal import Decimal, InvalidOperation
 from enum import StrEnum
 from typing import Any
 
@@ -46,7 +47,9 @@ class RangeShape(StrEnum):
     START_EXCLUSIVE = "start_exclusive"  # col > start AND col <= end   (start, end]
 
 
-# How many literals in the SQL each type replaces, and the placeholder suffixes used.
+# One *place* of a variable = one occurrence of its filter in the SQL: a pair of bounds
+# (date_range), one whole IN list (text_list) or one literal. Each field is one slot of the
+# place and names its placeholder suffix. A variable may fill several places (ADR 0015).
 PLACEHOLDER_FIELDS: dict[VariableType, tuple[str, ...]] = {
     VariableType.DATE_RANGE: ("start", "end"),
     VariableType.DATE: ("",),
@@ -57,9 +60,15 @@ PLACEHOLDER_FIELDS: dict[VariableType, tuple[str, ...]] = {
 }
 
 
-def placeholder_name(variable: str, field: str = "") -> str:
-    """Placeholder identifier used in stored templates (ADR 0011): `period__start`."""
-    return f"{variable}__{field}" if field else variable
+def placeholder_name(variable: str, field: str = "", place: int = 1) -> str:
+    """Placeholder identifier used in stored templates (ADR 0011).
+
+    Place 1: `period__start`, `regions`. Place n ≥ 2 (ADR 0015, multi-place variables):
+    `period__2__start`, `regions__2`. Variable names never contain `__`, so these can't
+    collide with another variable.
+    """
+    parts = [variable, *([str(place)] if place > 1 else []), *([field] if field else [])]
+    return "__".join(parts)
 
 
 class DateRangeValue(BaseModel):
@@ -75,6 +84,11 @@ class DateRangeValue(BaseModel):
         return self
 
 
+NUMBER_INPUT_RULE = (
+    "a JSON number (not a string, not NaN/Infinity), e.g. 100 or 1000.5; "
+    "agents convert units themselves (see the variable's unit)"
+)
+
 _TEXT = TypeAdapter(str, config=ConfigDict(strict=True))
 _BOOL = TypeAdapter(StrictBool)
 
@@ -83,11 +97,12 @@ _FORMATS: dict[VariableType, str] = {
     VariableType.DATE: '"YYYY-MM-DD"',
     VariableType.TEXT_LIST: '["a", "b"] (non-empty list of strings)',
     VariableType.TEXT: '"text"',
-    VariableType.NUMBER: "a number, e.g. 100 or 0.5",
+    VariableType.NUMBER: NUMBER_INPUT_RULE,
     VariableType.BOOLEAN: "true or false",
 }
 
-TypedValue = DateRangeValue | dt.date | list[str] | str | int | float | bool
+# Numbers are validated into Decimal so rendering keeps exact text (1000.50, ADR 0014).
+TypedValue = DateRangeValue | dt.date | list[str] | str | Decimal | bool
 
 
 def expected_format(vtype: VariableType) -> str:
@@ -103,6 +118,44 @@ def _iso_date(raw: Any) -> dt.date:
     if not isinstance(raw, str) or len(raw) != 10:
         raise ValueError("expected an ISO date string YYYY-MM-DD")
     return dt.date.fromisoformat(raw)
+
+
+def _number(raw: Any) -> Decimal:
+    if isinstance(raw, bool) or not isinstance(raw, int | float | Decimal):
+        raise ValueError("expected a JSON number, not a string or other value")
+    number = Decimal(repr(raw)) if isinstance(raw, float) else Decimal(raw)
+    if not number.is_finite():
+        raise ValueError("NaN and Infinity are not numbers SQL can compare to")
+    return number
+
+
+def number_from_text(text: str) -> Decimal:
+    """A numeric literal's text as written in SQL ("1000.50", "1e3", "-5") → Decimal."""
+    try:
+        number = Decimal(text)
+    except InvalidOperation as exc:
+        raise ValueError(f"{text!r} is not a number") from exc
+    if not number.is_finite():
+        raise ValueError(f"{text!r} is not a finite number")
+    return number
+
+
+def read_date(text: str, fmt: str | None) -> dt.date:
+    """Date text as written in SQL → date. `fmt` is a strftime pattern (ADR 0014);
+    None means ISO YYYY-MM-DD. Raises ValueError when the text doesn't match."""
+    if fmt is None:
+        if len(text) != 10:
+            raise ValueError(f"{text!r} is not a plain YYYY-MM-DD date")
+        return dt.date.fromisoformat(text)
+    parsed = dt.datetime.strptime(text, fmt)
+    if parsed.time() != dt.time():
+        raise ValueError(f"{text!r} has a time of day; date variables hold dates only")
+    return parsed.date()
+
+
+def write_date(value: dt.date, fmt: str | None) -> str:
+    """Inverse of read_date: ISO when `fmt` is None, else strftime(fmt)."""
+    return value.isoformat() if fmt is None else value.strftime(fmt)
 
 
 def validate_value(name: str, vtype: VariableType, raw: Any) -> TypedValue:
@@ -129,9 +182,7 @@ def validate_value(name: str, vtype: VariableType, raw: Any) -> TypedValue:
             case VariableType.TEXT:
                 return _TEXT.validate_python(raw)
             case VariableType.NUMBER:
-                if isinstance(raw, bool) or not isinstance(raw, int | float):
-                    raise ValueError("expected a number")
-                return raw
+                return _number(raw)
             case VariableType.BOOLEAN:
                 return _BOOL.validate_python(raw)
     except (ValueError, TypeError, ValidationError) as exc:
@@ -151,4 +202,7 @@ def to_plain(vtype: VariableType, value: TypedValue) -> Any:
     if vtype is VariableType.DATE:
         assert isinstance(value, dt.date)
         return value.isoformat()
+    if vtype is VariableType.NUMBER:
+        assert isinstance(value, Decimal)
+        return int(value) if value == value.to_integral_value() else float(value)
     return value

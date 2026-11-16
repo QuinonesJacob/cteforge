@@ -27,7 +27,7 @@ class RoundTripReport(BaseModel):
 def roundtrip_check(original_sql: str, definition: Definition) -> RoundTripReport:
     dialect = str(definition.source_dialect)
     original = parse(original_sql, definition.source_dialect)
-    rendered, _, _ = render_tree(definition, {})
+    rendered, _, _ = render_tree(definition, {})  # target = source: no transpile
     if rendered == original:
         return RoundTripReport(identical=True)
     diff = "\n".join(

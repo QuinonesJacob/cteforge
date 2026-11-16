@@ -7,10 +7,10 @@ import re
 from enum import StrEnum
 from typing import Annotated, Any
 
-from pydantic import AfterValidator, BaseModel, ConfigDict, Field
+from pydantic import AfterValidator, BaseModel, ConfigDict, Field, model_validator
 
 from cteforge.domain.dialects import Dialect
-from cteforge.domain.variables import RangeShape, Role, VariableType
+from cteforge.domain.variables import PLACEHOLDER_FIELDS, RangeShape, Role, VariableType
 
 SCHEMA_VERSION = 1
 _IDENT = re.compile(r"^[a-z][a-z0-9_]*$")
@@ -25,6 +25,7 @@ def _check_ident(value: str) -> str:
 
 
 Ident = Annotated[str, AfterValidator(_check_ident)]
+_DATE_TYPES = (VariableType.DATE, VariableType.DATE_RANGE)
 
 
 class DefinitionState(StrEnum):
@@ -70,10 +71,15 @@ class LiteralForm(StrEnum):
 
 
 class Annotation(BaseModel):
-    """What a person or LLM says about some literals: "these are variable X".
+    """What a person or LLM says about some literals: "these are variable X" (ADR 0015).
 
-    `literals` are literal IDs reported by parsing.analyze (e.g. "closed_deals.L1").
-    date_range takes [start_id, end_id]; text_list takes every literal of one IN list.
+    `literals` are literal IDs reported by parsing.analyze (e.g. "closed_deals.L1"),
+    grouped into *places* — occurrences of the same filter (e.g. one period used in two
+    CTEs). Every place must hold the same original value.
+    - date_range: [start, end] pairs in order; two places = [s1, e1, s2, e2].
+    - text_list: every literal of one IN list, in order. Several lists may follow each
+      other; a new place starts where the IN group (LiteralInfo.in_list) changes.
+    - date, text, number, boolean: one literal per place.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -85,24 +91,70 @@ class Annotation(BaseModel):
     column: str | None = None  # What it filters, e.g. "deals.closed_at". Optional hint.
     description: str = ""
     allowed: list[Any] | None = None
+    # date/date_range only: strftime pattern of bare non-ISO date text, e.g. "%m-%d-%Y"
+    # (ADR 0014). Overrides the format parsing suggests; applies to bare places only.
+    format: str | None = None
+    unit: str | None = None  # number only: what the number means, e.g. "TFLOPS" (ADR 0014).
+
+
+class VariableSlot(BaseModel):
+    """One placeholder in the template that a variable fills: one literal position of the
+    trusted SQL (one bound of a date_range, a whole IN list for text_list).
+
+    A place is `len(PLACEHOLDER_FIELDS[type])` consecutive slots; slots carry their own
+    form, cast and format so different places of one variable may be written differently.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    placeholder: str  # Name in the template (variables.placeholder_name), e.g. period__start.
+    field: str = ""  # date_range: "start" / "end"; "" otherwise.
+    literals: list[str] = Field(default_factory=list)  # Literal IDs it replaced (provenance).
+    literal_form: LiteralForm = LiteralForm.BARE
+    cast_type: str | None = None  # Source-dialect type when literal_form is TYPED.
+    format: str | None = None  # strftime pattern for bare date text; None = ISO YYYY-MM-DD.
+    original_text: str | None = None  # number: literal as written ("1000.50", "1e3"), so
+    #                                   the original value renders back exactly.
 
 
 class VariableSpec(BaseModel):
-    """A typed hole in a definition's template (DESIGN §4)."""
+    """A typed hole in a definition's template (DESIGN §4).
+
+    Agents see name, type, role, description, column, shape, unit, allowed and
+    original_value. `slots` say where and how the value is written into the template.
+    """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     name: Ident
     type: VariableType
     role: Role
-    column: str | None = None
-    column_type: str | None = None  # From the warehouse, never from an LLM (ADR 0006).
-    literal_form: LiteralForm = LiteralForm.BARE
-    cast_type: str | None = None  # Source-dialect type when literal_form is TYPED.
-    shape: RangeShape | None = None  # date_range only.
+    column: str | None = None  # What the first place filters, e.g. "deals.closed_at".
+    column_type: str | None = None  # Compared type from the warehouse, never from an LLM
+    #                                 (ADR 0006); the expression's type when wrapped.
+    shape: RangeShape | None = None  # date_range only; None = not a suggested pair (ADR 0015).
+    format: str | None = None  # The analyst's explicit format (Annotation.format), if any.
+    unit: str | None = None  # number only.
     original_value: Any  # Plain (JSON-friendly) value from the trusted SQL.
     allowed: list[Any] | None = None
     description: str = ""
+    slots: list[VariableSlot] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def _consistent(self) -> VariableSpec:
+        if self.format is not None and self.type not in _DATE_TYPES:
+            raise ValueError(f"format applies to date and date_range only, not {self.type}")
+        if self.unit is not None and self.type is not VariableType.NUMBER:
+            raise ValueError(f"unit applies to number only, not {self.type}")
+        fields = PLACEHOLDER_FIELDS[self.type]
+        if [s.field for s in self.slots] != list(fields) * (len(self.slots) // len(fields)):
+            raise ValueError(f"slots of a {self.type} must repeat the fields {list(fields)}")
+        return self
+
+    def places(self) -> list[list[VariableSlot]]:
+        """Slots grouped by place (each group follows PLACEHOLDER_FIELDS[type])."""
+        size = len(PLACEHOLDER_FIELDS[self.type])
+        return [self.slots[i : i + size] for i in range(0, len(self.slots), size)]
 
 
 class Definition(BaseModel):
@@ -119,7 +171,9 @@ class Definition(BaseModel):
     use_when: str = ""
     dont_use_when: str = ""
     source_dialect: Dialect
-    template: str  # SQL with named placeholders in source_dialect syntax (ADR 0011).
+    # SQL with named placeholders written in source_dialect syntax (ADR 0011), e.g.
+    # `$period__start` (DuckDB), `:period__start` (Snowflake); see VariableSlot.placeholder.
+    template: str
     variables: list[VariableSpec] = Field(default_factory=list)
     tables: list[str] = Field(default_factory=list)
     outputs: list[str] = Field(default_factory=list)

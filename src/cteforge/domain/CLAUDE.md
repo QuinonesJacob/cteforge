@@ -4,7 +4,8 @@ Pure data models of cteforge. Everything else depends on this; it depends on not
 cteforge. Project root: ../../../CLAUDE.md
 
 ## What belongs here (authoritative)
-- `models.py` — Definition, Annotation, VariableSpec, DefinitionVersionInfo, Recipe,
+- `models.py` — Definition, Annotation, VariableSpec, VariableSlot (one place a
+  variable fills; M1 files migrate on read), DefinitionVersionInfo, Recipe,
   DefinitionRef, JoinEdge, JoinKey, DefinitionState, TrustLabel (+ TRUST_ORDER), TeamMode.
 - `variables.py` — VariableType enum and the strict input model + validation per type.
 - `dialects.py` — Dialect enum.

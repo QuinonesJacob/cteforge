@@ -1,0 +1,36 @@
+# What a person (or an LLM via propose_definition) says about the trusted query.
+# Literal IDs come from: cteforge parse examples/queries/booked_vs_collected.sql
+# Shows: one variable bound in two places (ADR 0015), a value wrapped in strptime with a
+# format suggested by the SQL (ADR 0014), and a number inside arithmetic with a unit.
+id: booked_vs_collected
+title: Booked vs Collected (by region, one period)
+meaning: >-
+  Won revenue booked in a period per region, next to the cash collected from paid invoices
+  issued in the same period. Regions below a minimum booked amount are left out.
+keywords: [booked revenue, collections, cash collected, bookings]
+use_when: Comparing what was booked with what was collected in the same period.
+dont_use_when: Realization of specific deals — use realization_rate (it follows each deal's invoices).
+grain: one row per region
+variables:
+  - name: period
+    type: date_range
+    role: changeable
+    # Place 1: deals closed (strptime text, '%m-%d-%Y'); place 2: invoices issued (TIMESTAMP).
+    literals: [booked.L1, booked.L2, collected.L1, collected.L2]
+    description: Period for both deal close dates and invoice dates (end exclusive).
+  - name: won_statuses
+    type: text_list
+    role: fixed
+    literals: [booked.L3, booked.L4]
+    description: What counts as a won deal. Business logic — do not change.
+  - name: paid_status
+    type: text
+    role: fixed
+    literals: [collected.L3]
+    description: Only paid invoices count as collected.
+  - name: min_booked
+    type: number
+    role: changeable
+    literals: [main.L1]
+    unit: thousand USD
+    description: Leave out regions that booked less than this in the period.

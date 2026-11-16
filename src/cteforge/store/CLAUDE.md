@@ -58,6 +58,11 @@ class Store:
 Errors: `StoreError`, `StaleVersionError` from domain/errors.py. Missing rows return None
 (getters) or raise StoreError (mutators).
 
+Concurrency: a Store is safe to share across threads. In-memory SQLite ("sqlite://") uses
+one shared connection, so every call is serialized by a lock. Upserts (`upsert_join`,
+`set_setting`) retry once in a fresh transaction when a concurrent first-time INSERT of
+the same key wins (READ COMMITTED on Postgres).
+
 ## Common misplacements
 - Definition serialization — reuse domain/codec.py.
 - Approval rules, permissions, auto-apply — services/. Trust labels — trust/.

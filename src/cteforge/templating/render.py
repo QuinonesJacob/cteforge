@@ -9,7 +9,8 @@ from sqlglot import exp
 
 from cteforge.domain.dialects import Dialect
 from cteforge.domain.errors import RenderError
-from cteforge.domain.models import Definition
+from cteforge.domain.issues import Issue, IssueCode, Severity
+from cteforge.domain.models import Definition, VariableSpec
 from cteforge.domain.variables import Role, TypedValue, to_plain, validate_value
 from cteforge.parsing.analyze import parse
 from cteforge.templating.literals import Replacement, build_replacements
@@ -21,42 +22,59 @@ class RenderResult(BaseModel):
     sql: str
     dialect: Dialect
     values: dict[str, Any]  # Plain values actually used (incl. defaults).
-    warnings: list[str]
+    issues: list[Issue]  # fixed_override, value_not_allowed, transpiled (all warnings).
     transpiled: bool  # True when target dialect != source dialect (lower trust, ADR 0013).
+
+
+def _value_issues(spec: VariableSpec, value: TypedValue, overridden: bool) -> list[Issue]:
+    issues: list[Issue] = []
+    if overridden and spec.role is Role.FIXED:
+        issues.append(
+            Issue(
+                code=IssueCode.FIXED_OVERRIDE,
+                severity=Severity.WARNING,
+                message=f"'{spec.name}' is fixed business logic; overriding it means the "
+                "result is no longer the verified definition.",
+                variable=spec.name,
+            )
+        )
+    if spec.allowed is not None:
+        plain = to_plain(spec.type, value)
+        outside = [
+            v for v in (plain if isinstance(plain, list) else [plain]) if v not in spec.allowed
+        ]
+        if outside:
+            issues.append(
+                Issue(
+                    code=IssueCode.VALUE_NOT_ALLOWED,
+                    severity=Severity.WARNING,
+                    message=f"'{spec.name}': {outside} outside approved values "
+                    f"{spec.allowed}; results may be empty or unapproved.",
+                    variable=spec.name,
+                )
+            )
+    return issues
 
 
 def _resolve_values(
     definition: Definition, values: dict[str, Any]
-) -> tuple[dict[str, TypedValue], list[str]]:
+) -> tuple[dict[str, TypedValue], list[Issue]]:
     unknown = set(values) - {v.name for v in definition.variables}
     if unknown:
         known = ", ".join(v.name for v in definition.variables) or "none"
         raise RenderError(f"Unknown variable(s): {', '.join(sorted(unknown))}. Known: {known}")
     typed: dict[str, TypedValue] = {}
-    warnings: list[str] = []
+    issues: list[Issue] = []
     for spec in definition.variables:
-        if spec.name in values:
-            raw = values[spec.name]
-            if spec.role is Role.FIXED and raw != spec.original_value:
-                warnings.append(
-                    f"'{spec.name}' is fixed business logic; overriding it means the "
-                    "result is no longer the verified definition."
-                )
-        else:
-            raw = spec.original_value
-        value = validate_value(spec.name, spec.type, raw)
-        if spec.allowed is not None:
-            plain = to_plain(spec.type, value)
-            outside = [
-                v for v in (plain if isinstance(plain, list) else [plain]) if v not in spec.allowed
-            ]
-            if outside:
-                warnings.append(
-                    f"'{spec.name}': {outside} outside approved values {spec.allowed}; "
-                    "results may be empty or unapproved."
-                )
+        original = validate_value(spec.name, spec.type, spec.original_value)
+        value = (
+            validate_value(spec.name, spec.type, values[spec.name])
+            if spec.name in values
+            else original
+        )
+        issues += _value_issues(spec, value, overridden=value != original)
         typed[spec.name] = value
-    return typed, warnings
+    return typed, issues
 
 
 def template_slots(tree: exp.Expression) -> list[tuple[exp.Expression, str]]:
@@ -75,17 +93,12 @@ def template_slots(tree: exp.Expression) -> list[tuple[exp.Expression, str]]:
     return slots
 
 
-def render_tree(
-    definition: Definition, values: dict[str, Any]
-) -> tuple[exp.Expression, dict[str, Any], list[str]]:
-    """Render into a sqlglot tree in the source dialect (used by render and roundtrip)."""
-    typed, warnings = _resolve_values(definition, values)
-    replacements: dict[str, Replacement] = {}
-    for spec in definition.variables:
-        replacements.update(build_replacements(spec, typed[spec.name], definition.source_dialect))
-
-    tree = parse(definition.template, definition.source_dialect)
-    for placeholder, name in template_slots(tree):
+def _fill(tree: exp.Expression, replacements: dict[str, Replacement]) -> None:
+    present = template_slots(tree)
+    missing = set(replacements) - {name for _, name in present}
+    if missing:
+        raise RenderError(f"Declared slot(s) not in the template: {', '.join(sorted(missing))}")
+    for placeholder, name in present:
         if name not in replacements:
             raise RenderError(f"Template placeholder :{name} has no declared variable")
         node = replacements[name]
@@ -96,28 +109,48 @@ def render_tree(
             parent.set("expressions", [n.copy() for n in node])
         else:
             placeholder.replace(node.copy())
-
     if template_slots(tree) or any(True for _ in tree.find_all(exp.Placeholder)):
         raise RenderError("Rendered SQL still contains placeholders")  # pragma: no cover
+
+
+def render_tree(
+    definition: Definition, values: dict[str, Any], target: Dialect | None = None
+) -> tuple[exp.Expression, dict[str, Any], list[Issue]]:
+    """Render into a sqlglot tree in the source dialect (used by render and roundtrip).
+
+    `target` only changes how typed literals are cast for a transpile (DESIGN §13).
+    """
+    typed, issues = _resolve_values(definition, values)
+    replacements: dict[str, Replacement] = {}
+    for spec in definition.variables:
+        replacements.update(
+            build_replacements(spec, typed[spec.name], definition.source_dialect, target)
+        )
+    tree = parse(definition.template, definition.source_dialect)
+    _fill(tree, replacements)
     plain = {s.name: to_plain(s.type, typed[s.name]) for s in definition.variables}
-    return tree, plain, warnings
+    return tree, plain, issues
 
 
 def render(
     definition: Definition, values: dict[str, Any], dialect: Dialect | None = None
 ) -> RenderResult:
     target = dialect or definition.source_dialect
-    tree, plain, warnings = render_tree(definition, values)
+    tree, plain, issues = render_tree(definition, values, target)
     transpiled = target is not definition.source_dialect
     if transpiled:
-        warnings.append(
-            f"Transpiled from {definition.source_dialect} to {target}; review before "
-            "trusting (ADR 0013)."
+        issues.append(
+            Issue(
+                code=IssueCode.TRANSPILED,
+                severity=Severity.WARNING,
+                message=f"Transpiled from {definition.source_dialect} to {target}; review "
+                "before trusting (ADR 0013).",
+            )
         )
     return RenderResult(
         sql=tree.sql(dialect=str(target), pretty=True),
         dialect=target,
         values=plain,
-        warnings=warnings,
+        issues=issues,
         transpiled=transpiled,
     )

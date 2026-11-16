@@ -1,6 +1,11 @@
 """Use-case: import a trusted query — analyze it, apply annotations, prove nothing changed.
 
-This is the core of `parse_query` / `propose_definition` (DESIGN §6, §7).
+This is the checks engine behind `parse_query` / `propose_definition` (DESIGN §6, §7).
+
+State rule (DESIGN §8): the definition is LLM_ANNOTATED only when there is no error issue
+AND the warehouse checks actually ran — results compared and every compared type known.
+Otherwise it stays DRAFT (with `checks_incomplete` saying what did not run). Never VERIFIED:
+only a person can verify (ADR 0007).
 """
 
 from __future__ import annotations
@@ -10,6 +15,7 @@ from pydantic import BaseModel, ConfigDict
 from cteforge.domain.codec import AnnotationFile
 from cteforge.domain.dialects import Dialect
 from cteforge.domain.errors import WarehouseError
+from cteforge.domain.issues import Issue, IssueCode, Severity, has_errors
 from cteforge.domain.models import Definition, DefinitionState
 from cteforge.files.definitions import load_annotations, load_sql, save_definition
 from cteforge.parsing.analyze import QueryAnalysis, Schema, analyze, referenced_tables
@@ -26,8 +32,12 @@ class ImportOutcome(BaseModel):
 
     definition: Definition
     roundtrip: RoundTripReport
-    results_match: bool | None  # None when no warehouse was available.
-    problems: list[str]
+    results_match: bool | None  # None when the results were not compared.
+    issues: list[Issue]
+
+
+def _issue(code: IssueCode, severity: Severity, message: str) -> Issue:
+    return Issue(code=code, severity=severity, message=message)
 
 
 def fetch_schema(sql: str, dialect: Dialect, warehouse: Warehouse | None) -> Schema:
@@ -44,19 +54,67 @@ def _same_rows(a: list[tuple], b: list[tuple]) -> bool:
     return sorted(map(repr, a)) == sorted(map(repr, b))
 
 
+def _usable_warehouse(
+    dialect: Dialect, warehouse: Warehouse | None
+) -> tuple[Warehouse | None, list[Issue]]:
+    """The warehouse, unless its dialect differs from the SQL's (then nothing runs)."""
+    if warehouse is None:
+        return None, []
+    if warehouse.dialect is not dialect:
+        return None, [
+            _issue(
+                IssueCode.DIALECT_MISMATCH,
+                Severity.ERROR,
+                f"The SQL is {dialect} but the warehouse is {warehouse.dialect}; nothing was "
+                "run. Import against a warehouse of the same dialect.",
+            )
+        ]
+    return warehouse, []
+
+
+def _compare_results(
+    sql: str, definition: Definition, warehouse: Warehouse
+) -> tuple[bool | None, list[Issue]]:
+    """Run the original and the rendered template; (results identical?, issues)."""
+    try:
+        rendered_sql = render(definition, {}).sql
+        warehouse.explain(rendered_sql)
+        original = warehouse.run(sql, RESULT_COMPARE_LIMIT)
+        rendered = warehouse.run(rendered_sql, RESULT_COMPARE_LIMIT)
+    except WarehouseError as exc:
+        return False, [_issue(IssueCode.COMPILE_FAILED, Severity.ERROR, str(exc))]
+    if original.truncated or rendered.truncated:
+        message = f"Result has more than {RESULT_COMPARE_LIMIT} rows; results were not compared."
+        return None, [_issue(IssueCode.CHECKS_INCOMPLETE, Severity.WARNING, message)]
+    if original.columns == rendered.columns and _same_rows(original.rows, rendered.rows):
+        return True, []
+    message = "Results differ between the original query and the template."
+    return False, [_issue(IssueCode.ROUNDTRIP_RESULTS_DIFFER, Severity.ERROR, message)]
+
+
+def _state(issues: list[Issue], results_match: bool | None) -> DefinitionState:
+    incomplete = any(
+        i.code in (IssueCode.TYPE_UNKNOWN, IssueCode.CHECKS_INCOMPLETE) for i in issues
+    )
+    if has_errors(issues) or incomplete or results_match is not True:
+        return DefinitionState.DRAFT
+    return DefinitionState.LLM_ANNOTATED
+
+
 def import_query(
     sql: str,
     dialect: Dialect,
     annotations: AnnotationFile,
     warehouse: Warehouse | None = None,
 ) -> ImportOutcome:
-    """Build a definition from a trusted query + annotations and run the checks.
+    """Build a definition from a trusted query + annotations and run the checks (DESIGN §7).
 
-    State is LLM_ANNOTATED when every check passes, else DRAFT. Never VERIFIED:
-    only a person can verify (ADR 0007).
+    Raises AnnotationError / SqlParseError when no template can be built at all.
     """
-    analysis = analyze_query(sql, dialect, warehouse)
+    usable, issues = _usable_warehouse(dialect, warehouse)
+    analysis = analyze_query(sql, dialect, usable)
     annotated = apply_annotations(sql, dialect, analysis, annotations.variables)
+    issues += annotated.issues
     definition = Definition(
         id=annotations.id,
         title=annotations.title,
@@ -72,42 +130,32 @@ def import_query(
         outputs=analysis.outputs,
     )
 
-    problems: list[str] = []
     report = roundtrip_check(sql, definition)
     if not report.identical:
-        problems.append("Rendering with the original values does not reproduce the query.")
+        message = "Rendering with the original values does not reproduce the query (see diff)."
+        issues.append(_issue(IssueCode.ROUNDTRIP_SQL_DIFFERS, Severity.ERROR, message))
 
     results_match: bool | None = None
-    if warehouse is not None:
-        try:
-            original = warehouse.run(sql, RESULT_COMPARE_LIMIT)
-            rendered = warehouse.run(render(definition, {}).sql, RESULT_COMPARE_LIMIT)
-            results_match = (
-                original.columns == rendered.columns
-                and not original.truncated
-                and _same_rows(original.rows, rendered.rows)
-            )
-            if original.truncated:
-                problems.append("Result too large to compare fully.")
-            elif not results_match:
-                problems.append("Results differ between the original and the template.")
-        except WarehouseError as exc:
-            results_match = False
-            problems.append(str(exc))
+    if usable is not None and report.identical:
+        results_match, run_issues = _compare_results(sql, definition, usable)
+        issues += run_issues
+    elif usable is None and warehouse is None:
+        message = "No warehouse: column types and query results were not checked."
+        issues.append(_issue(IssueCode.CHECKS_INCOMPLETE, Severity.WARNING, message))
 
-    state = DefinitionState.DRAFT if problems else DefinitionState.LLM_ANNOTATED
     return ImportOutcome(
-        definition=definition.model_copy(update={"state": state}),
+        definition=definition.model_copy(update={"state": _state(issues, results_match)}),
         roundtrip=report,
         results_match=results_match,
-        problems=problems,
+        issues=issues,
     )
 
 
 def analyze_file(
     sql_path: str, dialect: Dialect, warehouse: Warehouse | None = None
 ) -> QueryAnalysis:
-    return analyze_query(load_sql(sql_path), dialect, warehouse)
+    usable, _ = _usable_warehouse(dialect, warehouse)
+    return analyze_query(load_sql(sql_path), dialect, usable)
 
 
 def import_files(
@@ -117,10 +165,11 @@ def import_files(
     warehouse: Warehouse | None = None,
     out_path: str | None = None,
 ) -> ImportOutcome:
-    """File-based wrapper used by the CLI. Writes the definition only if checks pass."""
+    """File-based wrapper used by the CLI. Writes the definition only when no issue is an
+    error (it may still be a draft; the file records the state)."""
     outcome = import_query(
         load_sql(sql_path), dialect, load_annotations(annotations_path), warehouse
     )
-    if out_path and not outcome.problems:
+    if out_path and not has_errors(outcome.issues):
         save_definition(out_path, outcome.definition)
     return outcome

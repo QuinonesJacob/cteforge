@@ -31,6 +31,8 @@ def tag_sql(sql: str, tag: str) -> str                  # tag + "\n" + sql
 ## Rules
 - Never store result rows, SQL text with values, credentials or tokens. `sql_sha256` only.
 - `definition_id` filter matches any entry of `definitions` with that id prefix "<id>@".
+- `AuditError` messages name only the exception class, never `str(exc)`: SQLAlchemy
+  messages embed the statement and its parameters (question, values).
 
 ## Common misplacements
 - Warehouse query history — read from the warehouse via warehouse/, never copied here.
