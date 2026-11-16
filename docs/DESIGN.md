@@ -62,7 +62,7 @@ values in the input format; the tool produces SQL. See ADR 0005, 0006.
 |---|---|---|
 | `date_range` | `{"start": "YYYY-MM-DD", "end": "YYYY-MM-DD"}` | Covers two literals (a lower and an upper bound). Shape recorded only for suggested pairs (ADR 0015): `half_open` [a, b), `inclusive` [a, b], `exclusive` (a, b), `start_exclusive` (a, b]; otherwise `null` and a description is required. Optional `format`. |
 | `date` | `"YYYY-MM-DD"` | Optional `format` (strftime) for bare non-ISO date strings (ADR 0014). |
-| `grain` (M1.5) | `day \| week \| month \| quarter \| year` | Renders by rebuilding the whole truncation node per dialect, never by filling a placeholder (argument order and unit syntax differ). |
+| `grain` (M1.5) | `"day" \| "week" \| "month" \| "quarter" \| "year"` (lower case) | Names date truncations by grain ID (`<scope>.G<n>`). Never a placeholder (argument order and unit syntax differ; Databricks' parser can't keep a placeholder as a unit): the template keeps the truncation as written, and render rebuilds the whole node in the source dialect for another unit. Every place must truncate to the same original unit, one of the five; a unit read from a column (`DATE_TRUNC(cfg.month, ts)`) is never a grain. A grain that leaves other truncations to its unit as written (GROUP BY copy, a CTE joined on the period, a UNION branch) is a `grain_partial` error. Week start: §13. |
 | `text_list` | `["a", "b"]` | Replaces a whole IN list. Empty list is rejected (would render `IN ()`). |
 | `text` | `"a"` | Exact text. Wildcards/patterns belong in the SQL (`'%' \|\| $x \|\| '%'`). |
 | `number` | `123` / `1.5` | Finite only (no inf/NaN). Exact decimals kept (`1000.50`). Optional `unit` label (e.g. `TFLOPS`). |
@@ -183,7 +183,21 @@ transpilation can subtly change semantics. See ADR 0013.
 - Typed literals take the **column's real type**: e.g. BigQuery `TIMESTAMP` (zone-aware) vs
   `DATETIME`; Snowflake `TIMESTAMP_NTZ` vs `TIMESTAMP_TZ`. sqlglot's generic `TIMESTAMP` maps
   to BigQuery `DATETIME`, so the warehouse type must drive the cast.
-- Week start differs by warehouse (affects `grain=week`); documented per dialect in M1.5.
+- Week start differs by warehouse (affects `grain=week`). `week` always renders the
+  dialect's native week truncation:
+  - DuckDB `DATE_TRUNC('WEEK', x)`: Monday (ISO). Verified on DuckDB.
+  - Postgres `DATE_TRUNC('WEEK', x)`: Monday (ISO), per the Postgres docs.
+  - Snowflake `DATE_TRUNC('WEEK', x)`: depends on the session/account `WEEK_START`
+    parameter. The default 0 (legacy, ISO-like) starts weeks on Monday, per the Snowflake
+    docs; an account that sets `WEEK_START` gets its own start day.
+  - BigQuery `DATE_TRUNC(x, WEEK)` (and TIMESTAMP_/DATETIME_TRUNC): Sunday. sqlglot parses
+    `WEEK` as `WEEK(SUNDAY)`. `WEEK(MONDAY)` and `ISOWEEK` exist but are not grain values;
+    a truncation written that way can't be a grain variable.
+  - Databricks `DATE_TRUNC('WEEK', x)` / `TRUNC(d, 'WEEK')`: Monday, per the Databricks/Spark
+    docs. `TRUNC(date, fmt)` has no day format, so grain `day` is refused there.
+  Only the DuckDB start is checked against a warehouse here; the others come from vendor docs.
+  Transpiling does not translate week starts, except that sqlglot rewrites BigQuery's
+  Sunday week for DuckDB. Transpiled renders are labeled (ADR 0013).
 - `date_range.end` follows the recorded shape (exclusive for `>= … <`, inclusive for `BETWEEN`).
 - NULL: variables never render NULL; "include NULLs" is fixed logic in the definition.
 

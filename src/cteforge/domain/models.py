@@ -80,6 +80,8 @@ class Annotation(BaseModel):
     - text_list: every literal of one IN list, in order. Several lists may follow each
       other; a new place starts where the IN group (LiteralInfo.in_list) changes.
     - date, text, number, boolean: one literal per place.
+    - grain: grain IDs (`<scope>.G<n>`, QueryAnalysis.grains), one truncation node per
+      place; every place must truncate to the same original unit (M1.5).
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -103,6 +105,9 @@ class VariableSlot(BaseModel):
 
     A place is `len(PLACEHOLDER_FIELDS[type])` consecutive slots; slots carry their own
     form, cast and format so different places of one variable may be written differently.
+
+    grain (ADR 0011, M1.5): `placeholder` only names the slot; nothing is written into the
+    template. The truncation node stays as written there and `literals` holds its grain ID.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -115,6 +120,8 @@ class VariableSlot(BaseModel):
     format: str | None = None  # strftime pattern for bare date text; None = ISO YYYY-MM-DD.
     original_text: str | None = None  # number: literal as written ("1000.50", "1e3"), so
     #                                   the original value renders back exactly.
+    #                                   grain: the original unit ("month"); the truncation
+    #                                   node it names is rebuilt only for another unit.
 
 
 class VariableSpec(BaseModel):
@@ -146,6 +153,10 @@ class VariableSpec(BaseModel):
             raise ValueError(f"format applies to date and date_range only, not {self.type}")
         if self.unit is not None and self.type is not VariableType.NUMBER:
             raise ValueError(f"unit applies to number only, not {self.type}")
+        if self.type is VariableType.GRAIN and any(
+            s.original_text is None or len(s.literals) != 1 for s in self.slots
+        ):
+            raise ValueError("each grain slot names one grain ID and its original unit")
         fields = PLACEHOLDER_FIELDS[self.type]
         if [s.field for s in self.slots] != list(fields) * (len(self.slots) // len(fields)):
             raise ValueError(f"slots of a {self.type} must repeat the fields {list(fields)}")

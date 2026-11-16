@@ -121,6 +121,10 @@ class AuditLog:
     def __init__(self, url: str) -> None:
         self._engine = _make_engine(url)
 
+    def close(self) -> None:
+        """Dispose the engine's connections. In-memory SQLite data is gone afterwards."""
+        self._engine.dispose()
+
     def init_schema(self) -> None:
         """Create the ``audit_events`` table and indexes if missing. Idempotent."""
         try:

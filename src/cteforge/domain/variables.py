@@ -30,12 +30,25 @@ class VariableType(StrEnum):
     TEXT = "text"
     NUMBER = "number"
     BOOLEAN = "boolean"
-    # GRAIN = "grain"  — M1.5: rebuilds the truncation node, never a placeholder.
+    GRAIN = "grain"  # M1.5: rebuilds date truncation nodes, never a value placeholder.
 
 
 class Role(StrEnum):
     CHANGEABLE = "changeable"
     FIXED = "fixed"
+
+
+class Grain(StrEnum):
+    """Values of a `grain` variable (DESIGN §4). Week start depends on the warehouse (§13)."""
+
+    DAY = "day"
+    WEEK = "week"
+    MONTH = "month"
+    QUARTER = "quarter"
+    YEAR = "year"
+
+
+GRAIN_INPUT_RULE = "one of " + " | ".join(f'"{g}"' for g in Grain) + " (lower case)"
 
 
 class RangeShape(StrEnum):
@@ -57,6 +70,7 @@ PLACEHOLDER_FIELDS: dict[VariableType, tuple[str, ...]] = {
     VariableType.TEXT: ("",),
     VariableType.NUMBER: ("",),
     VariableType.BOOLEAN: ("",),
+    VariableType.GRAIN: ("",),  # One place = one truncation node (a `<scope>.G<n>` ID).
 }
 
 
@@ -99,9 +113,11 @@ _FORMATS: dict[VariableType, str] = {
     VariableType.TEXT: '"text"',
     VariableType.NUMBER: NUMBER_INPUT_RULE,
     VariableType.BOOLEAN: "true or false",
+    VariableType.GRAIN: GRAIN_INPUT_RULE,
 }
 
 # Numbers are validated into Decimal so rendering keeps exact text (1000.50, ADR 0014).
+# Grain values are Grain members (a str subclass).
 TypedValue = DateRangeValue | dt.date | list[str] | str | Decimal | bool
 
 
@@ -127,6 +143,13 @@ def _number(raw: Any) -> Decimal:
     if not number.is_finite():
         raise ValueError("NaN and Infinity are not numbers SQL can compare to")
     return number
+
+
+def _grain(raw: Any) -> Grain:
+    # Strict: exactly the lower-case names. "Q", "MONTH", "monthly", "2026-Q3" are rejected.
+    if not isinstance(raw, str) or raw not in {g.value for g in Grain}:
+        raise ValueError("expected a grain name")
+    return Grain(raw)
 
 
 def number_from_text(text: str) -> Decimal:
@@ -185,6 +208,8 @@ def validate_value(name: str, vtype: VariableType, raw: Any) -> TypedValue:
                 return _number(raw)
             case VariableType.BOOLEAN:
                 return _BOOL.validate_python(raw)
+            case VariableType.GRAIN:
+                return _grain(raw)
     except (ValueError, TypeError, ValidationError) as exc:
         reason = exc.errors()[0]["msg"] if isinstance(exc, ValidationError) else str(exc)
         raise VariableValueError(
@@ -205,4 +230,6 @@ def to_plain(vtype: VariableType, value: TypedValue) -> Any:
     if vtype is VariableType.NUMBER:
         assert isinstance(value, Decimal)
         return int(value) if value == value.to_integral_value() else float(value)
+    if vtype is VariableType.GRAIN:
+        return str(value)
     return value

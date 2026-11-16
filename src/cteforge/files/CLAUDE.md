@@ -5,6 +5,15 @@ I/O adapter: definition files on disk. Project root: ../../../CLAUDE.md
 ## What belongs here (authoritative)
 - `definitions.py` — load/save Definition and annotation YAML files (via domain/codec.py),
   and read trusted-query `.sql` files.
+- `connections.py` — `load_profiles(path) -> list[WarehouseProfile]` from `connections.yml`
+  (`profiles: {name: {dialect, options, secrets_env, max_rows, maximum_bytes_billed}}`,
+  ADR 0020); refuses inline secrets (secret-looking option names, URLs with passwords,
+  secrets_env values that aren't env-var names) with CodecError, never echoing values.
+  Relative DuckDB `options.path` resolves next to the file.
+- `library.py` — library directory for git export/import (ADR 0003):
+  `write_library(dir, *, definitions, recipes, joins, prune=False) -> list[Path]` and
+  `read_library(dir) -> LibraryFiles` (`definitions/<id>.yml` codec YAML,
+  `recipes/<id>.yml`, `joins/<id>.yml` as model fields). CodecError names the file only.
 
 If something does not clearly fit one of the above, it does not belong here.
 "Not forbidden" is not the same as "allowed."

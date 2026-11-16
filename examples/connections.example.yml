@@ -1,0 +1,32 @@
+# Warehouse connection profiles (ADR 0020). Point CTEFORGE_CONNECTIONS at a copy of this
+# file. Secrets are NEVER written here: name the environment variable that holds each one
+# in `secrets_env` (driver parameter -> env var name). Inline secret-looking options
+# (password, token, private_key, credentials, ...) are refused.
+# Connect as a dedicated READ-ONLY role on every warehouse.
+profiles:
+  demo:
+    dialect: duckdb
+    options:
+      path: warehouse.duckdb   # relative paths resolve next to this file
+    max_rows: 10000
+
+  # analytics_pg:
+  #   dialect: postgres          # also Redshift; pip install 'cteforge[postgres]'
+  #   options: {host: db.internal, port: 5432, dbname: analytics, user: cteforge_ro}
+  #   secrets_env: {password: PG_PASSWORD}
+  #
+  # snowflake_prod:
+  #   dialect: snowflake         # pip install 'cteforge[snowflake]'
+  #   options: {account: myorg-myacct, user: CTEFORGE_RO, warehouse: ANALYTICS_WH, database: ANALYTICS, role: READ_ONLY}
+  #   secrets_env: {password: SNOWFLAKE_PASSWORD}
+  #
+  # bigquery_prod:
+  #   dialect: bigquery          # pip install 'cteforge[bigquery]'
+  #   options: {project: my-project, location: US}
+  #   secrets_env: {credentials_json: BQ_SERVICE_ACCOUNT_JSON}
+  #   maximum_bytes_billed: 1000000000
+  #
+  # databricks_prod:
+  #   dialect: databricks        # pip install 'cteforge[databricks]'
+  #   options: {server_hostname: dbc-123.cloud.databricks.com, http_path: /sql/1.0/warehouses/abc}
+  #   secrets_env: {access_token: DATABRICKS_TOKEN}

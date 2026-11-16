@@ -11,9 +11,16 @@ from cteforge.domain.dialects import Dialect
 from cteforge.domain.errors import RenderError
 from cteforge.domain.issues import Issue, IssueCode, Severity
 from cteforge.domain.models import Definition, VariableSpec
-from cteforge.domain.variables import Role, TypedValue, to_plain, validate_value
-from cteforge.parsing.analyze import parse
-from cteforge.templating.literals import Replacement, build_replacements
+from cteforge.domain.variables import (
+    Grain,
+    Role,
+    TypedValue,
+    VariableType,
+    to_plain,
+    validate_value,
+)
+from cteforge.parsing.analyze import find_grains, parse
+from cteforge.templating.literals import Replacement, build_replacements, build_truncation
 
 
 class RenderResult(BaseModel):
@@ -22,7 +29,7 @@ class RenderResult(BaseModel):
     sql: str
     dialect: Dialect
     values: dict[str, Any]  # Plain values actually used (incl. defaults).
-    issues: list[Issue]  # fixed_override, value_not_allowed, transpiled (all warnings).
+    issues: list[Issue]  # fixed_override, value_not_allowed, grain_partial, transpiled (warnings).
     transpiled: bool  # True when target dialect != source dialect (lower trust, ADR 0013).
 
 
@@ -113,6 +120,59 @@ def _fill(tree: exp.Expression, replacements: dict[str, Replacement]) -> None:
         raise RenderError("Rendered SQL still contains placeholders")  # pragma: no cover
 
 
+def _apply_grains(
+    tree: exp.Expression,
+    definition: Definition,
+    typed: dict[str, TypedValue],
+    target: Dialect | None,
+) -> list[Issue]:
+    """Rebuild each grain slot's truncation node for the requested unit (M1.5). A slot
+    whose value equals its original unit keeps the node exactly as written. A changed grain
+    that leaves other truncations to its original unit as written gets a `grain_partial`
+    warning (import reports it as an error; this covers definitions stored before that)."""
+    specs = [s for s in definition.variables if s.type is VariableType.GRAIN]
+    if not specs:
+        return []
+    source = definition.source_dialect
+    found = {g.id: g for g in find_grains(tree, source)}
+    covered = {slot.literals[0] for spec in specs for slot in spec.slots}
+    issues: list[Issue] = []
+    for spec in specs:
+        value = typed[spec.name]
+        assert isinstance(value, Grain)
+        if value.value == spec.original_value:
+            continue
+        left = [g.id for g in found.values() if g.unit == spec.original_value]
+        left = [grain_id for grain_id in left if grain_id not in covered]
+        if left:
+            issues.append(
+                Issue(
+                    code=IssueCode.GRAIN_PARTIAL,
+                    severity=Severity.WARNING,
+                    message=f"'{spec.name}' = {value.value}, but {', '.join(left)} still "
+                    f"truncate to {spec.original_value}; the query may fail or mix periods.",
+                    variable=spec.name,
+                    literal=left[0],
+                )
+            )
+    for spec in specs:
+        value = typed[spec.name]
+        assert isinstance(value, Grain)
+        for slot in spec.slots:
+            grain_id = slot.literals[0]
+            grain = found.get(grain_id)
+            if grain is None:
+                raise RenderError(f"'{spec.name}': grain {grain_id} is not in the template")
+            if grain.unit != slot.original_text:
+                raise RenderError(
+                    f"'{spec.name}': template truncation {grain_id} is '{grain.unit}', "
+                    f"expected '{slot.original_text}'"
+                )
+            if value.value != slot.original_text:
+                grain.node.replace(build_truncation(grain.node, value, source, target))
+    return issues
+
+
 def render_tree(
     definition: Definition, values: dict[str, Any], target: Dialect | None = None
 ) -> tuple[exp.Expression, dict[str, Any], list[Issue]]:
@@ -127,6 +187,7 @@ def render_tree(
             build_replacements(spec, typed[spec.name], definition.source_dialect, target)
         )
     tree = parse(definition.template, definition.source_dialect)
+    issues += _apply_grains(tree, definition, typed, target)
     _fill(tree, replacements)
     plain = {s.name: to_plain(s.type, typed[s.name]) for s in definition.variables}
     return tree, plain, issues

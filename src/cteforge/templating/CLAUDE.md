@@ -6,8 +6,10 @@ Pure. Project root: ../../../CLAUDE.md
 ## What belongs here (authoritative)
 - `template.py` — apply_annotations(sql, dialect, analysis, annotations) → AnnotatedTemplate
   (template, variables, issues): replace annotated literals with named placeholders written
-  in the source dialect's syntax (e.g. `$x` in DuckDB, ADR 0011) and report Issues.
-- `literals.py` — the ONLY place values become SQL: typed literal nodes + casts per slot.
+  in the source dialect's syntax (e.g. `$x` in DuckDB, ADR 0011) and report Issues. Grain
+  variables name truncation nodes instead (no placeholder; see Grain below).
+- `literals.py` — the ONLY place values become SQL: typed literal nodes + casts per slot,
+  and `build_truncation` (a grain value → a rebuilt truncation node).
 - `render.py` — render(definition, values, dialect) → RenderResult(sql, dialect, values,
   issues, transpiled). Never emits placeholders. `render_tree` is shared with roundtrip.
 - `roundtrip.py` — same-query-back check: serialize → re-parse → render originals → AST compare.
@@ -35,7 +37,7 @@ If something does not clearly fit one of the above, it does not belong here.
   wrapped or non-literal items (the whole list is replaced, so wrappers would be lost), a
   range pair listed upper-bound first. Everything else is an Issue so the analyst sees all of
   it at once: `type_mismatch` (error), `type_unknown` (warning), `range_not_simple` (warning),
-  `description_required` (error), `ambiguous_date_format` (warning).
+  `description_required` (error), `ambiguous_date_format` (warning), `grain_partial` (error).
 - **Types** are checked per literal against `LiteralInfo.compared_type` (the column-side
   expression's type), falling back to the column's type. No type → `type_unknown`.
 - **date_range shape**: the parsing range candidate's shape when every place is a candidate
@@ -60,8 +62,32 @@ If something does not clearly fit one of the above, it does not belong here.
   Snowflake gets TIMESTAMP_NTZ, BigQuery DATETIME and Databricks TIMESTAMP_NTZ (generic
   TIMESTAMP means LTZ in Databricks). Only variable slots are adjusted; the analyst's other
   casts transpile as sqlglot does.
+- **Grain** (M1.5, ADR 0011). An annotation of type grain lists grain IDs
+  (`<scope>.G<n>`), one place each. Every unit must be one of day/week/month/quarter/year
+  and the same in every place (AnnotationError otherwise, also for unknown/reused IDs).
+  Nothing goes into the template: the truncation stays as written, because a placeholder in
+  the unit argument does not survive Databricks' DATE_TRUNC parser (it becomes `Var`). Slot:
+  `placeholder` = slot name only, `literals` = [grain ID], `original_text` = original unit.
+  Render (`render._apply_grains`) re-finds each node with `find_grains`. It raises
+  RenderError if the node is missing or its unit differs from `original_text` (drift). For
+  the original unit it keeps the node as is, so same-query-back is exact. For another unit,
+  `literals.build_truncation` rebuilds the node: same class, same arguments (moved, so
+  nested truncations stay addressable), new unit built as the source parser builds it
+  (`Var`, DateTrunc normalizes it to a string; BigQuery week = `WeekStart(SUNDAY)`). Week =
+  the dialect's native week (DESIGN §13). Databricks `TRUNC(date, fmt)` has no day format, so
+  grain `day` raises RenderError there. A changeable grain whose truncations carry
+  `or_branch` / `case_condition` / `negated` / `outer_join_on` needs a description. There is
+  no column-type check for grain.
+  Coverage: every truncation in the query to the variable's original unit must be named by
+  it or by another grain variable; any left is a `grain_partial` error (GROUP BY copy, CTEs
+  joined on the period, UNION branches would fail or mix periods), and render warns
+  `grain_partial` when a stored definition changes such a grain. A truncation whose unit is
+  a bare column name (DuckDB / Postgres / Databricks, parsing reports `column <name>` while
+  the node holds a unit keyword) raises AnnotationError for the whole import: sqlglot would
+  store the column as a constant.
 - **Render issues**: `fixed_override` (a fixed variable given a different value),
-  `value_not_allowed` (outside `allowed`), `transpiled` (target ≠ source). All warnings.
+  `value_not_allowed` (outside `allowed`), `transpiled` (target ≠ source), `grain_partial`
+  (a changed grain leaves same-unit truncations). All warnings.
 
 ## Known transpile defects (sqlglot 30.31.0; visible in tests/golden, not fixed here)
 - Postgres: `ROUND(x / y, 4)` becomes `ROUND(CAST(x AS DOUBLE PRECISION) / y, 4)`; Postgres
@@ -70,6 +96,11 @@ If something does not clearly fit one of the above, it does not belong here.
   `TIMESTAMP_TRUNC(ts, MONTH)`; the column is DATETIME in BigQuery (needs DATETIME_TRUNC).
 - BigQuery / Postgres: DuckDB `strptime(...)` (naive) becomes `PARSE_TIMESTAMP` /
   `TO_TIMESTAMP`, which return zone-aware values compared with naive columns.
+- Snowflake `TRUNC(ts, 'MONTH')` (DateTrunc) is written back as `DATE_TRUNC('MONTH', ts)`, which
+  parses as TimestampTrunc, so same-query-back reports a difference for that spelling. This
+  happens with or without a grain variable; `DATE_TRUNC` round-trips.
+- Week start is not translated when transpiling, except BigQuery → DuckDB (sqlglot shifts
+  by a day). Other pairs keep `WEEK`, so the start day can change (DESIGN §13).
 Transpiled renders always carry a `transpiled` issue and lower trust (ADR 0013).
 
 ## Common misplacements

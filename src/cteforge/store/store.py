@@ -135,6 +135,11 @@ class Store:
             except _UpsertRace:
                 continue
 
+    def close(self) -> None:
+        """Dispose the engine's connections. In-memory SQLite data is gone afterwards."""
+        with self._lock:
+            self._engine.dispose()
+
     def init_schema(self) -> None:
         with self._tx() as conn:
             t.metadata.create_all(conn)

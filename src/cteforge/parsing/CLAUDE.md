@@ -5,9 +5,12 @@ Reads SQL and reports its structure. Pure. Project root: ../../../CLAUDE.md
 ## What belongs here (authoritative)
 - `analyze.py` — analyze(sql, dialect, schema) → QueryAnalysis: CTEs, tables, joins, output
   columns, filter literals with stable IDs, the column each literal is compared to (through
-  wrappers, CTEs and derived tables), structural context facts, and suggested range pairs.
-  Also `parse`, `scopes`, `find_literals` / `FoundLiteral` and `wrapper_sql`, shared with
-  templating so both sides agree on IDs.
+  wrappers, CTEs and derived tables), structural context facts, suggested range pairs, and
+  grain candidates (date truncations, `QueryAnalysis.grains`, M1.5).
+  Also `parse`, `scopes`, `find_literals` / `FoundLiteral`, `wrapper_sql`, `find_grains` /
+  `FoundGrain`, `truncation_unit`, `identifier_units`, `COLUMN_UNIT_PREFIX` and
+  `TRUNCATIONS`, shared with templating so both sides
+  agree on IDs.
 - `types.py` — warehouse type string → VariableType candidates + sqlglot DataType.
 
 If something does not clearly fit one of the above, it does not belong here.
@@ -64,6 +67,20 @@ If something does not clearly fit one of the above, it does not belong here.
   identifiers match case-insensitively, quoted ones exactly. The fully qualified key wins,
   else the single key whose overlapping trailing parts match. Table names in results are
   qualified as written with unquoted parts lower-cased (`analytics.deals`).
+- **Grain candidates** (M1.5): every DateTrunc / TimestampTrunc / DatetimeTrunc node (what
+  sqlglot makes of DATE_TRUNC, TRUNC(d, fmt), TIMESTAMP_TRUNC, DATETIME_TRUNC in the five
+  dialects) gets `<scope>.G<n>`. n counts truncations in the same walk as literal IDs,
+  wherever they sit (SELECT list, filters, nested). `GrainCandidate`: `unit` (lower case,
+  abbreviations spelled out: `MM` → month, `Q` → quarter; BigQuery `WEEK` / `WEEK(SUNDAY)`
+  → `week`, other week starts → `week(<day>)`, `ISOWEEK` → `isoweek`), `column_sql` (the
+  truncated expression), `sql`, `column` / `column_type` (lineage as for literals),
+  `output` (the alias when it is a projection's value), and the literal context facts.
+  The unit argument is never a literal ID; a literal inside a value-side truncation still is.
+  A unit read from a column is `column <name>` (never a grain value): a qualified Column
+  (`cfg.month`) from the tree; a bare or double-quoted name in DuckDB / Postgres /
+  Databricks (where the unit is a string expression) from the SQL's tokens
+  (`identifier_units`), because sqlglot parses it like the string. A name used both ways
+  in one query marks every truncation to that unit (conservative). `COLUMN_UNIT_PREFIX`.
 - **Joins**: per JOIN, sources resolved through aliases to base tables / CTE names /
   derived-table aliases; keys are column = column pairs in the ON's top-level AND chain
   (or USING columns), oriented (left, right). `join_type`: semi / anti win over the side

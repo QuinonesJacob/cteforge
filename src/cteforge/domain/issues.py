@@ -29,6 +29,7 @@ class IssueCode(StrEnum):
     CHECKS_INCOMPLETE = "checks_incomplete"  # e.g. no warehouse: results/types unchecked
     COMPILE_FAILED = "compile_failed"
     DIALECT_MISMATCH = "dialect_mismatch"
+    GRAIN_PARTIAL = "grain_partial"  # A grain variable leaves same-unit truncations as written.
     # Render
     FIXED_OVERRIDE = "fixed_override"
     VALUE_NOT_ALLOWED = "value_not_allowed"
@@ -48,6 +49,7 @@ class IssueCode(StrEnum):
     PERMISSION_DENIED = "permission_denied"
     NOT_FOUND = "not_found"
     DRIFT = "drift"
+    RECIPE_INVALID = "recipe_invalid"  # A proposed recipe can't be rendered or composed.
 
 
 class Issue(BaseModel):

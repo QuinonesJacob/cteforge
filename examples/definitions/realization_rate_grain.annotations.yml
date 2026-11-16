@@ -1,0 +1,33 @@
+# Same trusted query as realization_rate.annotations.yml, plus a `grain` variable (M1.5):
+# the month truncation in deals_in_region (grain ID deals_in_region.G1) can be changed to
+# day | week | month | quarter | year. Grain IDs come from: cteforge parse (QueryAnalysis.grains).
+id: realization_rate_by_grain
+title: Realization Rate (by period grain, by region)
+meaning: Share of booked revenue on won deals that has been collected as paid invoices.
+keywords: [realization, collection rate, collected revenue, cash realization, quarterly, weekly]
+use_when: Finance questions about how much won revenue turned into cash, per day/week/month/quarter/year.
+dont_use_when: Pipeline or forecast questions — this only covers closed-won deals.
+grain: one row per period (see the grain variable) per region
+variables:
+  - name: period
+    type: date_range
+    role: changeable
+    literals: [closed_deals.L1, closed_deals.L2]
+    description: Deal close date range (end exclusive).
+  - name: won_statuses
+    type: text_list
+    role: fixed
+    literals: [closed_deals.L3, closed_deals.L4]
+    description: What counts as a won deal. Business logic — do not change.
+  - name: regions
+    type: text_list
+    role: changeable
+    literals: [deals_in_region.L1, deals_in_region.L2]
+    allowed: [EMEA, NA, APAC, LATAM]
+  - name: time_grain
+    type: grain
+    role: changeable
+    literals: [deals_in_region.G1]
+    description: >-
+      Period each row covers: deals are bucketed by DATE_TRUNC of their close date. Weeks
+      start on Monday in DuckDB.

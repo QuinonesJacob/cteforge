@@ -6,6 +6,10 @@ template can be built (unknown/reused literal IDs, wrong arity, values that diff
 places, a format that can't read the original value, ...). Problems that still allow a
 template — type mismatches, unknown types, missing descriptions — are Issues, so an
 analyst sees all of them at once and the definition stays draft while any is an error.
+
+A `grain` variable (M1.5) names truncation nodes by grain ID (`<scope>.G<n>`). Nothing is
+written into the template for it (ADR 0011): the truncation stays as written, and render
+rebuilds the node when another unit is asked for.
 """
 
 from __future__ import annotations
@@ -24,6 +28,7 @@ from cteforge.domain.issues import Issue, IssueCode, Severity
 from cteforge.domain.models import Annotation, LiteralForm, VariableSlot, VariableSpec
 from cteforge.domain.variables import (
     PLACEHOLDER_FIELDS,
+    Grain,
     RangeShape,
     Role,
     VariableType,
@@ -35,10 +40,14 @@ from cteforge.domain.variables import (
     write_date,
 )
 from cteforge.parsing.analyze import (
+    COLUMN_UNIT_PREFIX,
+    FoundGrain,
     FoundLiteral,
+    GrainCandidate,
     LiteralContext,
     LiteralInfo,
     QueryAnalysis,
+    find_grains,
     find_literals,
     parse,
 )
@@ -368,12 +377,15 @@ def _ambiguous_format(annotation: Annotation, places: list[_Place]) -> Issue | N
 
 
 def _description_issue(
-    annotation: Annotation, infos: list[LiteralInfo], shape: RangeShape | None
+    annotation: Annotation,
+    contexts: list[list[LiteralContext]],
+    shape: RangeShape | None,
+    what: str = "literals",
 ) -> Issue | None:
     if annotation.role is not Role.CHANGEABLE or annotation.description.strip():
         return None
-    facts = sorted({c for i in infos for c in i.context if c in _NEEDS_DESCRIPTION})
-    reasons = [f"its literals are {', '.join(facts)}"] if facts else []
+    facts = sorted({c for ctx in contexts for c in ctx if c in _NEEDS_DESCRIPTION})
+    reasons = [f"its {what} are {', '.join(facts)}"] if facts else []
     if annotation.type is VariableType.DATE_RANGE and shape is None:
         reasons.append("its bounds are not a simple range")
     if not reasons:
@@ -423,7 +435,10 @@ def _variable(
                     annotation.name,
                 )
             )
-    extra = [_ambiguous_format(annotation, places), _description_issue(annotation, infos, shape)]
+    extra = [
+        _ambiguous_format(annotation, places),
+        _description_issue(annotation, [i.context for i in infos], shape),
+    ]
     issues += [i for i in extra if i is not None]
     first = infos[0]
     spec = VariableSpec(
@@ -443,8 +458,128 @@ def _variable(
     return spec, issues
 
 
+# ── Grain variables (M1.5) ──────────────────────────────────────────────────────────
+
+
+def _grain_candidates(
+    annotation: Annotation,
+    analysis: QueryAnalysis,
+    grains: dict[str, FoundGrain],
+    used: set[str],
+) -> list[GrainCandidate]:
+    candidates: list[GrainCandidate] = []
+    for grain_id in annotation.literals:
+        candidate = analysis.grain(grain_id)
+        if candidate is None or grain_id not in grains:
+            known = ", ".join(g.id for g in analysis.grains) or "none"
+            raise AnnotationError(
+                f"'{annotation.name}' (grain): unknown grain ID {grain_id}; a grain variable "
+                f"names date truncations. Known: {known}"
+            )
+        if grain_id in used:
+            raise AnnotationError(f"Grain {grain_id} is used by two variables")
+        used.add(grain_id)
+        if candidate.unit not in {g.value for g in Grain}:
+            raise AnnotationError(
+                f"'{annotation.name}' (grain): {grain_id} = {candidate.sql} truncates to "
+                f"'{candidate.unit}'; a grain variable changes "
+                f"{' / '.join(g.value for g in Grain)} truncations only"
+            )
+        candidates.append(candidate)
+    units = {c.unit for c in candidates}
+    if len(units) != 1:
+        shown = "; ".join(f"{c.id} = {c.unit}" for c in candidates)
+        raise AnnotationError(
+            f"'{annotation.name}': every place must hold the same original grain, got {shown}"
+        )
+    return candidates
+
+
+def _grain_variable(
+    annotation: Annotation,
+    analysis: QueryAnalysis,
+    grains: dict[str, FoundGrain],
+    used: set[str],
+) -> tuple[VariableSpec, list[Issue]]:
+    candidates = _grain_candidates(annotation, analysis, grains, used)
+    first = candidates[0]
+    original = _plain_original(annotation, first.unit)
+    column = annotation.column
+    if column is None:
+        ref = first.column
+        column = f"{ref.table}.{ref.column}" if ref and ref.table else first.column_sql
+    issue = _description_issue(annotation, [c.context for c in candidates], None, "truncations")
+    spec = VariableSpec(
+        name=annotation.name,
+        type=annotation.type,
+        role=annotation.role,
+        column=column,
+        column_type=first.column_type,
+        original_value=original,
+        allowed=annotation.allowed,
+        description=annotation.description,
+        slots=[
+            VariableSlot(
+                placeholder=placeholder_name(annotation.name, "", place),
+                literals=[c.id],
+                original_text=c.unit,
+            )
+            for place, c in enumerate(candidates, start=1)
+        ],
+    )
+    return spec, [issue] if issue is not None else []
+
+
+def _check_column_units(analysis: QueryAnalysis, grains: dict[str, FoundGrain]) -> None:
+    """A truncation whose unit is a bare column name (DuckDB, Postgres, Databricks) is
+    stored by sqlglot as the unit keyword, which would turn the column into a constant."""
+    for candidate in analysis.grains:
+        found = grains.get(candidate.id)
+        if not candidate.unit.startswith(COLUMN_UNIT_PREFIX) or found is None:
+            continue
+        if isinstance(found.node.args.get("unit"), exp.Var | exp.Literal):
+            name = candidate.unit.removeprefix(COLUMN_UNIT_PREFIX)
+            raise AnnotationError(
+                f"{candidate.id} = {candidate.sql}: the unit is the column {name}, but the "
+                "SQL parser reads a bare name there as a unit keyword, so the stored query "
+                f"would truncate to a constant. Qualify the column (e.g. t.{name}) or write "
+                "the unit as a string"
+            )
+
+
+def _partial_grain_issues(specs: list[VariableSpec], analysis: QueryAnalysis) -> list[Issue]:
+    """A grain variable that changes some truncations to a unit but leaves others to the
+    same unit as written (the GROUP BY copy, another CTE joined on the period, a UNION
+    branch) makes a changed grain fail or silently mix periods."""
+    grain_specs = [s for s in specs if s.type is VariableType.GRAIN]
+    covered = {slot.literals[0] for s in grain_specs for slot in s.slots}
+    issues: list[Issue] = []
+    for spec in grain_specs:
+        unit = spec.original_value
+        left = [g for g in analysis.grains if g.unit == unit and g.id not in covered]
+        if left:
+            shown = "; ".join(f"{g.id} = {g.sql}" for g in left)
+            issues.append(
+                _issue(
+                    IssueCode.GRAIN_PARTIAL,
+                    Severity.ERROR,
+                    f"'{spec.name}' changes the {unit} truncation(s) "
+                    f"{', '.join(s.literals[0] for s in spec.slots)}, but {shown} also "
+                    f"truncate to {unit} and would stay {unit}; a GROUP BY copy, a join on "
+                    "the period or a UNION branch would then fail or mix periods. Add them "
+                    "to the variable, or name them in a grain variable of their own.",
+                    spec.name,
+                    left[0].id,
+                )
+            )
+    return issues
+
+
 def _place_placeholders(spec: VariableSpec, found: dict[str, FoundLiteral]) -> None:
-    """Swap each slot's literal(s) for its named placeholder in the parsed tree."""
+    """Swap each slot's literal(s) for its named placeholder in the parsed tree. Grain
+    slots write nothing: their truncation nodes stay as written (ADR 0011)."""
+    if spec.type is VariableType.GRAIN:
+        return
     for slot in spec.slots:
         placeholder = exp.Placeholder(this=slot.placeholder)
         if spec.type is VariableType.TEXT_LIST:
@@ -465,6 +600,8 @@ def apply_annotations(
     """
     tree = parse(sql, dialect)
     found = {f.id: f for f in find_literals(tree)}
+    grains = {g.id: g for g in find_grains(tree, dialect)}
+    _check_column_units(analysis, grains)
     names = [a.name for a in annotations]
     if len(names) != len(set(names)):
         raise AnnotationError("Variable names must be unique")
@@ -474,10 +611,14 @@ def apply_annotations(
     issues: list[Issue] = []
     for annotation in annotations:
         _check_options(annotation)
-        infos = _resolve_infos(annotation, analysis, found, used)
-        spec, spec_issues = _variable(annotation, infos, analysis, found)
+        if annotation.type is VariableType.GRAIN:
+            spec, spec_issues = _grain_variable(annotation, analysis, grains, used)
+        else:
+            infos = _resolve_infos(annotation, analysis, found, used)
+            spec, spec_issues = _variable(annotation, infos, analysis, found)
         specs.append(spec)
         issues += spec_issues
+    issues += _partial_grain_issues(specs, analysis)
     for spec in specs:
         _place_placeholders(spec, found)
     return AnnotatedTemplate(

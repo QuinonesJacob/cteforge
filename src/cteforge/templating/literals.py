@@ -4,6 +4,9 @@ never strings spliced into SQL text (DESIGN §14).
 Each slot of a variable is filled the way its literal was written in the trusted SQL:
 bare or typed (cast to the slot's cast_type), dates in the slot's format, numbers with
 their exact original text when the value is unchanged (ADR 0014).
+
+A grain value (M1.5) is never put into a placeholder: `build_truncation` rebuilds the
+whole truncation node with the new unit (ADR 0011).
 """
 
 from __future__ import annotations
@@ -20,6 +23,7 @@ from cteforge.domain.errors import RenderError
 from cteforge.domain.models import LiteralForm, VariableSlot, VariableSpec
 from cteforge.domain.variables import (
     DateRangeValue,
+    Grain,
     TypedValue,
     VariableType,
     number_from_text,
@@ -97,6 +101,33 @@ def _scalar(spec: VariableSpec, slot: VariableSlot, value: TypedValue) -> exp.Ex
     raise RenderError(f"'{spec.name}': cannot render {type(value).__name__}")  # pragma: no cover
 
 
+def _unit_node(grain: Grain, source: Dialect) -> exp.Expression:
+    """The unit as the source dialect's parser builds it, so a rebuilt node equals what
+    parsing the rendered SQL gives back. BigQuery's native WEEK is WEEK(SUNDAY) there."""
+    if grain is Grain.WEEK and source is Dialect.BIGQUERY:
+        return exp.WeekStart(this=exp.Var(this="SUNDAY"))
+    return exp.Var(this=grain.value.upper())
+
+
+def build_truncation(
+    node: exp.Expression, grain: Grain, source: Dialect, target: Dialect | None = None
+) -> exp.Expression:
+    """A new truncation node of the same kind (DateTrunc / TimestampTrunc / DatetimeTrunc)
+    over the same arguments, truncating to `grain`. The node's own constructor normalizes
+    the unit (DateTrunc keeps a string, the others a Var), as the parser does. The
+    arguments are moved, not copied, so nested truncations stay addressable."""
+    if (target or source) is Dialect.DATABRICKS and isinstance(node, exp.DateTrunc):
+        if grain is Grain.DAY:
+            # DateTrunc is TRUNC(date, fmt) in Databricks, which documents only year /
+            # quarter / month / week formats.
+            raise RenderError(
+                "Databricks TRUNC(date, fmt) has no 'day' format; write DATE_TRUNC in the "
+                "trusted SQL to allow grain 'day'"
+            )
+    args = {k: v for k, v in node.args.items() if k != "unit"}
+    return type(node)(**args, unit=_unit_node(grain, source))
+
+
 def build_replacements(
     spec: VariableSpec,
     value: TypedValue,
@@ -104,8 +135,11 @@ def build_replacements(
     target_dialect: Dialect | None = None,
 ) -> dict[str, Replacement]:
     """Placeholder name → node(s) to put in its place, one entry per slot.
-    text_list yields a list of nodes (the whole IN list)."""
+    text_list yields a list of nodes (the whole IN list). grain yields nothing: it has no
+    placeholder (render rebuilds its truncation nodes with `build_truncation`)."""
     out: dict[str, Replacement] = {}
+    if spec.type is VariableType.GRAIN:
+        return out
     for slot in spec.slots:
         if spec.type is VariableType.TEXT_LIST:
             assert isinstance(value, list)

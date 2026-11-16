@@ -19,6 +19,7 @@ If something does not clearly fit one of the above, it does not belong here.
 class Store:
     def __init__(self, url: str) -> None          # "sqlite:///path.db", "sqlite://" (memory), "postgresql+psycopg://..."
     def init_schema(self) -> None                 # idempotent
+    def close(self) -> None                       # dispose the engine (memory DB is lost)
     # definitions — stored via domain/codec.py YAML, the single format
     def add_definition_version(self, d: Definition, *, author: str, change_note: str = "",
                                logic_changed: bool = True) -> Definition

@@ -14,6 +14,8 @@ transpiled renders carry a `transpiled` issue and lower trust, ADR 0013):
   compared with a DATETIME column (DuckDB strptime is naive).
 - booked_vs_collected.postgres.sql: `TO_TIMESTAMP(...)` yields timestamptz compared with a
   naive timestamp column (session time zone applies).
+- realization_rate_grain.*.sql: grain `quarter` rebuilds the month truncation (M1.5); the
+  transpiled ones inherit realization_rate's defects above.
 """
 
 import os
@@ -21,11 +23,16 @@ from pathlib import Path
 
 import pytest
 
+from cteforge.domain.codec import annotations_from_yaml
 from cteforge.domain.dialects import Dialect
 from cteforge.domain.issues import IssueCode
+from cteforge.domain.models import Definition
+from cteforge.parsing.analyze import analyze
 from cteforge.templating.render import render
+from cteforge.templating.template import apply_annotations
 
 GOLDEN = Path(__file__).resolve().parents[2] / "golden"
+EXAMPLES = Path(__file__).resolve().parents[3] / "examples"
 CASES = {
     "realization_rate": (
         "sample_definition",
@@ -35,7 +42,31 @@ CASES = {
         "collections_definition",
         {"period": {"start": "2026-01-15", "end": "2026-03-01"}, "min_booked": 1000.5},
     ),
+    "realization_rate_grain": (
+        "grain_definition",
+        {
+            "period": {"start": "2026-01-01", "end": "2027-01-01"},
+            "regions": ["EMEA"],
+            "time_grain": "quarter",
+        },
+    ),
 }
+
+
+@pytest.fixture(scope="module")
+def grain_definition(sample_sql, sample_schema) -> Definition:
+    """examples/definitions/realization_rate_grain.annotations.yml (M1.5 grain)."""
+    text = (EXAMPLES / "definitions" / "realization_rate_grain.annotations.yml").read_text()
+    annotations = annotations_from_yaml(text)
+    analysis = analyze(sample_sql, Dialect.DUCKDB, sample_schema)
+    annotated = apply_annotations(sample_sql, Dialect.DUCKDB, analysis, annotations.variables)
+    return Definition(
+        id=annotations.id,
+        title=annotations.title,
+        source_dialect=Dialect.DUCKDB,
+        template=annotated.template,
+        variables=annotated.variables,
+    )
 
 
 @pytest.mark.parametrize("dialect", list(Dialect))

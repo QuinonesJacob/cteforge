@@ -18,6 +18,14 @@ annotations refer to. `find_literals` is shared with templating so both sides ag
 
 CTE names are positional: a CTE's own body and earlier CTEs read the base table of that
 name (WITH RECURSIVE: every CTE is visible everywhere).
+
+Grain IDs are `<scope>.G<n>`: n counts date truncation nodes (DateTrunc, TimestampTrunc,
+DatetimeTrunc) in the same walk order, wherever they sit. `find_grains` is shared with
+templating, which rebuilds the named nodes for a `grain` variable (M1.5). A unit argument
+that is a column, not a unit keyword or string, is reported as `column <name>` (never a
+grain value): sqlglot keeps `cfg.month` as a Column, but reads a bare `month` as the unit
+keyword even where it is a column (DuckDB, Postgres, Databricks), so `analyze` finds those in
+the SQL's tokens (`identifier_units`).
 """
 
 from __future__ import annotations
@@ -32,6 +40,7 @@ from pydantic import BaseModel, ConfigDict
 from sqlglot import exp
 from sqlglot.errors import ParseError, SqlglotError, TokenError
 from sqlglot.optimizer.annotate_types import annotate_types
+from sqlglot.tokens import Token, TokenType
 
 from cteforge.domain.dialects import Dialect
 from cteforge.domain.errors import SqlParseError
@@ -112,6 +121,34 @@ _TYPE_PRESERVING = (
 )
 _ARITHMETIC = (exp.Add, exp.Sub, exp.Mul, exp.Div)
 _MAX_DEPTH = 64  # Lineage hops (CTE layers); types are memoized, so cost stays linear.
+# Date truncation nodes: grain candidates (M1.5). sqlglot normalizes DATE_TRUNC / TRUNC /
+# TIMESTAMP_TRUNC / DATETIME_TRUNC of every supported dialect into one of these.
+TRUNCATIONS = (exp.DateTrunc, exp.TimestampTrunc, exp.DatetimeTrunc)
+# Unit spellings beyond sqlglot's own abbreviations (TimeUnit.UNABBREVIATED_UNIT_NAME).
+_UNIT_ALIASES = {
+    "DD": "DAY",
+    "DAYS": "DAY",
+    "WK": "WEEK",
+    "WEEKS": "WEEK",
+    "MM": "MONTH",
+    "MON": "MONTH",
+    "MONS": "MONTH",
+    "MONTHS": "MONTH",
+    "QTR": "QUARTER",
+    "QUARTERS": "QUARTER",
+    "YY": "YEAR",
+    "YYYY": "YEAR",
+    "YEARS": "YEAR",
+}
+# Dialects whose truncation unit is a string expression, so an unquoted (or double-quoted)
+# name there is a column; sqlglot still reads a 1-part name as the unit keyword. Function
+# name → position of the unit argument. Snowflake and BigQuery take unit keywords.
+_STRING_UNIT_ARGS: dict[Dialect, dict[str, int]] = {
+    Dialect.DUCKDB: {"DATE_TRUNC": 0, "DATETRUNC": 0},
+    Dialect.POSTGRES: {"DATE_TRUNC": 0},
+    Dialect.DATABRICKS: {"DATE_TRUNC": 0, "TRUNC": 1},
+}
+COLUMN_UNIT_PREFIX = "column "  # `GrainCandidate.unit` of a truncation to a column's value.
 
 
 # ── Result models ───────────────────────────────────────────────────────────────────
@@ -165,6 +202,23 @@ class LiteralInfo(BaseModel):
     #                                    when unwrapped; the expression's type when wrapped).
 
 
+class GrainCandidate(BaseModel):
+    """A date truncation that a `grain` variable could change (M1.5). Facts only."""
+
+    model_config = ConfigDict(frozen=True)
+
+    id: str  # "<scope>.G<n>"
+    scope: str
+    unit: str  # Normalized, lower case: "month", "week", "hour", "week(monday)", "isoweek";
+    #            a unit read from a column is "column <name>" (e.g. "column cfg.month").
+    column_sql: str  # The truncated expression as written, e.g. "cd.closed_at".
+    sql: str  # The whole truncation, e.g. "DATE_TRUNC('MONTH', cd.closed_at)".
+    column: ColumnRef | None = None  # Column it truncates (through CTEs), when there is one.
+    column_type: str | None = None  # Type of the truncated expression, when known.
+    output: str | None = None  # Output column it computes, when it is a projection's value.
+    context: list[LiteralContext] = []  # Same facts as literals (or_branch, having, ...).
+
+
 class RangeCandidate(BaseModel):
     model_config = ConfigDict(frozen=True)
 
@@ -206,9 +260,13 @@ class QueryAnalysis(BaseModel):
     literals: list[LiteralInfo]
     ranges: list[RangeCandidate]
     joins: list[JoinInfo] = []
+    grains: list[GrainCandidate] = []  # Date truncations, `<scope>.G<n>` (M1.5).
 
     def literal(self, literal_id: str) -> LiteralInfo | None:
         return next((lit for lit in self.literals if lit.id == literal_id), None)
+
+    def grain(self, grain_id: str) -> GrainCandidate | None:
+        return next((g for g in self.grains if g.id == grain_id), None)
 
 
 # ── Parsing and scopes (shared with templating) ─────────────────────────────────────
@@ -520,6 +578,116 @@ def find_literals(tree: exp.Expression) -> list[FoundLiteral]:
                     value_root=located.value_root,
                     context=_context(located, scope.root),
                     format_literal=_format_literal(located),
+                )
+            )
+    return found
+
+
+# ── Grain candidates (M1.5) ─────────────────────────────────────────────────────────
+
+
+@dataclass(frozen=True)
+class FoundGrain:
+    """A date truncation located in a parsed tree (internal; not serialized)."""
+
+    id: str
+    scope: str
+    node: exp.Expression  # DateTrunc / TimestampTrunc / DatetimeTrunc.
+    unit: str  # Normalized lower-case unit (see `truncation_unit`).
+    context: tuple[LiteralContext, ...]
+
+
+def truncation_unit(node: exp.Expression, dialect: Dialect) -> str:
+    """Normalized lower-case unit of a truncation node. Abbreviations are spelled out
+    ("MM" → "month", "Q" → "quarter"). BigQuery parses `WEEK` as WEEK(SUNDAY), which is its
+    native week, so that is "week"; any other explicit week start is "week(<day>)". A
+    qualified column is "column <name>"; a bare column name needs the SQL's tokens
+    (`identifier_units`), because sqlglot parses it as the unit keyword."""
+    unit = node.args.get("unit")
+    if isinstance(unit, exp.WeekStart):
+        day = unit.this.name.lower() if unit.this is not None else ""
+        native = dialect is Dialect.BIGQUERY and day == "sunday"
+        return "week" if native else f"week({day})"
+    if isinstance(unit, exp.Column) and len(unit.parts) != 1:
+        # A qualified column (`cfg.month`): its value picks the unit at run time.
+        return COLUMN_UNIT_PREFIX + unit.sql(dialect=str(dialect))
+    if isinstance(unit, exp.Var | exp.Literal | exp.Column):
+        return _unit_name(unit.name)
+    return unit.sql(dialect=str(dialect)).lower() if unit is not None else ""
+
+
+def _unit_name(text: str) -> str:
+    name = text.upper()
+    name = exp.TimeUnit.UNABBREVIATED_UNIT_NAME.get(name, _UNIT_ALIASES.get(name, name))
+    return name.lower()
+
+
+def _call_args(tokens: list[Token], start: int) -> list[list[Token]]:
+    """Top-level arguments of the call whose `(` is tokens[start - 1], as token runs."""
+    args: list[list[Token]] = [[]]
+    depth = 0
+    for token in tokens[start:]:
+        if token.token_type in (TokenType.L_PAREN, TokenType.L_BRACKET):
+            depth += 1
+        elif token.token_type in (TokenType.R_PAREN, TokenType.R_BRACKET):
+            if depth == 0:
+                break
+            depth -= 1
+        elif token.token_type is TokenType.COMMA and depth == 0:
+            args.append([])
+            continue
+        args[-1].append(token)
+    return args
+
+
+def identifier_units(sql: str, dialect: Dialect) -> dict[str, str]:
+    """Truncation units written as a bare (or double-quoted) name in a dialect where that
+    name is a column (DuckDB, Postgres, Databricks): normalized unit → name as written.
+    sqlglot parses `DATE_TRUNC(month, ts)` there like `DATE_TRUNC('month', ts)`, so only
+    the tokens tell them apart. A name used both ways in one query counts as a column."""
+    positions = _STRING_UNIT_ARGS.get(dialect)
+    if not positions:
+        return {}
+    tokens = list(sqlglot.tokenize(sql, read=str(dialect)))
+    names: dict[str, str] = {}
+    for i, token in enumerate(tokens[:-1]):
+        index = positions.get(token.text.upper())
+        if index is None or tokens[i + 1].token_type is not TokenType.L_PAREN:
+            continue
+        args = _call_args(tokens, i + 2)
+        if len(args) <= index or len(args[index]) != 1:
+            continue  # Missing, or a longer expression (sqlglot keeps those as written).
+        unit = args[index][0]
+        if unit.token_type not in (TokenType.STRING, TokenType.NATIONAL_STRING):
+            names.setdefault(_unit_name(unit.text), unit.text)
+    return names
+
+
+def _grain_context(node: exp.Expression, scope_root: exp.Expression) -> tuple[LiteralContext, ...]:
+    facts: set[LiteralContext] = set()
+    child = node
+    while child is not scope_root and child.parent is not None:
+        facts.update(_ancestor_facts(child.parent, child))
+        child = child.parent
+    return tuple(c for c in LiteralContext if c in facts)
+
+
+def find_grains(tree: exp.Expression, dialect: Dialect) -> list[FoundGrain]:
+    """Every date truncation node with its stable `<scope>.G<n>` ID (module docstring)."""
+    found: list[FoundGrain] = []
+    for scope in scopes(tree):
+        ordinal = 0
+        for node in _walk(scope, tree):
+            if not isinstance(node, TRUNCATIONS):
+                continue
+            ordinal += 1
+            found.append(
+                FoundGrain(
+                    id=f"{scope.name}.G{ordinal}",
+                    scope=scope.name,
+                    node=node,
+                    unit=truncation_unit(node, dialect),
+                    context=_grain_context(node, scope.root),
                 )
             )
     return found
@@ -881,6 +1049,37 @@ def _literal_infos(found: list[FoundLiteral], lin: _Lineage) -> list[LiteralInfo
     return infos
 
 
+def _projection_output(node: exp.Expression) -> str | None:
+    parent = node.parent
+    if isinstance(parent, exp.Alias) and isinstance(parent.parent, exp.Select):
+        if parent.arg_key == "expressions":
+            return parent.alias
+    return None
+
+
+def _grain_candidate(
+    found: FoundGrain, lin: _Lineage, column_units: dict[str, str]
+) -> GrainCandidate:
+    dialect = str(lin.dialect)
+    unit = found.unit
+    if unit in column_units and isinstance(found.node.args.get("unit"), exp.Var | exp.Literal):
+        unit = COLUMN_UNIT_PREFIX + column_units[unit]
+    this = found.node.this
+    column_node = this if isinstance(this, exp.Column) else this.find(exp.Column)
+    resolved = _resolve(column_node, lin) if column_node is not None else None
+    return GrainCandidate(
+        id=found.id,
+        scope=found.scope,
+        unit=unit,
+        column_sql=this.sql(dialect=dialect),
+        sql=found.node.sql(dialect=dialect),
+        column=resolved.ref if resolved is not None else None,
+        column_type=_compared_type(this, resolved, lin) if column_node is not None else None,
+        output=_projection_output(found.node),
+        context=list(found.context),
+    )
+
+
 # ── Range candidates (ADR 0015) ─────────────────────────────────────────────────────
 
 
@@ -1068,6 +1267,7 @@ def analyze(sql: str, dialect: Dialect, schema: Schema | None = None) -> QueryAn
     lin = _lineage(tree, dialect, schema)
     found = find_literals(tree)
     literals = _literal_infos(found, lin)
+    column_units = identifier_units(sql, dialect)
     return QueryAnalysis(
         dialect=dialect,
         ctes=[
@@ -1083,4 +1283,5 @@ def analyze(sql: str, dialect: Dialect, schema: Schema | None = None) -> QueryAn
         literals=literals,
         ranges=_ranges(found, {lit.id: lit for lit in literals}),
         joins=_joins(tree, lin),
+        grains=[_grain_candidate(g, lin, column_units) for g in find_grains(tree, dialect)],
     )

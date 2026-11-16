@@ -16,6 +16,7 @@ If something does not clearly fit one of the above, it does not belong here.
 class AuditLog:
     def __init__(self, url: str) -> None
     def init_schema(self) -> None                       # idempotent
+    def close(self) -> None                             # dispose the engine (memory DB is lost)
     def record(self, event: AuditEvent) -> None         # raises AuditError on failure
     def list_events(self, *, limit: int = 100, actor: str | None = None,
                     kind: AuditKind | None = None, definition_id: str | None = None,
