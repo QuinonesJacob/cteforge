@@ -27,3 +27,27 @@ class SqlParseError(CteforgeError):
 
 class WarehouseError(CteforgeError):
     """A warehouse call failed. Messages never contain credentials."""
+
+
+class StoreError(CteforgeError):
+    """A persistence operation failed (duplicate id, missing row, bad state)."""
+
+
+class StaleVersionError(StoreError):
+    """A write was based on a version that is no longer the latest."""
+
+
+class AuditError(CteforgeError):
+    """The audit log could not be written or read."""
+
+
+class NotFoundError(CteforgeError):
+    """A definition, recipe, join, proposal or user does not exist."""
+
+
+class PermissionDeniedError(CteforgeError):
+    """The actor's role does not allow this action (ADR 0018)."""
+
+
+class PolicyError(CteforgeError):
+    """Refused by policy: strict mode, draft definition, non-read-only SQL, ..."""

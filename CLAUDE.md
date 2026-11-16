@@ -1,8 +1,9 @@
 # cteforge
 
 Open-source server (MCP + GUI) that turns a team's trusted SQL into a library agents can
-search, reuse, change safely, and build on. Trusted SQL is stored verbatim; only the parts
-that change are described as typed variables.
+search, reuse, change safely, and build on. Trusted SQL keeps its logic exactly (formatting is normalized);
+only the parts that change are described as typed variables. The analyst decides what
+changes (ADR 0015); the SQL determines the format (ADR 0014).
 
 **Read first:** `docs/DESIGN.md` (what and why) and `docs/decisions/` (one ADR per decision).
 Don't contradict them silently. If code must change a decision, update DESIGN.md and the ADR

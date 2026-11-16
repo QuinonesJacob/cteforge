@@ -11,3 +11,4 @@ A small set of variable types, each with one strict input format and one render 
 ## Consequences
 - Invalid inputs are rejected with clear errors that agents can correct.
 - Type list: date_range, date, grain, text_list, text, number, boolean.
+- Refined by 0014 (plain values; `format`, `unit`) and 0015 (analyst decides; structural facts; expression types).

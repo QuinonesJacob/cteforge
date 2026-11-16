@@ -40,8 +40,10 @@ class Role(StrEnum):
 class RangeShape(StrEnum):
     """How a date_range appeared in the trusted SQL. Decides what `end` means."""
 
-    HALF_OPEN = "half_open"  # col >= start AND col < end   (end exclusive)
-    INCLUSIVE = "inclusive"  # col BETWEEN start AND end, or >= / <=  (end inclusive)
+    HALF_OPEN = "half_open"  # col >= start AND col < end   [start, end)
+    INCLUSIVE = "inclusive"  # col BETWEEN start AND end, or >= / <=   [start, end]
+    EXCLUSIVE = "exclusive"  # col > start AND col < end   (start, end)
+    START_EXCLUSIVE = "start_exclusive"  # col > start AND col <= end   (start, end]
 
 
 # How many literals in the SQL each type replaces, and the placeholder suffixes used.

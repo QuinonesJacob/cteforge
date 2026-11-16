@@ -4,7 +4,7 @@
 > Individual decisions are recorded in [`decisions/`](decisions/). When code changes a
 > decision, update this file and the relevant ADR in the same commit.
 
-Status: pre-alpha. Milestone M1 in progress (see §16).
+Status: pre-alpha. M1 done; M1.1 (fix pass) through M6 being built (see §16).
 
 ---
 
@@ -28,7 +28,7 @@ that this was where the real value was. cteforge builds that use directly into t
 | Starting point | Model tables, joins, metrics first | Paste SQL you already trust |
 | What you describe | The whole data world | Only the parts of a query that change ("the holes") |
 | Useful when | The model is mostly complete | After the first query is imported |
-| Complex CTE logic | Hard to express as measures/dimensions | Kept verbatim |
+| Complex CTE logic | Hard to express as measures/dimensions | Kept as written (formatting normalized by sqlglot; meaning proven by the same-query-back check) |
 
 One line: **"Paste the SQL you already trust. No semantic model required."**
 
@@ -48,7 +48,10 @@ Export to WrenAI/dbt formats is a possible later feature, not a goal. See ADR 00
   usage count, known traps. A reference for exploration, not a restriction.
 - **Trust label** — attached to every result (§8).
 - **Proposal** — any change (new/edited definition, recipe, join) from a person or an agent,
-  pending approval according to permissions.
+  pending approval according to permissions (§18).
+- **Issue** — a structured problem or warning (`code`, `severity`, `message`, optional
+  `variable`/`literal`) returned by every check, render and run, so agents and the GUI can
+  act on it instead of parsing prose.
 
 ## 4. Typed variables
 
@@ -57,17 +60,30 @@ values in the input format; the tool produces SQL. See ADR 0005, 0006.
 
 | Type | Input format | Notes |
 |---|---|---|
-| `date_range` | `{"start": "YYYY-MM-DD", "end": "YYYY-MM-DD"}` | Covers two literals. Detected shapes: `col >= a AND col < b` (half-open), `col BETWEEN a AND b` (inclusive), `>= / <=`. The shape is recorded; `end` semantics follow it. |
-| `date` | `"YYYY-MM-DD"` | |
+| `date_range` | `{"start": "YYYY-MM-DD", "end": "YYYY-MM-DD"}` | Covers two literals (a lower and an upper bound). Shape recorded only for suggested pairs (ADR 0015): `half_open` [a, b), `inclusive` [a, b], `exclusive` (a, b), `start_exclusive` (a, b]; otherwise `null` and a description is required. Optional `format`. |
+| `date` | `"YYYY-MM-DD"` | Optional `format` (strftime) for bare non-ISO date strings (ADR 0014). |
 | `grain` (M1.5) | `day \| week \| month \| quarter \| year` | Renders by rebuilding the whole truncation node per dialect, never by filling a placeholder (argument order and unit syntax differ). |
-| `text_list` | `["a", "b"]` | Empty list is rejected (would render `IN ()`). |
-| `text` | `"a"` | |
-| `number` | `123` / `1.5` | |
+| `text_list` | `["a", "b"]` | Replaces a whole IN list. Empty list is rejected (would render `IN ()`). |
+| `text` | `"a"` | Exact text. Wildcards/patterns belong in the SQL (`'%' \|\| $x \|\| '%'`). |
+| `number` | `123` / `1.5` | Finite only (no inf/NaN). Exact decimals kept (`1000.50`). Optional `unit` label (e.g. `TFLOPS`). |
 | `boolean` | `true` / `false` | |
 
 Rules:
+- **The analyst decides** (ADR 0015). Every filter literal gets an ID; each is left alone,
+  made a `fixed` variable (named, described, visible to agents; overriding warns) or a
+  `changeable` variable. Nothing is changeable by default. The tool reports structural facts
+  per literal (`negated`, `or_branch`, `case_condition`, `join_on`, `outer_join_on`,
+  `having`, `subquery`, value-side wrapper) and *suggests* range pairs; it never assumes
+  meaning.
+- **The SQL determines the format** (ADR 0014). Agents send plain values (ISO dates, plain
+  numbers, plain text). Casts, functions, arithmetic and concatenation around a value stay
+  exactly as the analyst wrote them; only the literal is replaced.
+- One variable may bind the same filter in several places (e.g. the same period in two
+  CTEs); every place must hold the same original value.
 - `column` (what the variable filters) is annotated by a person or LLM. `column_type` is
-  **always read from the warehouse**, never supplied by an LLM.
+  **always read from the warehouse**, never supplied by an LLM. Identifiers are matched
+  case-insensitively (unquoted) with schema qualifiers kept; when the column side is an
+  expression (`CAST(col AS DATE)`, `EXTRACT(YEAR FROM col)`), the expression's type is used.
 - Optional `allowed` values: values outside the list are **warned on, not blocked**, and lower
   the trust label.
 - Inputs like `"2026-Q3"` are rejected with a precise error; the agent translates meaning
@@ -86,12 +102,13 @@ Rules:
 
 | Use the library | Build the library |
 |---|---|
-| `search(query)` | `parse_query(sql)` — CTEs, literals, compared columns + types |
-| `compile_and_run(recipe \| use+select, vars)` | `propose_definition(...)` |
-| `check_and_run(sql)` — exploratory | `revise_definition(...)` |
-| | `propose_join(...)` |
+| `search(query)` — ranked definitions + their variables | `parse_query(sql, dialect)` — literals with IDs, columns + types, structural facts, range/grain suggestions, joins |
+| `get_definition(id)` — full card: meaning, variables with input formats, outputs, grain | `propose_definition(sql, dialect, metadata, annotations)` |
+| `compile_and_run(uses, values, select?)` or `(recipe_id, values)` | `revise_definition(id, base_version, sql?, metadata?, annotations?)` |
+| `check_and_run(sql)` — exploratory, labeled | `propose_join(...)` · `propose_recipe(...)` |
 
-The GUI (M5) drives the same services; MCP and HTTP are thin adapters.
+Approving and verifying are not MCP tools: they happen in the GUI, HTTP API or CLI by a
+person (ADR 0007, 0018). The GUI (M5) drives the same services; MCP and HTTP are thin adapters.
 
 ## 7. Proposal checks
 
@@ -113,8 +130,16 @@ States: `draft` → `llm_annotated` → `verified`.
 | `llm_annotated` | Passed checks; no human review | Yes, labeled |
 | `verified` | Approved by a person | Yes, labeled with verifier + date |
 
-Result labels: `verified` · `built from verified parts` · `new logic on known joins` ·
-`exploratory`; downgraded by out-of-`allowed` values or cross-dialect transpile (§12).
+Result labels, best to worst: `verified` · `built_from_verified_parts` · `llm_annotated` ·
+`new_logic_on_known_joins` · `exploratory`. Policy (trust/, pure):
+- One verified definition, no final SELECT → `verified`. A final SELECT over verified
+  definitions joining only on known keys → `built_from_verified_parts`.
+- Any `llm_annotated` definition caps the label at `llm_annotated`.
+- Raw SQL (`check_and_run`) → `new_logic_on_known_joins` if every join matches the join map,
+  else `exploratory`. Joins in a final SELECT that aren't known → `exploratory`.
+- Each downgrade (fixed-variable override, out-of-`allowed` value, cross-dialect transpile)
+  lowers the label one step.
+- Drafts are never usable.
 
 Team setting: **strict** (only verified usable) or **open** (llm_annotated usable, labeled).
 An LLM can create and improve unverified definitions; **changes to a verified definition
@@ -183,13 +208,47 @@ transpilation can subtly change semantics. See ADR 0013.
 
 | | Scope | Status |
 |---|---|---|
-| M1 | Parse → typed template → "same query back" → render for Snowflake/BigQuery/Postgres → run on DuckDB; definition file format; CLI | in progress |
-| M1.5 | `grain` variable | |
-| M2 | Compose definitions (WITH assembly, dependencies, grain/join-key checks); trust labels | |
-| M3 | Store (SQLite/Postgres), proposals, versions, permissions, audit | |
-| M4 | MCP server (7 tools) | |
-| M5 | HTTP API + GUI (import flow, library, review queue) | |
-| M6 | Snowflake/BigQuery/Postgres/Databricks connectors, EXPLAIN/dry-run, nightly drift check | |
+| M1 | Parse → typed template → "same query back" → render for Snowflake/BigQuery/Postgres → run on DuckDB; definition file format; CLI | done |
+| M1.1 | Fix pass: ADR 0014/0015 (wrappers, structural facts, range pairing, `format`, `unit`, multi-place variables, structured issues), case-insensitive types, finite numbers | in progress |
+| M1.5 | `grain` variable | in progress |
+| M2 | Compose definitions (§17); trust labels (§8) | in progress |
+| M3 | Store (SQLite/Postgres), proposals (§18), versions, permissions, audit | in progress |
+| M4 | MCP server (§6) | in progress |
+| M5 | HTTP API + GUI (import flow, library, review queue) | in progress |
+| M6 | Snowflake/BigQuery/Postgres/Databricks connectors, EXPLAIN/dry-run, drift check | in progress |
+
+## 17. Composition (M2)
+
+A recipe (or an ad-hoc `compile_and_run`) names definitions by alias, gives values per alias,
+and optionally a final SELECT written by the agent over those aliases.
+- Each definition is rendered on its own (templating), then compose **hoists** its inner CTEs
+  into one top-level WITH, renaming them `<alias>__<cte>` to avoid collisions, and adds the
+  definition's final SELECT as a CTE named `<alias>`. Order follows dependencies.
+- The final SELECT must be a single read-only SELECT that references only the aliases (and,
+  with a lower label, raw tables). Without one, a single definition is returned as-is.
+- Checks: every alias resolves; join conditions between aliases use declared `join_keys`
+  (else an `unknown_join` issue); joining definitions of different grain without
+  aggregation raises a `fan_out_risk` warning.
+
+## 18. Proposal & review flow (M3)
+
+- Every change is a proposal: `new_definition`, `revise_definition`, `new_recipe`, `new_join`.
+  Checks (§7) run at proposal time and are stored with it; the GUI shows them with a diff and
+  an impact preview (recipes using the definition).
+- Auto-apply: in **open** mode, a proposal whose checks all pass and that targets a new or
+  unverified definition is applied immediately as `llm_annotated`. Everything else waits.
+- Changes to a **verified** definition always wait for a person (approver or the
+  definition's owner). Approving can also verify (human only). Rejections keep a comment.
+- `revise_definition` carries `base_version`; if the definition moved on, it's refused with a
+  `stale_base_version` issue.
+- A nightly/CLI `revalidate` re-runs §7 checks for every latest version against its
+  warehouse profile and reports drift (does not change state automatically).
+
+## 19. Search (M4)
+
+Lexical, BM25-style over title, keywords, meaning, use/don't-use notes, variable names and
+descriptions, outputs and tables. Verified ranks above llm_annotated at equal relevance;
+drafts hidden by default. Embeddings are a later plug-in (ADR 0017).
 
 ## Out of scope
 
@@ -201,5 +260,5 @@ transpilation can subtly change semantics. See ADR 0013.
 
 - Grain detection: how much can be inferred automatically vs confirmed by a person?
 - Join map mining: how to identify "known traps" (fan-out, many-to-many) automatically?
-- Search: lexical first, or embeddings from the start?
-- MCP transport/auth for the self-hosted server (stdio vs HTTP + tokens).
+- Resolved: search is lexical first (ADR 0017); MCP is stdio + streamable HTTP with bearer
+  tokens (ADR 0018).

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from dataclasses import dataclass
+from enum import StrEnum
 
 import sqlglot
 from pydantic import BaseModel, ConfigDict
@@ -52,6 +53,19 @@ class ColumnRef(BaseModel):
     derived: bool = False  # True when lineage stops at a computed CTE column.
 
 
+class LiteralContext(StrEnum):
+    """Structural facts about where a literal sits (ADR 0015). Facts, not meaning."""
+
+    NEGATED = "negated"  # Under a NOT (incl. NOT BETWEEN / NOT IN / NOT LIKE).
+    OR_BRANCH = "or_branch"  # Inside one branch of an OR.
+    CASE_CONDITION = "case_condition"  # In a CASE WHEN condition, not a row filter.
+    JOIN_ON = "join_on"  # In an inner join's ON clause (filters rows like WHERE).
+    OUTER_JOIN_ON = "outer_join_on"  # In an outer join's ON: filters attached rows only.
+    HAVING = "having"  # Filters groups, after aggregation.
+    SUBQUERY = "subquery"  # Inside a subquery (IN (SELECT ...), EXISTS, scalar).
+    VALUE_WRAPPED = "value_wrapped"  # Inside a function/arithmetic/concat on the value side.
+
+
 class LiteralInfo(BaseModel):
     model_config = ConfigDict(frozen=True)
 
@@ -66,6 +80,13 @@ class LiteralInfo(BaseModel):
     column: ColumnRef | None
     wrapped: bool  # True if the column is inside a function/expression.
     in_list: str | None = None  # Shared by all literals of one IN (...) list.
+    # ── ADR 0014/0015 (M1.1) ──
+    context: list[LiteralContext] = []
+    wrapper_sql: str | None = None  # Value-side wrapper, literal shown as "?", e.g.
+    #                                  "STRPTIME(?, '%m-%d-%Y')", "? * 1e12", "'%' || ? || '%'".
+    suggested_format: str | None = None  # strftime pattern from an adjacent format argument.
+    compared_type: str | None = None  # Type of the column-side expression (the column's type
+    #                                    when unwrapped; the expression's type when wrapped).
 
 
 class RangeCandidate(BaseModel):
@@ -76,6 +97,19 @@ class RangeCandidate(BaseModel):
     start: str  # literal id
     end: str  # literal id
     shape: RangeShape
+
+
+class JoinInfo(BaseModel):
+    """A join found in the SQL, for mining the join map (DESIGN §3)."""
+
+    model_config = ConfigDict(frozen=True)
+
+    scope: str
+    left_table: str  # Base table (resolved through aliases), or CTE name.
+    right_table: str
+    join_type: str  # inner, left, right, full, cross
+    keys: list[tuple[str, str]]  # (left_column, right_column) equality pairs in ON.
+    on_sql: str  # Full ON condition as written (may contain non-key filters).
 
 
 class CteInfo(BaseModel):
@@ -95,6 +129,7 @@ class QueryAnalysis(BaseModel):
     outputs: list[str]
     literals: list[LiteralInfo]
     ranges: list[RangeCandidate]
+    joins: list[JoinInfo] = []
 
     def literal(self, literal_id: str) -> LiteralInfo | None:
         return next((lit for lit in self.literals if lit.id == literal_id), None)
