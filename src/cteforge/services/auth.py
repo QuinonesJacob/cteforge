@@ -41,21 +41,31 @@ def authenticate(ctx: AppContext, token: str | None) -> User:
     return user
 
 
-def local_user(ctx: AppContext) -> User:
+def local_user(ctx: AppContext, *, create: bool = True) -> User:
     """The local user named by CTEFORGE_USER.
 
     Only for stdio MCP, the CLI, or HTTP with CTEFORGE_AUTH=off (bound to localhost; the
     API enforces that). An existing user is used as stored (role and kind). A missing user
-    is created as a human admin ONLY while the store has no users at all (first local use,
-    like `admin.bootstrap_admin`); in a store that already has users, an unknown name raises
-    PermissionDeniedError, so a typo or an agent's name never becomes a human admin. Its
-    stored token hash is of a random token nobody ever sees, so the local user cannot be
-    used over authenticated HTTP until an admin issues a token.
+    is created as a human admin ONLY when `create` is true and the store has no users at
+    all (first local use by a person, like `admin.bootstrap_admin`); in a store that
+    already has users, an unknown name raises PermissionDeniedError, so a typo or an
+    agent's name never becomes a human admin. `create=False` (stdio MCP: the caller is an
+    agent's MCP client, whatever CTEFORGE_USER says) never creates anyone: an empty store
+    raises PermissionDeniedError naming `cteforge user add --bootstrap`. Its stored token hash
+    is of a random token nobody ever sees, so the local user cannot be used over
+    authenticated HTTP until an admin issues a token.
     """
     name = ctx.config.user
     user = ctx.store.get_user(name)
     if user is not None:
         return user
+    if not create:
+        raise PermissionDeniedError(
+            f"Local user '{name}' does not exist. A person must create users first: "
+            "`cteforge user add <name> --bootstrap` for the first admin, then `cteforge "
+            f"user add {name} --role contributor --agent` for an agent (CTEFORGE_USER is "
+            "never created from here)"
+        )
     if ctx.store.list_users():
         raise PermissionDeniedError(
             f"Local user '{name}' does not exist; ask an admin to create it "

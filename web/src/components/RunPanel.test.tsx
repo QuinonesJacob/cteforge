@@ -47,6 +47,7 @@ const outcome: RunOutcome = {
   ran: true,
   compile_id: "ab12",
   definitions: ["closed_deals@2"],
+  used: [{ id: "closed_deals", version: 2, state: "verified", verified_by: "ana", verified_at: "2026-11-10" }],
   duration_ms: 12,
 };
 
@@ -116,6 +117,9 @@ describe("RunPanel", () => {
     expect(within(result).getByText("fixed_override")).toBeInTheDocument();
     expect(within(result).getByText(/truncated/)).toBeInTheDocument();
     expect(within(result).getByText("ab12")).toBeInTheDocument();
+    expect(within(result).getByRole("list", { name: "Definitions used" })).toHaveTextContent(
+      "closed_deals@2 · verified · verified by ana on 2026-11-10",
+    );
     expect(within(result).getByRole("columnheader", { name: "amount" })).toBeInTheDocument();
   });
 

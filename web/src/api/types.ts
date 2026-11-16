@@ -179,6 +179,10 @@ export interface JoinInfo {
   join_type: string;
   keys: [string, string][];
   on_sql: string;
+  /** Base tables / key columns resolved through CTEs that pass the keys through unchanged. */
+  left_base_table?: string | null;
+  right_base_table?: string | null;
+  base_keys?: [string, string][];
 }
 
 export interface CteInfo {
@@ -236,7 +240,17 @@ export interface RunOutcome {
   ran: boolean;
   compile_id: string | null;
   definitions: string[];
+  /** One entry per definition version used: state and who verified it, when (DESIGN §8). */
+  used: UsedDefinition[];
   duration_ms: number | null;
+}
+
+export interface UsedDefinition {
+  id: string;
+  version: number;
+  state: DefinitionState;
+  verified_by?: string | null;
+  verified_at?: string | null;
 }
 
 export interface DefinitionRef {
@@ -253,6 +267,8 @@ export interface RunRequest {
   profile?: string;
   run: boolean;
   limit: number;
+  /** The user's question, recorded in the audit log. */
+  question?: string;
 }
 
 // ── Proposals (domain/proposals.py, services/review.py) ────────────────────────

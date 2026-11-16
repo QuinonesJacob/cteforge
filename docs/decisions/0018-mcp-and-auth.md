@@ -16,7 +16,24 @@ attributed for permissions and audit.
   and verify; admin → users and settings. A definition `owner` may approve changes to it.
   Agents can never verify (ADR 0007).
 - Local single-user mode: `CTEFORGE_AUTH=off` makes every HTTP call act as the local admin;
-  refused unless the server binds to localhost.
+  refused unless the server binds to localhost, and every request must arrive on a
+  loopback socket (ASGI peer and local address; never trusted from the Host header).
 
 ## Consequences
 - Every call has an actor for the audit log.
+
+## Addendum (2026-11-16): four-eyes rule
+- An author may not approve their own proposal, and may not verify a definition version
+  they authored — unless they are an `admin` (this keeps single-user local mode workable).
+- Agent-kind users can never be given `approver` or `admin` roles' verify power: verify
+  checks `kind == human` at call time, whatever the role (ADR 0007).
+
+## Addendum (2026-11-16): four-eyes across metadata-only versions; no stdio bootstrap
+- "A version they authored" means any part of it: the author of the newest version up to
+  it that changed the logic, and the author of every metadata-only version since. On
+  approve(verify=True) of a metadata-only revision, the base version's authors count too.
+  Otherwise the logic's author could verify their own SQL after anyone's cosmetic edit.
+- stdio MCP (`cteforge mcp`) never creates CTEFORGE_USER, even in an empty store: the
+  process at the other end is an MCP client, usually an agent, and must not become the
+  first human admin. A person creates users first (`cteforge user add --bootstrap`). The
+  CLI and auth-off HTTP (a person at this machine) still create the first local admin.

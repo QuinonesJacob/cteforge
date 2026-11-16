@@ -6,9 +6,15 @@ State rule (DESIGN §8): the definition is LLM_ANNOTATED only when there is no e
 AND the warehouse checks actually ran — results compared and every compared type known.
 Otherwise it stays DRAFT (with `checks_incomplete` saying what did not run). Never VERIFIED:
 only a person can verify (ADR 0007).
+
+Check runs never hand back the warehouse's runtime error text (`_run_failure`): it can
+quote data values, and proposal issues are stored and readable by any viewer, also in
+strict mode where exploratory queries are refused. EXPLAIN (compile) errors are kept.
 """
 
 from __future__ import annotations
+
+import re
 
 from pydantic import BaseModel, ConfigDict
 
@@ -72,6 +78,33 @@ def _usable_warehouse(
     return warehouse, []
 
 
+# "<context>: <Class> Error: ..." as connectors word it (DuckDB: "Conversion Error"); only
+# the head of the message is read, never the part that may quote values.
+_ERROR_CLASS = re.compile(
+    r"(?:[A-Za-z ]{1,40}: )?([A-Z][A-Za-z]{0,30}(?: [A-Z][A-Za-z]{0,30}){0,3} Error):"
+)
+
+
+def _run_failure(exc: WarehouseError) -> Issue:
+    """A check run that failed while EXECUTING, reported without the driver's message.
+
+    Runtime errors can quote data values (a failed cast prints the value it could not
+    convert), and these issues are stored on proposals any viewer can read. So a
+    proposal's checks would be a way to read table contents the team mode does not let the
+    proposer query (strict mode refuses check_and_run). Only the error class is kept (e.g.
+    "Conversion Error"); compile errors (EXPLAIN, before anything reads a row) keep their
+    message, which names columns, not values."""
+    found = _ERROR_CLASS.match(str(exc))
+    kind = found.group(1) if found else "an error"
+    return _issue(
+        IssueCode.COMPILE_FAILED,
+        Severity.ERROR,
+        f"The query compiled but failed when run on the warehouse ({kind}). The driver's "
+        "message is not shown here because it can contain data values; check the query "
+        "in the warehouse directly to see it.",
+    )
+
+
 def _compare_results(
     sql: str, definition: Definition, warehouse: Warehouse
 ) -> tuple[bool | None, list[Issue]]:
@@ -79,10 +112,13 @@ def _compare_results(
     try:
         rendered_sql = render(definition, {}).sql
         warehouse.explain(rendered_sql)
+    except WarehouseError as exc:
+        return False, [_issue(IssueCode.COMPILE_FAILED, Severity.ERROR, str(exc))]
+    try:
         original = warehouse.run(sql, RESULT_COMPARE_LIMIT)
         rendered = warehouse.run(rendered_sql, RESULT_COMPARE_LIMIT)
     except WarehouseError as exc:
-        return False, [_issue(IssueCode.COMPILE_FAILED, Severity.ERROR, str(exc))]
+        return False, [_run_failure(exc)]
     if original.truncated or rendered.truncated:
         message = f"Result has more than {RESULT_COMPARE_LIMIT} rows; results were not compared."
         return None, [_issue(IssueCode.CHECKS_INCOMPLETE, Severity.WARNING, message)]

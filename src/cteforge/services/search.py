@@ -7,8 +7,13 @@ Lexical BM25F-style scoring, pure Python over the store's definitions:
 - Tokenizer: lowercase, split on anything that is not a letter or digit (so snake_case
   splits), drop a few English stopwords, light plural stripping (`rates` → `rate`,
   `categories` → `category`, `classes` → `class`; words ending in `ss`/`us`/`is` kept).
-- Ranking: score desc; at equal score (6 decimals) verified before llm_annotated before
-  draft; then title, then id. A non-empty query only returns definitions that match.
+- Ranking: hits whose only matches are in `dont_use_when` come last (the words name what
+  the definition is NOT for); then score desc; at equal score (6 decimals) verified before
+  llm_annotated before draft; then title, then id. A non-empty query only returns
+  definitions that match.
+- Each hit carries `use_when` / `dont_use_when` / `grain` and `matched_terms` /
+  `matched_fields`, so an agent can judge a hit without fetching its card. Scores are BM25
+  with no fixed scale: comparable within one search only.
 - Empty query (no tokens) → every visible definition, ordered by title, score 0.
 
 Which version is searched (`_library.visible_states` / `newest_in_states`, shared with
@@ -98,17 +103,30 @@ class _Doc:
     definition: Definition
     tf: dict[str, float]  # field-weighted term frequency
     length: float  # field-weighted length
+    fields: dict[str, frozenset[str]]  # field name → its tokens
+
+    def matches(self, terms: list[str]) -> tuple[list[str], list[str]]:
+        """(query terms found, fields they were found in), both in a stable order."""
+        found = [t for t in dict.fromkeys(terms) if t in self.tf]
+        fields = [name for name, tokens in self.fields.items() if any(t in tokens for t in found)]
+        return found, fields
+
+    def only_dont_use_when(self, terms: list[str]) -> bool:
+        """True when every matching term was found only in `dont_use_when`."""
+        _, fields = self.matches(terms)
+        return fields == ["dont_use_when"]
 
 
 def _doc(d: Definition) -> _Doc:
     tf: Counter[str] = Counter()
     length = 0.0
-    for name, tokens in _fields(d).items():
+    fields = _fields(d)
+    for name, tokens in fields.items():
         weight = FIELD_WEIGHTS[name]
         length += weight * len(tokens)
         for token in tokens:
             tf[token] += weight
-    return _Doc(d, dict(tf), length)
+    return _Doc(d, dict(tf), length, {k: frozenset(v) for k, v in fields.items()})
 
 
 def bm25(query_terms: list[str], docs: list[_Doc]) -> list[float]:
@@ -155,24 +173,29 @@ def search(
         if (found := _library.newest_in_states(ctx, latest, states)) is not None
     ]
     terms = tokenize(query or "")
+    docs = [_doc(d) for d in candidates]
     if terms:
-        docs = [_doc(d) for d in candidates]
         scored = [
-            (score, doc.definition)
-            for score, doc in zip(bm25(terms, docs), docs, strict=True)
-            if score > 0
+            (score, doc) for score, doc in zip(bm25(terms, docs), docs, strict=True) if score > 0
         ]
     else:
-        scored = [(0.0, d) for d in candidates]
+        scored = [(0.0, doc) for doc in docs]
     scored.sort(
         key=lambda item: (
+            # Matching only where the definition says NOT to use it is no evidence for it.
+            item[1].only_dont_use_when(terms),
             -round(item[0], 6),
-            STATE_RANK[item[1].state],
-            item[1].title.lower(),
-            item[1].id,
+            STATE_RANK[item[1].definition.state],
+            item[1].definition.title.lower(),
+            item[1].definition.id,
         )
     )
-    hits = [search_hit(d, round(score, 6)) for score, d in scored[:limit]]
+    hits = []
+    for score, doc in scored[:limit]:
+        found, fields = doc.matches(terms)
+        hits.append(
+            search_hit(doc.definition, round(score, 6), matched_terms=found, matched_fields=fields)
+        )
     _audit.record(
         ctx,
         user,

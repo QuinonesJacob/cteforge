@@ -41,7 +41,7 @@ describe("ImportPage", () => {
       "GET /profiles": () => ({ body: [] }),
       "POST /parse": () => ({ body: report }),
       "POST /proposals/definitions": () => ({ body: outcome }),
-      "GET /proposals": () => ({ body: [] }),
+      "GET /proposals/count": () => ({ body: { count: 0 } }),
     });
     render(
       <MemoryRouter>
@@ -142,7 +142,7 @@ describe("ImportPage", () => {
       "GET /profiles": () => ({ body: [] }),
       "POST /parse": () => ({ body: grainReport }),
       "POST /proposals/definitions": () => ({ body: { proposal: { id: "p1", kind: "new_definition", target_id: "deals_by_month", payload: {}, checks: [], summary: "", author: "jq", author_kind: "human", created_at: "", status: "pending", auto_applied: false, comment: "" }, definition: null, issues: [], auto_applied: false } }),
-      "GET /proposals": () => ({ body: [] }),
+      "GET /proposals/count": () => ({ body: { count: 0 } }),
     });
     renderPage();
     await user.type(await screen.findByLabelText(/Trusted SQL/), "SELECT 1");
@@ -184,7 +184,7 @@ describe("ImportPage", () => {
       "GET /me": () => ({ body: { name: "jq", role: "contributor", kind: "human" } }),
       "GET /profiles": () => ({ body: [] }),
       "POST /parse": () => ({ body: parses++ === 0 ? before : after }),
-      "GET /proposals": () => ({ body: [] }),
+      "GET /proposals/count": () => ({ body: { count: 0 } }),
     });
     renderPage();
     const sql = await screen.findByLabelText(/Trusted SQL/);

@@ -412,6 +412,7 @@ def test_warehouse_error_returns_run_failed_and_audits_class_only(ctx: AppContex
         select="SELECT rr.no_such_column FROM rr",
     )
     assert not out.ran and out.rows == []
+    assert out.usable is False  # no answer, not an empty one
     failed = [i for i in out.issues if i.code is IssueCode.RUN_FAILED]
     assert failed and failed[0].severity is Severity.ERROR
     assert "no_such_column" in failed[0].message  # the caller can fix its SELECT
@@ -512,3 +513,33 @@ def test_draft_recipe_is_refused(ctx: AppContext) -> None:
     ctx.store.add_recipe_version(_recipe(state=DefinitionState.DRAFT), author="analyst")
     out = compile_and_run(ctx, AGENT, recipe_id="apac_q3")
     assert not out.ran and IssueCode.DRAFT_NOT_USABLE in {i.code for i in out.issues}
+
+
+# ── values used ──────────────────────────────────────────────────────────────────────
+
+
+def test_values_used_echoes_given_and_default_values(ctx: AppContext) -> None:
+    """An omitted changeable variable silently kept its original value; now the outcome
+    says which values ran and flags each default with an info issue."""
+    add(ctx, rr_verified())
+    out = compile_and_run(
+        ctx, AGENT, uses={"rr": {"id": "realization_rate"}}, values={"rr": {"regions": ["APAC"]}}
+    )
+    assert out.ran and out.usable
+    used = out.values_used["rr"]
+    assert used["regions"] == ["APAC"]
+    assert used["period"] == {"start": "2026-01-01", "end": "2026-04-01"}
+    assert "won_statuses" in used  # fixed variables are reported too
+    defaults = [i for i in out.issues if i.code is IssueCode.DEFAULT_VALUE_USED]
+    assert [(i.variable, i.severity) for i in defaults] == [("period", Severity.INFO)]
+    assert "2026-01-01" in defaults[0].message
+    assert out.label is TrustLabel.VERIFIED  # an info issue does not lower trust
+
+
+def test_no_default_issue_when_every_changeable_variable_is_given(ctx: AppContext) -> None:
+    add(ctx, rr_verified())
+    out = compile_and_run(
+        ctx, AGENT, uses={"rr": {"id": "realization_rate"}}, values={"rr": Q3_APAC}
+    )
+    assert not [i for i in out.issues if i.code is IssueCode.DEFAULT_VALUE_USED]
+    assert out.values_used["rr"]["period"] == Q3_APAC["period"]

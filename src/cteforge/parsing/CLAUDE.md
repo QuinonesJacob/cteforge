@@ -38,7 +38,8 @@ If something does not clearly fit one of the above, it does not belong here.
   None of these form IN groups (templating's text_list replaces plain IN lists only).
 - **IN groups** are `<scope>.IN<n>`, numbered per scope in ID order (operator `IN` only).
 - **Context facts** (ADR 0015), computed from the predicate up to the scope root:
-  `negated` (any NOT, or a predicate's own `negate` flag, e.g. DuckDB `NOT LIKE`),
+  `negated` (any NOT, a predicate's own `negate` flag, e.g. DuckDB `NOT LIKE`, or an
+  excluding operator: `<>` / `!=`, `IS DISTINCT FROM`, `<> ALL`, `ROW <>`),
   `or_branch`, `case_condition` (CASE WHEN / IF condition, aggregate FILTER (WHERE ...)),
   `join_on` / `outer_join_on` (ON of an inner or semi / LEFT-RIGHT-FULL join; an anti
   join's ON is `negated` + `join_on`, like NOT EXISTS), `having`, `subquery`

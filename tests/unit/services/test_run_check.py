@@ -203,3 +203,57 @@ def test_concurrent_runs_never_mix_result_sets(ctx: AppContext) -> None:
     for t in threads:
         t.join()
     assert bad == []
+
+
+# ── Joins through CTEs, failed runs, result size ─────────────────────────────────────
+
+CTE_SQL = Path(__file__).resolve().parents[3] / "examples" / "queries" / "realization_rate.sql"
+
+
+def _invoice_edge() -> JoinEdge:
+    return JoinEdge(
+        id="deals__invoices__deal_id",
+        left_table="deals",
+        right_table="invoices",
+        keys=[JoinKey(left="deal_id", right="deal_id")],
+    )
+
+
+def test_joins_through_ctes_are_matched_on_their_base_tables(ctx: AppContext) -> None:
+    """Exploratory SQL written with CTEs is judged like join mining judges it: on the base
+    tables and columns behind each side, not on the CTE names."""
+    ctx.store.upsert_join(_edge())
+    ctx.store.upsert_join(_invoice_edge())
+    out = check_and_run(ctx, AGENT, CTE_SQL.read_text(), run=False)
+    assert [i for i in out.issues if i.code is IssueCode.UNKNOWN_JOIN] == []
+    assert out.label is TrustLabel.NEW_LOGIC_KNOWN_JOINS
+
+
+def test_cte_join_without_its_edge_names_the_base_tables(ctx: AppContext) -> None:
+    ctx.store.upsert_join(_edge())  # deals↔accounts known, deals↔invoices not
+    out = check_and_run(ctx, AGENT, CTE_SQL.read_text(), run=False)
+    unknown = [i.message for i in out.issues if i.code is IssueCode.UNKNOWN_JOIN]
+    assert out.label is TrustLabel.EXPLORATORY
+    assert any("'deals' and 'invoices'" in m for m in unknown), unknown
+    assert not any("'closed_deals'" in m for m in unknown), unknown
+
+
+def test_warehouse_failure_is_not_usable(ctx: AppContext) -> None:
+    """A query the warehouse rejects has no answer: never `usable` with empty rows."""
+    out = check_and_run(ctx, AGENT, "SELECT close_date, value FROM deals")
+    assert not out.ran and out.rows == []
+    assert out.usable is False
+    assert [i.code for i in out.issues] == [IssueCode.RUN_FAILED]
+    assert any("could not compile or run" in r for r in out.reasons)
+
+
+def test_wide_results_are_capped_by_size(ctx: AppContext, monkeypatch) -> None:
+    from cteforge.services import run as run_module
+
+    monkeypatch.setattr(run_module, "MAX_RESULT_BYTES", 5_000)
+    out = check_and_run(
+        ctx, AGENT, "SELECT repeat('x', 1000) AS wide FROM range(50) t(x)", limit=50
+    )
+    assert out.ran and out.usable and out.truncated
+    assert 0 < out.row_count < 50 and out.row_count == len(out.rows)
+    assert IssueCode.ROW_LIMIT_REACHED in {i.code for i in out.issues}

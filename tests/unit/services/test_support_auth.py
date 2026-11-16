@@ -157,3 +157,12 @@ def test_local_user_uses_a_stored_agent_as_is(ctx: AppContext) -> None:
     )
     user = local_user(ctx)
     assert user.kind is ActorKind.AGENT and not permitted(user, Action.VERIFY)
+
+
+def test_local_user_without_create_never_creates_anyone(ctx: AppContext) -> None:
+    """stdio MCP: the client (usually an agent) must not become the first human admin."""
+    with pytest.raises(PermissionDeniedError, match="user add"):
+        local_user(ctx, create=False)
+    assert ctx.store.list_users() == []
+    made = local_user(ctx)  # a person's first local use (CLI, auth-off GUI) still works
+    assert local_user(ctx, create=False) == made

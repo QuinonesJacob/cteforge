@@ -14,3 +14,5 @@ web/dist/
 # local server data
 cteforge.db
 connections.yml
+cteforge-demo/
+env.sh

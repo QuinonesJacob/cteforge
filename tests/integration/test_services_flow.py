@@ -104,6 +104,12 @@ def test_whole_flow_through_services(workdir: Path) -> None:
     with _open(workdir, "library.db") as ctx:
         root, agent, ana = _team(ctx)
 
+        # 0. Exploratory SQL before the library exists: the deals↔accounts join is unknown.
+        exploratory = run.check_and_run(ctx, agent, RAW_JOIN_SQL)
+        assert exploratory.ran and exploratory.label is TrustLabel.EXPLORATORY
+        assert {i.code for i in exploratory.issues} == {IssueCode.UNKNOWN_JOIN}
+        assert [r[0] for r in exploratory.rows] == ["APAC", "EMEA", "LATAM", "NA"]
+
         # 1. The agent parses the trusted query: literal IDs, with column types from the profile.
         report = parse_query_uc.parse_query(ctx, agent, SQL, "duckdb")
         literal_ids = {lit["id"] for lit in report.literals}
@@ -179,12 +185,13 @@ def test_whole_flow_through_services(workdir: Path) -> None:
         ]
         assert search.search(ctx, agent, "cash conversion")[0].version == 2
 
-        # 7. Exploratory SQL: the deals↔accounts join is not in the join map yet.
-        exploratory = run.check_and_run(ctx, agent, RAW_JOIN_SQL)
-        assert exploratory.ran and exploratory.label is TrustLabel.EXPLORATORY
-        assert {i.code for i in exploratory.issues} == {IssueCode.UNKNOWN_JOIN}
-        assert [r[0] for r in exploratory.rows] == ["APAC", "EMEA", "LATAM", "NA"]
-        # Once the agent proposes the join (auto-applied in open mode) it is known.
+        # 7. The deals↔accounts join was mined from realization_rate's SQL (through its
+        #    closed_deals CTE, whose account_id passes through from deals), so the raw SQL
+        #    that was exploratory before the library existed now runs on a known join.
+        known = run.check_and_run(ctx, agent, RAW_JOIN_SQL)
+        assert known.label is TrustLabel.NEW_LOGIC_KNOWN_JOINS and known.issues == []
+        assert known.rows == exploratory.rows
+        # The agent refines the mined edge (relationship); auto-applied in open mode.
         join = propose_other.propose_join(
             ctx,
             agent,
@@ -197,9 +204,11 @@ def test_whole_flow_through_services(workdir: Path) -> None:
             join.auto_applied
             and join.proposal.target_id == "accounts__deals__account_id=account_id"
         )
-        known = run.check_and_run(ctx, agent, RAW_JOIN_SQL)
-        assert known.label is TrustLabel.NEW_LOGIC_KNOWN_JOINS and known.issues == []
-        assert known.rows == exploratory.rows
+        edge = ctx.store.get_join(join.proposal.target_id)
+        # Stored canonically (tables sorted), so deals→accounts many_to_one reads reversed.
+        assert edge is not None
+        assert (edge.left_table, edge.right_table) == ("accounts", "deals")
+        assert edge.relationship == "one_to_many"
 
         # 8. Strict mode: floating runs fall back to verified v1; llm_annotated v2 and raw
         #    SQL are refused and nothing runs.
@@ -281,6 +290,7 @@ def test_whole_flow_through_services(workdir: Path) -> None:
         assert sorted(Path(p).relative_to(first_dir).as_posix() for p in written) == [
             f"definitions/{RR}.yml",
             "joins/accounts__deals__account_id=account_id.yml",
+            "joins/deals__invoices__deal_id=deal_id.yml",  # Mined through `collected`.
         ]
         assert library_io.import_library(ctx, agent, first_dir) == []
         library_io.export_library(ctx, root, second_dir)

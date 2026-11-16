@@ -39,7 +39,7 @@ export const getDefinition = (id: string, version?: number, opts: Opts = {}) =>
 export const getDefinitionHistory = (id: string, opts: Opts = {}) =>
   request<DefinitionVersionInfo[]>("GET", `/definitions/${enc(id)}/history`, opts);
 export const verifyDefinition = (id: string, version: number) =>
-  request<unknown>("POST", `/definitions/${enc(id)}/verify`, { body: { version } });
+  request<DefinitionCard>("POST", `/definitions/${enc(id)}/verify`, { body: { version } });
 
 // ── Build ──
 export const parseQuery = (body: { sql: string; dialect: Dialect; profile?: string }) =>
@@ -53,6 +53,9 @@ export const runQuery = (body: RunRequest) => request<RunOutcome>("POST", "/run"
 // ── Proposals ──
 export const listProposals = (status: ProposalStatus, opts: Opts = {}) =>
   request<ProposalView[]>("GET", "/proposals", { ...opts, query: { status } });
+/** Cheap count for the nav badge: no diffs built, no audit event (GET /proposals does both). */
+export const countProposals = (status: ProposalStatus, opts: Opts = {}) =>
+  request<{ count: number }>("GET", "/proposals/count", { ...opts, query: { status } });
 export const getProposal = (id: string, opts: Opts = {}) =>
   request<ProposalView>("GET", `/proposals/${enc(id)}`, opts);
 export const approveProposal = (id: string, body: { verify: boolean; comment: string }) =>

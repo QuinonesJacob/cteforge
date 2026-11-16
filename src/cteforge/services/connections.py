@@ -7,7 +7,8 @@ summaries carry only a profile's name and dialect, never options or secret refer
 from __future__ import annotations
 
 import threading
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -48,6 +49,10 @@ def open_profile(profile: WarehouseProfile) -> Warehouse:
     return opener(profile)
 
 
+BUSY_TIMEOUT_SECONDS = 30.0  # Longest a call waits for a warehouse another call is using.
+CLOSE_TIMEOUT_SECONDS = 5.0  # Longest close() waits for a running call before giving up.
+
+
 class SerializedWarehouse:
     """A Warehouse whose calls run one at a time (Warehouse protocol).
 
@@ -56,32 +61,63 @@ class SerializedWarehouse:
     using it at once could read each other's result sets. The registry hands every caller
     this wrapper: each `column_types` / `explain` / `run` holds the warehouse's lock from
     execute to fetch. Other attributes are passed through to the connector.
+
+    Waiting is bounded: a call that cannot get the lock within `busy_timeout` seconds
+    raises WarehouseError ("busy") instead of queueing behind a long query, so one slow
+    query cannot pile up every other caller's worker thread. `close()` waits at most
+    `close_timeout` seconds; when a call still holds the connection it is left open (the
+    process is shutting down) rather than hanging. The query that holds the lock is NOT
+    cancelled here: a per-statement timeout needs the connector (warehouse/, hardened).
     """
 
-    def __init__(self, inner: Warehouse) -> None:
+    def __init__(
+        self,
+        inner: Warehouse,
+        *,
+        busy_timeout: float = BUSY_TIMEOUT_SECONDS,
+        close_timeout: float = CLOSE_TIMEOUT_SECONDS,
+    ) -> None:
         self._inner = inner
         self._lock = threading.Lock()
+        self._busy_timeout = busy_timeout
+        self._close_timeout = close_timeout
         self.dialect: Dialect = inner.dialect
 
     @property
     def inner(self) -> Warehouse:
         return self._inner
 
+    @contextmanager
+    def _turn(self) -> Iterator[None]:
+        if not self._lock.acquire(timeout=self._busy_timeout):
+            raise WarehouseError(
+                f"The warehouse is busy with another query (waited {self._busy_timeout:g}s); "
+                "try again shortly, or narrow long-running queries"
+            )
+        try:
+            yield
+        finally:
+            self._lock.release()
+
     def column_types(self, table: str) -> dict[str, str]:
-        with self._lock:
+        with self._turn():
             return self._inner.column_types(table)
 
     def explain(self, sql: str) -> None:
-        with self._lock:
+        with self._turn():
             self._inner.explain(sql)
 
     def run(self, sql: str, limit: int) -> QueryResult:
-        with self._lock:
+        with self._turn():
             return self._inner.run(sql, limit)
 
     def close(self) -> None:
-        with self._lock:
+        if not self._lock.acquire(timeout=self._close_timeout):
+            return  # A call still runs on the connection; closing under it is unsafe.
+        try:
             self._inner.close()
+        finally:
+            self._lock.release()
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._inner, name)
@@ -112,7 +148,9 @@ class WarehouseRegistry:
         *,
         default: str | None = None,
         opener: Opener = open_profile,
+        busy_timeout: float = BUSY_TIMEOUT_SECONDS,
     ) -> None:
+        self._busy_timeout = busy_timeout
         self._profiles: dict[str, WarehouseProfile] = {}
         for profile in profiles:
             if profile.name in self._profiles:
@@ -175,7 +213,9 @@ class WarehouseRegistry:
         with self._lock:
             warehouse = self._open.get(key)
             if warehouse is None:
-                warehouse = SerializedWarehouse(self._opener(self._profiles[key]))
+                warehouse = SerializedWarehouse(
+                    self._opener(self._profiles[key]), busy_timeout=self._busy_timeout
+                )
                 self._open[key] = warehouse
             return warehouse
 

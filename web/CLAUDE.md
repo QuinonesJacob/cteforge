@@ -52,18 +52,20 @@ If something does not clearly fit one of the above, it does not belong here.
   any decision). `POST /users` / `POST /users/{name}/token` shapes are normalized in
   `endpoints.ts` (`{user, token}`, flat, or a bare token string).
 - `/run` body: `uses: {<id>: {id, version}}`, `values: {<id>: {...}}`, `run`, `limit`.
-- NOT YET IN THE API CONTRACT (src/cteforge/api/CLAUDE.md): the GUI also sends `profile` on
-  `POST /run` and `limit=100` on `GET /definitions` (services/run.py and services/search.py take
-  both; search defaults to 10). The API contract must add them deliberately before
-  api/schemas.py is written with `extra='forbid'`; until then they are a known gap, not contract.
+- `/run` also takes `profile` and `question`; `GET /definitions` takes `limit` (the GUI sends
+  100; the API default is 10). `RunOutcome.used` lists each definition version with its
+  state and verifier + date; the run result shows it.
+- The GUI's request bodies and the fields it reads are pinned by
+  `tests/e2e/test_gui_contract.py` against the real API: change both together.
 - Parse report: `literals[].id` is `<scope>.L<n>` and `grains[].id` is `<scope>.G<n>`; both are
   positional. A grain annotation's `literals` holds grain IDs only. The import page builds the
   proposal from the exact SQL/dialect/profile that was parsed, and drops drafts whose IDs no
   longer name the same literal after a re-parse.
 - Approve/reject is offered to approvers and, for definition proposals, to the target
   definition's owner (contributor or above); verify only to human approvers.
-- The pending badge shares one poller per tab (`state/usePendingCount.ts`): GET /proposals
-  builds diffs and writes an audit event per call, so poll rarely and only while visible.
+- The pending badge shares one poller per tab (`state/usePendingCount.ts`) on
+  `GET /proposals/count` (no diffs, not audited); still poll rarely and only while visible.
+  GET /proposals builds diffs and writes an audit event per call: the Review page only.
 - Verify is offered only on the latest version of an `llm_annotated` definition; approval is
   disabled while checks have errors; "also verify" is disabled on `checks_incomplete`.
 

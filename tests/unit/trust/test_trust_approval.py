@@ -136,6 +136,51 @@ def test_owner_name_must_match_exactly():
     assert not can_approve(user(CONTRIB, name="JQ"), target)
 
 
+# ── Four-eyes rule (ADR 0018 addendum) ──────────────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    "target", [NEW, DRAFT, LLM, VERIFIED], ids=["new", "draft", "llm", "verified"]
+)
+def test_approver_may_not_approve_own_proposal(target):
+    ann = user(APPROVER, name="ann")
+    assert can_approve(ann, target, author="ann") is False
+    assert can_approve(ann, target, author="bo") is True
+    assert can_approve(ann, target) is True  # no author given: rule not applied
+
+
+def test_owner_may_not_approve_own_proposal():
+    owner = user(CONTRIB, name="owner")
+    assert can_approve(owner, LLM, author="owner") is False
+    assert can_approve(owner, LLM, author="someone-else") is True
+
+
+def test_admin_is_exempt_from_four_eyes():
+    admin = user(ADMIN, name="root")
+    assert can_approve(admin, VERIFIED, author="root") is True
+    assert can_verify(admin, VERIFIED, author="root") is True
+
+
+def test_agent_admin_still_never_verifies_or_approves_verified_own_work():
+    bot = user(ADMIN, AGENT, name="bot")
+    assert can_verify(bot, LLM, author="bot") is False
+    assert can_approve(bot, VERIFIED, author="bot") is False
+    assert can_approve(bot, LLM, author="bot") is True  # admin exemption; not verified
+
+
+def test_approver_may_not_verify_own_version():
+    ann = user(APPROVER, name="ann")
+    assert can_verify(ann, LLM, author="ann") is False
+    assert can_verify(ann, LLM, author="bo") is True
+    assert can_verify(ann, LLM) is True
+
+
+def test_author_match_is_exact():
+    ann = user(APPROVER, name="ann")
+    assert can_approve(ann, LLM, author="Ann") is True
+    assert can_verify(ann, LLM, author="Ann") is True
+
+
 def warn(code: IssueCode) -> Issue:
     return Issue(code=code, severity=Severity.WARNING, message=code.value)
 

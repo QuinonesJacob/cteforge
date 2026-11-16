@@ -13,7 +13,7 @@ column could not be annotated at all.
 - Every literal in a filter position gets an ID. Each is either left alone (part of the
   SQL), a **fixed** variable (named and described, visible to agents, overriding warns), or a
   **changeable** variable. The analyst (person or LLM) decides; nothing is changeable by default.
-- Parsing reports **structural facts** per literal, not meaning: `negated` (under NOT),
+- Parsing reports **structural facts** per literal, not meaning: `negated` (under NOT, or compared with an excluding operator such as `<>`),
   `or_branch` (inside an OR), `case_condition`, `join_on`, `outer_join_on` (ON of an outer
   join — filters attached rows, not the driving rows), `having`, `subquery`, and any
   value-side wrapper.

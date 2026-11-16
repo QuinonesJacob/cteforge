@@ -319,3 +319,65 @@ def test_open_warehouse_m1_still_works(warehouse_path: Path) -> None:
     assert dialect is Dialect.DUCKDB
     assert wh.column_types("deals")
     wh.close()
+
+
+# ── SerializedWarehouse: bounded waits ───────────────────────────────────────────────
+
+
+class _SlowWarehouse:
+    dialect = Dialect.DUCKDB
+
+    def __init__(self) -> None:
+        import threading
+
+        self.started = threading.Event()
+        self.release = threading.Event()
+        self.closed = False
+
+    def run(self, sql: str, limit: int) -> Any:
+        self.started.set()
+        self.release.wait(5)
+        return "done"
+
+    def explain(self, sql: str) -> None:
+        return None
+
+    def column_types(self, table: str) -> dict[str, str]:
+        return {}
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def test_a_long_query_makes_other_callers_fail_fast_not_queue() -> None:
+    """One slow query must not hold every other caller's worker thread indefinitely."""
+    import threading
+    import time
+
+    from cteforge.services.connections import SerializedWarehouse
+
+    slow = _SlowWarehouse()
+    wh = SerializedWarehouse(slow, busy_timeout=0.05, close_timeout=0.05)  # type: ignore[arg-type]
+    runner = threading.Thread(target=wh.run, args=("SELECT 1", 1))
+    runner.start()
+    try:
+        assert slow.started.wait(2)
+        started = time.perf_counter()
+        with pytest.raises(WarehouseError, match="busy"):
+            wh.explain("SELECT 1")
+        with pytest.raises(WarehouseError, match="busy"):
+            wh.column_types("deals")
+        assert time.perf_counter() - started < 1
+        wh.close()  # returns instead of hanging; the running call keeps its connection
+        assert not slow.closed
+    finally:
+        slow.release.set()
+        runner.join(5)
+    wh.close()
+    assert slow.closed
+    wh.explain("SELECT 1")  # free again once the slow call is done
+
+
+def test_registry_passes_its_busy_timeout_on() -> None:
+    reg = WarehouseRegistry([_profile("a")], opener=lambda p: FakeWarehouse(p), busy_timeout=0.5)  # type: ignore[arg-type,return-value]
+    assert reg.get("a")._busy_timeout == 0.5  # type: ignore[attr-defined]

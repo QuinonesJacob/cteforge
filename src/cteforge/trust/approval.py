@@ -54,21 +54,32 @@ def allowed(user: User, action: Action) -> bool:
     return role_at_least(user.role, ROLE_MINIMUM[action])
 
 
-def can_approve(user: User, target: Definition | None) -> bool:
+def _own_work(user: User, author: str | None) -> bool:
+    """Four-eyes rule (ADR 0018 addendum): `user` authored the work and is not an admin
+    (admins are exempt so single-user local mode stays workable)."""
+    return author is not None and author == user.name and user.role is not UserRole.ADMIN
+
+
+def can_approve(user: User, target: Definition | None, *, author: str | None = None) -> bool:
     """Approver/admin, or the target definition's owner. Changes to a verified definition
-    always need a human (ADR 0007). `target=None` means a new definition."""
+    always need a human (ADR 0007). `target=None` means a new definition. `author` is the
+    proposal's author: nobody but an admin may approve their own proposal (four-eyes rule,
+    ADR 0018 addendum); None skips that check."""
     if target is not None and target.state is DefinitionState.VERIFIED and _is_agent(user):
+        return False
+    if _own_work(user, author):
         return False
     return allowed(user, Action.APPROVE) or _is_owner(user, target)
 
 
-def can_verify(user: User, target: Definition | None) -> bool:
+def can_verify(user: User, target: Definition | None, *, author: str | None = None) -> bool:
     """Humans only (ADR 0007), and only approver/admin (ADR 0018). Owning a definition does
     not grant verify: `owner` comes from the proposed YAML, so a proposer could otherwise
-    name themselves owner and verify their own work. `target` is accepted for symmetry with
-    `can_approve` and does not widen the check."""
+    name themselves owner and verify their own work. `author` is the author of the version
+    being verified: nobody but an admin may verify their own version (four-eyes rule,
+    ADR 0018 addendum); None skips that check. `target` does not widen the check."""
     del target
-    return allowed(user, Action.VERIFY)
+    return allowed(user, Action.VERIFY) and not _own_work(user, author)
 
 
 def can_auto_apply(mode: TeamMode, target: Definition | None, checks: list[Issue]) -> bool:

@@ -174,3 +174,60 @@ def test_settings(store: Store) -> None:
     store.set_setting("other", "")
     assert store.get_setting("other") == ""
     assert store.get_setting("team_mode") == "strict"
+
+
+# ----------------------------------------------------- compare-and-swap (expected_status)
+
+
+def _approved(store: Store, id: str, by: str = "ann") -> Proposal:
+    return store.get_proposal(id).model_copy(
+        update={"status": ProposalStatus.APPROVED, "decided_by": by}
+    )
+
+
+def test_update_proposal_cas_applies_when_status_matches(store: Store) -> None:
+    store.add_proposal(proposal("p1", 0))
+    decided = _approved(store, "p1")
+    assert store.update_proposal(decided, expected_status=ProposalStatus.PENDING) == decided
+    assert store.get_proposal("p1").status is ProposalStatus.APPROVED
+
+
+def test_update_proposal_cas_refuses_on_status_mismatch(store: Store) -> None:
+    store.add_proposal(proposal("p1", 0))
+    store.update_proposal(_approved(store, "p1", "ann"), expected_status=ProposalStatus.PENDING)
+    rejected = store.get_proposal("p1").model_copy(
+        update={"status": ProposalStatus.REJECTED, "decided_by": "bo"}
+    )
+    with pytest.raises(StoreError, match="approved, not pending"):
+        store.update_proposal(rejected, expected_status=ProposalStatus.PENDING)
+    stored = store.get_proposal("p1")
+    assert stored.status is ProposalStatus.APPROVED and stored.decided_by == "ann"
+
+
+def test_update_proposal_cas_missing_raises(store: Store) -> None:
+    with pytest.raises(StoreError, match="does not exist"):
+        store.update_proposal(proposal("ghost", 0), expected_status=ProposalStatus.PENDING)
+
+
+def test_update_proposal_without_expected_status_still_overwrites(store: Store) -> None:
+    store.add_proposal(proposal("p1", 0))
+    store.update_proposal(_approved(store, "p1"))
+    back = store.get_proposal("p1").model_copy(update={"status": ProposalStatus.PENDING})
+    store.update_proposal(back)
+    assert store.get_proposal("p1").status is ProposalStatus.PENDING
+
+
+def test_update_proposal_cas_two_stores_one_winner(file_url: str) -> None:
+    # Two Store objects on one file database stand in for two server processes.
+    a, b = Store(file_url), Store(file_url)
+    a.init_schema()
+    a.add_proposal(proposal("p1", 0))
+    seen_a, seen_b = a.get_proposal("p1"), b.get_proposal("p1")  # both read it pending
+    win = seen_a.model_copy(update={"status": ProposalStatus.APPROVED, "decided_by": "ann"})
+    lose = seen_b.model_copy(update={"status": ProposalStatus.REJECTED, "decided_by": "bo"})
+    a.update_proposal(win, expected_status=ProposalStatus.PENDING)
+    with pytest.raises(StoreError):
+        b.update_proposal(lose, expected_status=ProposalStatus.PENDING)
+    assert b.get_proposal("p1").decided_by == "ann"
+    a.close()
+    b.close()

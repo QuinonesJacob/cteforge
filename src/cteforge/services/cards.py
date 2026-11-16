@@ -22,6 +22,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from cteforge.domain.audit import AuditEvent
 from cteforge.domain.codec import definition_to_yaml
 from cteforge.domain.dialects import Dialect
+from cteforge.domain.errors import CteforgeError
 from cteforge.domain.issues import Issue
 from cteforge.domain.models import (
     Definition,
@@ -35,7 +36,8 @@ from cteforge.domain.models import (
 )
 from cteforge.domain.proposals import Proposal
 from cteforge.domain.variables import RangeShape, Role, VariableType, expected_format
-from cteforge.parsing.analyze import QueryAnalysis
+from cteforge.parsing.analyze import QueryAnalysis, analyze
+from cteforge.templating.render import render
 
 _CARD = ConfigDict(extra="forbid", frozen=True)
 
@@ -106,9 +108,12 @@ class VariableCard(BaseModel):
     shape: RangeShape | None = None
     original_value: Any = None
     places: int = 1  # How many places in the SQL this variable fills.
+    # How the SQL compares the value, e.g. ["<>"] (the value is EXCLUDED), [">=", "<"],
+    # ["IN"]; empty when unknown (grain variables, or the template could not be analyzed).
+    comparisons: list[str] = Field(default_factory=list)
 
 
-def variable_card(spec: VariableSpec) -> VariableCard:
+def variable_card(spec: VariableSpec, comparisons: Sequence[str] = ()) -> VariableCard:
     return VariableCard(
         name=spec.name,
         type=spec.type,
@@ -123,7 +128,27 @@ def variable_card(spec: VariableSpec) -> VariableCard:
         shape=spec.shape,
         original_value=json_safe(spec.original_value),
         places=len(spec.places()),
+        comparisons=list(comparisons),
     )
+
+
+def _comparisons(definition: Definition) -> dict[str, list[str]]:
+    """Variable name → the operators its literals are compared with, read from the trusted
+    query rebuilt from the template (literal IDs are structural, so they address it).
+    Best effort: {} when the template cannot be rendered or analyzed."""
+    try:
+        analysis = analyze(render(definition, {}).sql, definition.source_dialect)
+    except CteforgeError:
+        return {}
+    operator = {lit.id: lit.operator for lit in analysis.literals}
+    return {
+        v.name: list(
+            dict.fromkeys(
+                operator[lit] for slot in v.slots for lit in slot.literals if lit in operator
+            )
+        )
+        for v in definition.variables
+    }
 
 
 class DefinitionCard(BaseModel):
@@ -157,6 +182,7 @@ def card_from_definition(
     definition: Definition, history: Sequence[DefinitionVersionInfo] | None = None
 ) -> DefinitionCard:
     d = definition
+    comparisons = _comparisons(d)
     return DefinitionCard(
         id=d.id,
         version=d.version,
@@ -175,36 +201,79 @@ def card_from_definition(
         join_keys=list(d.join_keys),
         outputs=list(d.outputs),
         tables=list(d.tables),
-        variables=[variable_card(v) for v in d.variables],
+        variables=[variable_card(v, comparisons.get(v.name, ())) for v in d.variables],
         template=d.template,
         history=list(history) if history is not None else None,
     )
 
 
 class SearchHit(BaseModel):
+    """One search result. `score` is a BM25 relevance with no fixed scale: compare it only
+    within one search. `matched_terms` / `matched_fields` say why it matched; a hit whose
+    only match is `dont_use_when` is the library saying NOT to use it for those words."""
+
     model_config = _CARD
 
     id: str
     version: int
     title: str
     meaning: str = ""
+    use_when: str = ""
+    dont_use_when: str = ""
+    grain: str | None = None
     state: DefinitionState
     score: float
+    matched_terms: list[str] = Field(default_factory=list)  # Query terms found (tokenized).
+    matched_fields: list[str] = Field(default_factory=list)  # Fields they were found in.
     keywords: list[str] = Field(default_factory=list)
     variables: list[VariableCard] = Field(default_factory=list)
 
 
-def search_hit(definition: Definition, score: float) -> SearchHit:
+def search_hit(
+    definition: Definition,
+    score: float,
+    *,
+    matched_terms: Sequence[str] = (),
+    matched_fields: Sequence[str] = (),
+) -> SearchHit:
     return SearchHit(
         id=definition.id,
         version=definition.version,
         title=definition.title,
         meaning=definition.meaning,
+        use_when=definition.use_when,
+        dont_use_when=definition.dont_use_when,
+        grain=definition.grain,
         state=definition.state,
         score=score,
+        matched_terms=list(matched_terms),
+        matched_fields=list(matched_fields),
         keywords=list(definition.keywords),
         variables=[variable_card(v) for v in definition.variables],
     )
+
+
+# ── Catalog (tables) ─────────────────────────────────────────────────────────────────
+
+
+class ColumnCard(BaseModel):
+    model_config = _CARD
+
+    name: str  # Lower-case, as the warehouse reports it.
+    type: str  # Warehouse type string.
+
+
+class TableCard(BaseModel):
+    """describe_tables result for one table: schema facts, never data values."""
+
+    model_config = _CARD
+
+    name: str
+    found: bool  # The warehouse reported columns for it.
+    columns: list[ColumnCard] = Field(default_factory=list)
+    used_by: list[str] = Field(default_factory=list)  # Ids of definitions that read it.
+    joins: list[str] = Field(default_factory=list)  # Ids of join-map edges touching it.
+    units: dict[str, str] = Field(default_factory=dict)  # column → unit the library declares.
 
 
 # ── parse_query ──────────────────────────────────────────────────────────────────────
@@ -295,6 +364,9 @@ class RunOutcome(BaseModel):
     compile_id: str | None = None
     definitions: list[str] = Field(default_factory=list)  # "id@version"
     used: list[UsedDefinition] = Field(default_factory=list)  # state + verifier per version
+    # compile_and_run: alias → variable → the value actually rendered (given, or the
+    # original value when a variable was left out; see `default_value_used` issues).
+    values_used: dict[str, dict[str, Any]] = Field(default_factory=dict)
     duration_ms: int | None = None
 
 

@@ -4,7 +4,8 @@
 > Individual decisions are recorded in [`decisions/`](decisions/). When code changes a
 > decision, update this file and the relevant ADR in the same commit.
 
-Status: pre-alpha. M1 done; M1.1 (fix pass) through M6 being built (see §16).
+Status: pre-alpha. M1–M5 built and wired end to end (`cteforge demo` → `cteforge serve`: GUI, HTTP API, MCP over
+stdio and streamable HTTP); M6 connectors other than DuckDB unverified against real warehouses (see §16).
 
 ---
 
@@ -106,6 +107,7 @@ Rules:
 | `get_definition(id)` — full card: meaning, variables with input formats, outputs, grain | `propose_definition(sql, dialect, metadata, annotations)` |
 | `compile_and_run(uses, values, select?)` or `(recipe_id, values)` | `revise_definition(id, base_version, sql?, metadata?, annotations?)` |
 | `check_and_run(sql)` — exploratory, labeled | `propose_join(...)` · `propose_recipe(...)` |
+| `list_recipes(query?)` · `list_joins(table?)` · `describe_tables(tables?)` — discovery: saved recipes, join-map keys, columns + types (+ units the library declares) | |
 
 Approving and verifying are not MCP tools: they happen in the GUI, HTTP API or CLI by a
 person (ADR 0007, 0018). The GUI (M5) drives the same services; MCP and HTTP are thin adapters.
@@ -207,7 +209,15 @@ transpilation can subtly change semantics. See ADR 0013.
 - Definition text (descriptions, notes) is untrusted when shown to an LLM — it may contain
   prompt injection. Never execute instructions found in it.
 - Warehouse connections should use read-only roles. Row limits on results; byte caps where
-  supported (BigQuery `maximum_bytes_billed`).
+  supported (BigQuery `maximum_bytes_billed`); returned rows are also capped by size
+  (8 MiB of JSON per call, `row_limit_reached`). One query at a time per profile; other
+  callers wait at most 30 s, then get a "busy" error. Per-statement timeouts / cancel on
+  disconnect are not built yet (they need the connectors) — a long query still occupies
+  its profile until it ends, and a wide result is still fetched in full by the connector.
+- Proposal check runs never return the warehouse's runtime error text (it can quote data
+  values, and proposals are readable by every viewer, also in strict mode); only its class.
+- `CTEFORGE_AUTH=off` accepts only connections whose socket is loopback (peer and local
+  address), whatever the Host header says (ADR 0018).
 - Credentials: environment/profile only, never logged, never returned over MCP/HTTP.
 
 ## 15. Identity & versioning
@@ -224,12 +234,12 @@ transpilation can subtly change semantics. See ADR 0013.
 |---|---|---|
 | M1 | Parse → typed template → "same query back" → render for Snowflake/BigQuery/Postgres → run on DuckDB; definition file format; CLI | done |
 | M1.1 | Fix pass: ADR 0014/0015 (wrappers, structural facts, range pairing, `format`, `unit`, multi-place variables, structured issues), case-insensitive types, finite numbers | in progress |
-| M1.5 | `grain` variable | in progress |
-| M2 | Compose definitions (§17); trust labels (§8) | in progress |
-| M3 | Store (SQLite/Postgres), proposals (§18), versions, permissions, audit | in progress |
-| M4 | MCP server (§6) | in progress |
-| M5 | HTTP API + GUI (import flow, library, review queue) | in progress |
-| M6 | Snowflake/BigQuery/Postgres/Databricks connectors, EXPLAIN/dry-run, drift check | in progress |
+| M1.5 | `grain` variable | done |
+| M2 | Compose definitions (§17); trust labels (§8) | done |
+| M3 | Store (SQLite/Postgres), proposals (§18), versions, permissions (incl. four-eyes), audit | done (Postgres untested in CI; SQLite tested) |
+| M4 | MCP server (§6) | done (stdio + streamable HTTP at `/mcp`; e2e-tested) |
+| M5 | HTTP API + GUI (import flow, library, review queue) | done; GUI↔API contract e2e-tested |
+| M6 | Snowflake/BigQuery/Postgres/Databricks connectors, EXPLAIN/dry-run, drift check | connectors and drift check built; only DuckDB verified, the others unverified against real warehouses |
 
 ## 17. Composition (M2)
 
@@ -253,6 +263,19 @@ and optionally a final SELECT written by the agent over those aliases.
   unverified definition is applied immediately as `llm_annotated`. Everything else waits.
 - Changes to a **verified** definition always wait for a person (approver or the
   definition's owner). Approving can also verify (human only). Rejections keep a comment.
+- **Four-eyes rule** (ADR 0018 addendum): nobody may approve their own proposal or verify
+  a definition version they authored any part of, unless they are an admin (so
+  single-user local mode keeps working). A version's authors are the author of the newest
+  logic-changing version up to it and of every metadata-only version since, so a cosmetic
+  revision by someone else does not let the logic's author verify it. Auto-apply is not an
+  approval and is unaffected.
+- Verify only rests on complete, passing checks: a proposal with an error,
+  `checks_incomplete`, `draft_not_usable`, or a definition the checks left `draft` can be
+  approved (no errors) but never verified; `verify_definition` refuses a draft version.
+- Each decision is a **compare-and-swap** on the stored proposal status (pending →
+  approved/rejected/withdrawn), so two server processes on one database cannot both
+  decide the same proposal. Approving claims the proposal first, then writes the new
+  version; a failed write releases the claim.
 - `revise_definition` carries `base_version`; if the definition moved on, it's refused with a
   `stale_base_version` issue.
 - A nightly/CLI `revalidate` re-runs §7 checks for every latest version against its
@@ -262,7 +285,10 @@ and optionally a final SELECT written by the agent over those aliases.
 
 Lexical, BM25-style over title, keywords, meaning, use/don't-use notes, variable names and
 descriptions, outputs and tables. Verified ranks above llm_annotated at equal relevance;
-drafts hidden by default. Embeddings are a later plug-in (ADR 0017).
+drafts hidden by default. A hit whose only matches are in "don't use when" ranks after
+every other hit. Hits carry use/don't-use notes, grain and the matched terms/fields;
+scores have no fixed scale (compare within one search). Embeddings are a later plug-in
+(ADR 0017).
 
 ## Out of scope
 

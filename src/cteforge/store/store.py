@@ -400,16 +400,28 @@ class Store:
             rows = conn.execute(query).scalars().all()
         return [Proposal.model_validate_json(data) for data in rows]
 
-    def update_proposal(self, p: Proposal) -> Proposal:
+    def update_proposal(
+        self, p: Proposal, *, expected_status: ProposalStatus | None = None
+    ) -> Proposal:
+        """Replace the proposal by id. With `expected_status`, a compare-and-swap: the row
+        is updated only while its stored status is still `expected_status` (one UPDATE
+        ... WHERE status = ..., atomic across processes); otherwise StoreError."""
+        tp = t.proposals
+        query = update(tp).where(tp.c.id == p.id)
+        if expected_status is not None:
+            query = query.where(tp.c.status == expected_status.value)
         with self._tx() as conn:
-            result = conn.execute(
-                update(t.proposals)
-                .where(t.proposals.c.id == p.id)
-                .values(**self._proposal_values(p))
-            )
-            if result.rowcount != 1:
-                raise StoreError(f"Proposal '{p.id}' does not exist")
-        return p
+            result = conn.execute(query.values(**self._proposal_values(p)))
+            if result.rowcount == 1:
+                return p
+            current = conn.execute(select(tp.c.status).where(tp.c.id == p.id)).scalar_one_or_none()
+        if current is None:
+            raise StoreError(f"Proposal '{p.id}' does not exist")
+        assert expected_status is not None
+        raise StoreError(
+            f"Proposal '{p.id}' is {current}, not {expected_status.value}; "
+            "it was changed concurrently"
+        )
 
     # --------------------------------------------------------------------- users
 

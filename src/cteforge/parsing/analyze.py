@@ -67,6 +67,15 @@ _COMPARISONS: dict[type[exp.Expression], str] = {
     exp.SimilarTo: "SIMILAR TO",
 }
 _PREDICATES = (*_COMPARISONS, exp.In, exp.Between)
+
+
+# Operators that exclude the value (`<>`, `IS DISTINCT FROM`, `<> ALL`, `ROW <>`): the
+# literal names what is filtered OUT, as under a NOT.
+def _excluding(operator: str) -> bool:
+    op = operator.removeprefix("ROW ")
+    return op in ("<>", "IS DISTINCT FROM") or op.startswith("<> ")
+
+
 _FLIP = {">": "<", ">=": "<=", "<": ">", "<=": ">="}
 _LOW_OPS = {">", ">="}
 _HIGH_OPS = {"<", "<="}
@@ -168,7 +177,8 @@ class ColumnRef(BaseModel):
 class LiteralContext(StrEnum):
     """Structural facts about where a literal sits (ADR 0015). Facts, not meaning."""
 
-    NEGATED = "negated"  # Under a NOT (incl. NOT BETWEEN / NOT IN / NOT LIKE).
+    NEGATED = "negated"  # Under a NOT (incl. NOT BETWEEN / NOT IN / NOT LIKE), or compared
+    #                      with an excluding operator (<>, !=, IS DISTINCT FROM, <> ALL).
     OR_BRANCH = "or_branch"  # Inside one branch of an OR.
     CASE_CONDITION = "case_condition"  # In a CASE WHEN / IF / FILTER condition.
     JOIN_ON = "join_on"  # In an inner join's ON clause (filters rows like WHERE).
@@ -240,6 +250,14 @@ class JoinInfo(BaseModel):
     join_type: str  # inner, left, right, full, cross, semi, anti
     keys: list[tuple[str, str]]  # (left_column, right_column) equality pairs in ON.
     on_sql: str  # Full ON condition as written (may contain non-key filters).
+    # Base tables behind each side, for mining the join map through CTEs: the side itself
+    # when it is a base table; for a CTE / derived table, the one base table that every key
+    # column of that side passes through from unchanged (renames allowed, no computation);
+    # else None.
+    left_base_table: str | None = None
+    right_base_table: str | None = None
+    base_keys: list[tuple[str, str]] = []  # `keys` as base-table columns; [] unless both
+    #                                        base tables are known and there are keys.
 
 
 class CteInfo(BaseModel):
@@ -534,6 +552,8 @@ def _context(located: _Located, scope_root: exp.Expression) -> tuple[LiteralCont
         if not isinstance(node, exp.Paren):
             facts.add(LiteralContext.VALUE_WRAPPED)
     if located.predicate.args.get("negate"):  # e.g. DuckDB `x NOT LIKE 'a'`
+        facts.add(LiteralContext.NEGATED)
+    if _excluding(located.operator):  # `x <> 'void'` keeps everything BUT the value
         facts.add(LiteralContext.NEGATED)
     child = located.predicate
     while child is not scope_root and child.parent is not None:
@@ -1159,12 +1179,16 @@ def _column_source(column: exp.Column, sources: dict[str, _Source], lin: _Lineag
     return owners[0] if len(owners) == 1 else None
 
 
+_KeyIdents = list[tuple[exp.Expression, exp.Expression]]
+
+
 def _join_keys(
     on: exp.Expression | None, right: str, sources: dict[str, _Source], lin: _Lineage
-) -> tuple[str | None, list[tuple[str, str]]]:
-    """(left alias key, equality pairs) from the ON condition's top-level AND chain."""
+) -> tuple[str | None, _KeyIdents]:
+    """(left alias key, equality pairs as identifiers) from the ON condition's top-level AND
+    chain."""
     left: str | None = None
-    keys: list[tuple[str, str]] = []
+    keys: _KeyIdents = []
     for operand in _and_operands(on):
         if not isinstance(operand, exp.EQ):
             continue
@@ -1180,8 +1204,23 @@ def _join_keys(
             continue
         left = left or lkey
         if lkey == left:
-            keys.append((_ident_key(lcol.this), _ident_key(rcol.this)))
+            keys.append((lcol.this, rcol.this))
     return left, keys
+
+
+def _base_side(
+    source: _Source, idents: list[exp.Expression], lin: _Lineage
+) -> tuple[str | None, list[str]]:
+    """(base table, key columns in it) behind one side of a join: the source itself when it
+    is a base table; else the single base table every key column passes through from
+    unchanged (lineage through CTEs / derived tables). (None, []) otherwise."""
+    if source.parts is not None:
+        return source.name, [_ident_key(i) for i in idents]
+    refs = [_resolve_in(source, ident, lin, 0).ref for ident in idents]
+    tables = {r.table for r in refs}
+    if not refs or len(tables) != 1 or any(r.derived or r.table is None for r in refs):
+        return None, []
+    return refs[0].table, [r.column for r in refs]
 
 
 def _join_type(join: exp.Join, has_condition: bool) -> str:
@@ -1202,23 +1241,29 @@ def _join_info(join: exp.Join, scope: str, lin: _Lineage) -> JoinInfo | None:
     on, using = join.args.get("on"), join.args.get("using") or []
     if using:
         left_key = None
-        keys = [(_ident_key(u), _ident_key(u)) for u in using]
+        idents: _KeyIdents = [(u, u) for u in using]
         on_sql = f"USING ({', '.join(u.sql(dialect=str(lin.dialect)) for u in using)})"
     else:
-        left_key, keys = _join_keys(on, right_key, sources, lin)
+        left_key, idents = _join_keys(on, right_key, sources, lin)
         on_sql = on.sql(dialect=str(lin.dialect)) if on is not None else ""
     from_ = select.args.get("from_")
     left_key = left_key or (_alias_key(from_.this) if from_ is not None else None)
     left, right = sources.get(left_key or ""), sources.get(right_key)
     if left is None or right is None:
         return None
+    left_base, left_cols = _base_side(left, [a for a, _ in idents], lin)
+    right_base, right_cols = _base_side(right, [b for _, b in idents], lin)
+    both = left_base is not None and right_base is not None
     return JoinInfo(
         scope=scope,
         left_table=left.name,
         right_table=right.name,
         join_type=_join_type(join, on is not None or bool(using)),
-        keys=keys,
+        keys=[(_ident_key(a), _ident_key(b)) for a, b in idents],
         on_sql=on_sql,
+        left_base_table=left_base,
+        right_base_table=right_base,
+        base_keys=list(zip(left_cols, right_cols, strict=True)) if both else [],
     )
 
 

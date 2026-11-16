@@ -144,7 +144,26 @@ def test_list_and_null_safe_shapes_get_ids(dialect, where, operator, values):
     for lit in lits:
         assert lit.operator == operator
         assert (lit.column.column, lit.compared_type) == ("region", "VARCHAR")
-        assert lit.in_list is None and lit.wrapper_sql is None and lit.context == []
+        assert lit.in_list is None and lit.wrapper_sql is None
+        # Excluding operators keep everything BUT the value: reported like a NOT.
+        excluding = operator in ("<> ALL", "IS DISTINCT FROM")
+        assert lit.context == ([C.NEGATED] if excluding else [])
+
+
+@pytest.mark.parametrize(
+    ("where", "negated"),
+    [
+        ("status <> 'void'", True),
+        ("status != 'void'", True),
+        ("'void' <> status", True),
+        ("status = 'void'", False),
+        ("NOT status = 'void'", True),
+        ("status IS NOT DISTINCT FROM 'void'", False),
+    ],
+)
+def test_excluding_comparisons_are_negated(where: str, negated: bool) -> None:
+    (lit,) = _literals(f"SELECT * FROM invoices WHERE {where}", Dialect.DUCKDB)
+    assert (C.NEGATED in lit.context) is negated
 
 
 def test_row_comparison_maps_each_element_to_its_column():

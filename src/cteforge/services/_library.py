@@ -171,8 +171,10 @@ def canonical_edge(
 
 
 def mined_edges(definition: Definition) -> list[JoinEdge]:
-    """Joins between two base tables in the definition's SQL. Empty when it can't be
-    rendered or analyzed (mining is best-effort)."""
+    """Joins between two base tables in the definition's SQL, also through CTEs / derived
+    tables whose key columns pass through unchanged from one base table (JoinInfo's
+    `*_base_table` / `base_keys`); a join through CTEs that lands on one table on both sides
+    is skipped. Empty when it can't be rendered or analyzed (mining is best-effort)."""
     try:
         analysis = analyze(original_sql(definition), definition.source_dialect)
     except CteforgeError:
@@ -180,11 +182,17 @@ def mined_edges(definition: Definition) -> list[JoinEdge]:
     tables = {t.lower() for t in analysis.tables}
     edges: dict[str, JoinEdge] = {}
     for join in analysis.joins:
-        if join.join_type not in JOIN_TYPES or not join.keys:
+        left, right, keys = join.left_base_table, join.right_base_table, join.base_keys
+        if join.join_type not in JOIN_TYPES or not keys or left is None or right is None:
             continue
-        if join.left_table.lower() not in tables or join.right_table.lower() not in tables:
+        if left.lower() not in tables or right.lower() not in tables:
             continue
-        edge = canonical_edge(join.left_table, join.right_table, join.keys, join.join_type)
+        through_cte = (join.left_table, join.right_table) != (left, right)
+        if through_cte and left.lower() == right.lower():
+            # Two CTEs over one table (e.g. two aggregates on region): grain alignment,
+            # not a relationship between tables.
+            continue
+        edge = canonical_edge(left, right, keys, join.join_type)
         edges.setdefault(edge.id, edge)
     return list(edges.values())
 

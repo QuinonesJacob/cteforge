@@ -13,11 +13,11 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-const pendingCalls = (calls: { path: string }[]) => calls.filter((c) => c.path === "/proposals").length;
+const pendingCalls = (calls: { path: string }[]) => calls.filter((c) => c.path === "/proposals/count").length;
 
 describe("usePendingCount", () => {
   it("shares one request between every badge on the page", async () => {
-    const api = mockApi({ "GET /proposals": () => ({ body: [{ id: "a" }, { id: "b" }] }) });
+    const api = mockApi({ "GET /proposals/count": () => ({ body: { count: 2 } }) });
     render(
       <>
         <Badge label="nav" />
@@ -27,11 +27,13 @@ describe("usePendingCount", () => {
     expect(await screen.findByText("nav:2")).toBeInTheDocument();
     expect(screen.getByText("tab:2")).toBeInTheDocument();
     expect(pendingCalls(api.calls)).toBe(1);
+    expect(api.calls.find((c) => c.path === "/proposals/count")?.headers).toBeDefined();
+    expect(api.calls.some((c) => c.path === "/proposals")).toBe(false);
   });
 
   it("refreshes on a local change, polls rarely, and not while the tab is hidden", async () => {
     vi.useFakeTimers({ toFake: ["setInterval", "clearInterval", "Date"] });
-    const api = mockApi({ "GET /proposals": () => ({ body: [] }) });
+    const api = mockApi({ "GET /proposals/count": () => ({ body: { count: 0 } }) });
     render(<Badge label="nav" />);
     await waitFor(() => expect(pendingCalls(api.calls)).toBe(1));
 

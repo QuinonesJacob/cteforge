@@ -1,5 +1,5 @@
 import type { RunOutcome } from "../api/types";
-import { formatDuration, plural } from "../lib/format";
+import { formatDate, formatDuration, plural } from "../lib/format";
 import { IssueList } from "./IssueList";
 import { ResultsTable } from "./ResultsTable";
 import { SqlViewer } from "./SqlViewer";
@@ -41,10 +41,21 @@ export function RunResult({ outcome }: { outcome: RunOutcome }) {
           )}
         </dl>
       </div>
-      {outcome.definitions.length > 0 && (
-        <p className="small muted">
-          Definitions: <span className="mono">{outcome.definitions.join(", ")}</span>
-        </p>
+      {(outcome.used ?? []).length > 0 ? (
+        <ul className="small muted" aria-label="Definitions used">
+          {outcome.used.map((u) => (
+            <li key={`${u.id}@${u.version}`}>
+              <span className="mono">{`${u.id}@${u.version}`}</span> · {u.state.replace("_", " ")}
+              {u.verified_by && ` · verified by ${u.verified_by} on ${formatDate(u.verified_at)}`}
+            </li>
+          ))}
+        </ul>
+      ) : (
+        outcome.definitions.length > 0 && (
+          <p className="small muted">
+            Definitions: <span className="mono">{outcome.definitions.join(", ")}</span>
+          </p>
+        )
       )}
       <IssueList issues={outcome.issues} title={outcome.issues.length ? "Issues" : undefined} />
       <SqlViewer sql={outcome.sql} label="Rendered SQL" maxHeight={360} />

@@ -31,10 +31,12 @@ def assess(inputs: TrustInputs) -> TrustResult
 # approval.py
 class Action(StrEnum): SEARCH, DESCRIBE, RUN, PROPOSE, APPROVE, VERIFY, MANAGE_USERS, MANAGE_SETTINGS
 def allowed(user: User, action: Action) -> bool        # role minimums per ADR 0018
-def can_approve(user: User, target: Definition | None) -> bool
-    # approver/admin, or the target definition's owner; humans only for verified targets
-def can_verify(user: User, target: Definition | None) -> bool
-    # humans only (ADR 0007), approver/admin only (ADR 0018); owners may NOT verify
+def can_approve(user: User, target: Definition | None, *, author: str | None = None) -> bool
+    # approver/admin, or the target definition's owner; humans only for verified targets;
+    # four-eyes: not the proposal's `author` unless admin (author=None skips the rule)
+def can_verify(user: User, target: Definition | None, *, author: str | None = None) -> bool
+    # humans only (ADR 0007), approver/admin only (ADR 0018); owners may NOT verify;
+    # four-eyes: not the version's `author` unless admin (author=None skips the rule)
 def can_auto_apply(mode: TeamMode, target: Definition | None, checks: list[Issue]) -> bool
     # DESIGN §18: open mode, no error issues, no checks_incomplete, target new or not verified
 ```

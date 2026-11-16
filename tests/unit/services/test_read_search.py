@@ -154,3 +154,33 @@ def test_search_is_audited(library: AppContext) -> None:
     assert event.question == "How much cash did we collect?"
     assert event.definitions == [f"{h.id}@{h.version}" for h in hits]
     assert event.extra["hits"] == len(hits)
+
+
+def test_hit_shows_when_to_use_it_and_why_it_matched(library: AppContext) -> None:
+    hit = next(h for h in search(library, AGENT, "realization rate") if h.id == "realization_rate")
+    rr = example("realization_rate")
+    assert (hit.use_when, hit.dont_use_when, hit.grain) == (
+        rr.use_when,
+        rr.dont_use_when,
+        rr.grain,
+    )
+    assert hit.matched_terms == ["realization", "rate"]
+    assert "title" in hit.matched_fields
+
+
+def test_matches_only_in_dont_use_when_rank_last(ctx: AppContext) -> None:
+    """A query naming exactly what a definition is NOT for must not rank it first."""
+    add(
+        ctx,
+        plain(
+            "rr",
+            "Realization rate",
+            DefinitionState.VERIFIED,
+            dont_use_when="Pipeline or forecast questions",
+        ),
+    )
+    add(ctx, plain("pf", "Open pipeline", DefinitionState.LLM_ANNOTATED))
+    hits = search(ctx, AGENT, "pipeline forecast")
+    assert [h.id for h in hits] == ["pf", "rr"]
+    assert hits[1].matched_fields == ["dont_use_when"]
+    assert hits[1].dont_use_when == "Pipeline or forecast questions"

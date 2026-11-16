@@ -16,14 +16,18 @@ Join mining (`_library.refresh_join_map`): every JOIN between two BASE tables of
 definition's SQL becomes a JoinEdge with the deterministic id `_library.join_edge_id`;
 `usage_count` is recomputed after every apply. Mining never blocks an apply.
 
-Store writes are not one transaction: a definition version is written before its proposal
-is marked approved. A crash between the two leaves a pending proposal whose re-approval
-fails as stale.
+Applying claims the proposal first: one compare-and-swap in the store (`update_proposal`
+with `expected_status=PENDING`) marks it approved with its resulting version, and only the
+winner writes the new version / edge. If that write fails, the claim is released (status
+back to pending, best effort). Store writes are not one transaction: a crash between the
+claim and the write leaves an approved proposal whose `resulting_version` does not exist.
 
 Drafts (DESIGN §8, §18): a definition proposal whose checks earned DRAFT (a warning such
 as `type_unknown`, results not compared, or a metadata-only revision of a draft) is never
 auto-applied and can never be applied with verify; a person may still approve it as a
-draft.
+draft. `check_verifiable` is the one rule for verify on approval (also enforced here, not
+only by review): no error issue, no `checks_incomplete`, no `draft_not_usable` (a recipe on
+a draft definition), and not a DRAFT definition.
 
 Joins (DESIGN §18): a join proposal is checked on the default warehouse profile (both
 tables exist, every key column exists; else a `not_found` error; no profile or a lookup
@@ -32,9 +36,10 @@ on (`payload.base_join`, None for a new edge); applying it after the edge change
 or state, usage_count ignored) raises StaleVersionError with a `stale_base_version` issue.
 
 Decisions are serialized in-process (`DECISIONS`): applying and deciding re-read the
-proposal under the lock and refuse one that is no longer pending, so a concurrent approve
-and reject (or two approves) cannot both succeed. Separate server processes on one
-database are not covered (that needs a compare-and-swap in the store).
+proposal under the lock and refuse one that is no longer pending. Across processes on one
+database, every decision is a compare-and-swap on the stored status (pending → decided),
+so a concurrent approve and reject (or two approves) cannot both succeed: the loser raises
+PolicyError.
 """
 
 from __future__ import annotations
@@ -60,6 +65,7 @@ from cteforge.domain.errors import (
     RenderError,
     SqlParseError,
     StaleVersionError,
+    StoreError,
     VariableValueError,
     WarehouseError,
 )
@@ -476,6 +482,31 @@ def may_auto_apply(ctx: AppContext, proposal: Proposal) -> bool:
     return can_auto_apply(team_mode(ctx), None, proposal.checks)
 
 
+def verify_refusal(proposal: Proposal) -> str | None:
+    """Why `proposal` may not be applied with verify (None when it may). A verified result
+    must rest on complete, passing checks (ADR 0007, DESIGN §8)."""
+    codes = {i.code for i in proposal.checks}
+    if has_errors(proposal.checks):
+        return "has failing checks; it cannot be approved or verified"
+    if IssueCode.CHECKS_INCOMPLETE in codes:
+        return "was not fully checked (checks_incomplete); it can be approved but not verified"
+    if IssueCode.DRAFT_NOT_USABLE in codes:
+        return "uses a draft definition; it can be approved but not verified"
+    if proposed_state(proposal) is DefinitionState.DRAFT:
+        return (
+            "is a draft (its checks did not all pass); it can be approved as a draft but not "
+            "verified. Revise it so the checks pass"
+        )
+    return None
+
+
+def check_verifiable(proposal: Proposal) -> None:
+    """PolicyError unless `proposal` may be applied with verify (`verify_refusal`)."""
+    reason = verify_refusal(proposal)
+    if reason is not None:
+        raise PolicyError(f"Proposal '{proposal.id}' {reason}.")
+
+
 def submit(ctx: AppContext, user: User, proposal: Proposal) -> ProposalOutcome:
     """Store the proposal; auto-apply it when allowed. Returns the outcome."""
     ctx.store.add_proposal(proposal)
@@ -524,8 +555,8 @@ def decide(
     auto: bool = False,
     resulting_version: int | None = None,
 ) -> Proposal:
-    """Record a decision on a proposal (status, who, when, comment) in the store. Under
-    `DECISIONS`, the stored proposal must still be pending (PolicyError otherwise)."""
+    """Record a decision on a proposal (status, who, when, comment) in the store, as a
+    compare-and-swap from pending (PolicyError when it is no longer pending)."""
     with DECISIONS:
         still_pending(ctx, proposal.id)
         return _decide(ctx, proposal, user, status, comment, auto, resulting_version)
@@ -549,6 +580,8 @@ def _decide(
     auto: bool,
     resulting_version: int | None,
 ) -> Proposal:
+    """Compare-and-swap pending → `status`. Another process that decided first makes this
+    raise PolicyError (the stored proposal is no longer pending)."""
     decided = proposal.model_copy(
         update={
             "status": status,
@@ -559,7 +592,25 @@ def _decide(
             "resulting_version": resulting_version,
         }
     )
-    return ctx.store.update_proposal(decided)
+    try:
+        return ctx.store.update_proposal(decided, expected_status=ProposalStatus.PENDING)
+    except StoreError:
+        stored = ctx.store.get_proposal(proposal.id)
+        if stored is not None and stored.status is not ProposalStatus.PENDING:
+            raise PolicyError(
+                f"Proposal '{proposal.id}' was {stored.status.value} meanwhile (by "
+                f"{stored.decided_by}); only pending proposals can be decided"
+            ) from None
+        raise
+
+
+def _release(ctx: AppContext, original: Proposal) -> None:
+    """Undo our claim after its write failed: approved → pending again (best effort). Only
+    the claim can have made it approved (approved is final), so the CAS restores it."""
+    try:
+        ctx.store.update_proposal(original, expected_status=ProposalStatus.APPROVED)
+    except CteforgeError:
+        pass
 
 
 def _applied_state(proposed: DefinitionState, verify: bool) -> DefinitionState:
@@ -568,19 +619,45 @@ def _applied_state(proposed: DefinitionState, verify: bool) -> DefinitionState:
     return DefinitionState.LLM_ANNOTATED if proposed is DefinitionState.VERIFIED else proposed
 
 
+def _check_base(ctx: AppContext, proposal: Proposal) -> None:
+    """StaleVersionError (stale_base_version issue) when the target moved on since the
+    proposal was made."""
+    if proposal.kind in (ProposalKind.NEW_DEFINITION, ProposalKind.REVISE_DEFINITION):
+        latest = ctx.store.latest_version(proposal.target_id)
+        if latest != proposal.base_version:
+            raise stale_error("Definition", proposal.target_id, latest, proposal.base_version)
+    elif proposal.kind is ProposalKind.NEW_RECIPE:
+        current = ctx.store.get_recipe(proposal.target_id)
+        latest = None if current is None else current.version
+        if latest != proposal.base_version:
+            raise stale_error("Recipe", proposal.target_id, latest, proposal.base_version)
+    # Proposals stored before base_join existed carry no basis and are not checked.
+    elif "base_join" in proposal.payload:
+        current_edge = _join_basis(ctx.store.get_join(proposal.target_id))
+        if current_edge != proposal.payload["base_join"]:
+            raise stale_join_error(proposal.target_id)
+
+
+def _resulting_version(proposal: Proposal) -> int | None:
+    """The version applying creates (base + 1); None for a join edge."""
+    if proposal.kind is ProposalKind.NEW_JOIN:
+        return None
+    return (proposal.base_version or 0) + 1
+
+
+def _lost_race(what: str, proposal: Proposal, latest: int | None) -> StaleVersionError:
+    return stale_error(what, proposal.target_id, latest, proposal.base_version)
+
+
 def _apply_definition(
-    ctx: AppContext, proposal: Proposal, user: User, verify: bool
-) -> tuple[Definition, int]:
+    ctx: AppContext, proposal: Proposal, user: User, verify: bool, version: int
+) -> Definition:
     proposed = definition_from_yaml(str(proposal.payload["definition_yaml"]))
     if verify and proposed.state is DefinitionState.DRAFT:
         raise PolicyError(
             f"Proposal '{proposal.id}' is a draft (its checks did not all pass); it can be "
             "approved as a draft but not verified."
         )
-    latest = ctx.store.latest_version(proposal.target_id)
-    if latest != proposal.base_version:
-        raise stale_error("Definition", proposal.target_id, latest, proposal.base_version)
-    version = (latest or 0) + 1
     definition = proposed.model_copy(
         update={
             "version": version,
@@ -589,41 +666,35 @@ def _apply_definition(
             "verified_at": ctx.now().date() if verify else None,
         }
     )
-    stored = ctx.store.add_definition_version(
-        definition,
-        author=proposal.author,
-        change_note=proposal.summary,
-        logic_changed=bool(proposal.payload.get("logic_changed", True)),
-    )
-    _library.refresh_join_map(ctx, stored)
-    return stored, version
+    try:
+        return ctx.store.add_definition_version(
+            definition,
+            author=proposal.author,
+            change_note=proposal.summary,
+            logic_changed=bool(proposal.payload.get("logic_changed", True)),
+        )
+    except StaleVersionError:  # another process wrote this version first
+        raise _lost_race(
+            "Definition", proposal, ctx.store.latest_version(proposal.target_id)
+        ) from None
 
 
-def _apply_recipe(ctx: AppContext, proposal: Proposal, verify: bool) -> tuple[Recipe, int]:
+def _apply_recipe(ctx: AppContext, proposal: Proposal, verify: bool, version: int) -> Recipe:
     proposed = Recipe.model_validate(proposal.payload["recipe"])
-    current = ctx.store.get_recipe(proposal.target_id)
-    latest = None if current is None else current.version
-    if latest != proposal.base_version:
-        raise stale_error("Recipe", proposal.target_id, latest, proposal.base_version)
-    version = (latest or 0) + 1
     state = DefinitionState.VERIFIED if verify else DefinitionState.LLM_ANNOTATED
     recipe = proposed.model_copy(update={"version": version, "state": state})
-    return ctx.store.add_recipe_version(recipe, author=proposal.author), version
+    try:
+        return ctx.store.add_recipe_version(recipe, author=proposal.author)
+    except StaleVersionError:
+        current = ctx.store.get_recipe(proposal.target_id)
+        raise _lost_race("Recipe", proposal, None if current is None else current.version) from None
 
 
 def _apply_join(ctx: AppContext, proposal: Proposal, verify: bool) -> JoinEdge:
     proposed = JoinEdge.model_validate(proposal.payload["join"])
-    # Proposals stored before base_join existed carry no basis and are not checked.
-    if "base_join" in proposal.payload:
-        current = _join_basis(ctx.store.get_join(proposed.id))
-        if current != proposal.payload["base_join"]:
-            raise stale_join_error(proposed.id)
     state = DefinitionState.VERIFIED if verify else DefinitionState.LLM_ANNOTATED
     ctx.store.upsert_join(proposed.model_copy(update={"state": state}))
-    _library.refresh_join_map(ctx)
-    edge = ctx.store.get_join(proposed.id)
-    assert edge is not None
-    return edge
+    return proposed
 
 
 def apply_proposal(
@@ -635,20 +706,37 @@ def apply_proposal(
     verify: bool = False,
     comment: str = "",
 ) -> tuple[Proposal, Applied]:
-    """Apply a pending proposal and mark it approved by `user`. Callers check permissions
-    and that verify is allowed. Raises StaleVersionError (with a stale_base_version issue)
-    when the target moved on since the proposal was made."""
+    """Apply a pending proposal and mark it approved by `user`. Callers check permissions;
+    verify is refused here too unless `check_verifiable` passes. Raises StaleVersionError
+    (with a stale_base_version issue) when the target moved on since the proposal was made,
+    PolicyError when the proposal was decided meanwhile (in this or another process)."""
     if proposal.status is not ProposalStatus.PENDING:
         raise PolicyError(f"Proposal '{proposal.id}' is {proposal.status}, not pending")
+    if verify:
+        check_verifiable(proposal)
     with DECISIONS:
         still_pending(ctx, proposal.id)
-        version: int | None = None
-        applied: Applied
-        if proposal.kind in (ProposalKind.NEW_DEFINITION, ProposalKind.REVISE_DEFINITION):
-            applied, version = _apply_definition(ctx, proposal, user, verify)
-        elif proposal.kind is ProposalKind.NEW_RECIPE:
-            applied, version = _apply_recipe(ctx, proposal, verify)
-        else:
-            applied = _apply_join(ctx, proposal, verify)
+        _check_base(ctx, proposal)
+        version = _resulting_version(proposal)
+        # Claim first (compare-and-swap): only the winner writes.
         decided = _decide(ctx, proposal, user, ProposalStatus.APPROVED, comment, auto, version)
+        applied: Applied
+        try:
+            if proposal.kind in (ProposalKind.NEW_DEFINITION, ProposalKind.REVISE_DEFINITION):
+                assert version is not None
+                applied = _apply_definition(ctx, proposal, user, verify, version)
+            elif proposal.kind is ProposalKind.NEW_RECIPE:
+                assert version is not None
+                applied = _apply_recipe(ctx, proposal, verify, version)
+            else:
+                applied = _apply_join(ctx, proposal, verify)
+        except BaseException:
+            _release(ctx, proposal)
+            raise
+        # The change is in the library; the join map follows (mining never blocks it).
+        _library.refresh_join_map(ctx, applied if isinstance(applied, Definition) else None)
+        if isinstance(applied, JoinEdge):
+            edge = ctx.store.get_join(applied.id)
+            assert edge is not None
+            applied = edge
     return decided, applied

@@ -11,7 +11,7 @@ in the same change, and tell the user.
 
 ## Stack
 Python 3.12 · uv · sqlglot (pinned exactly; ADR 0012) · pydantic v2 · duckdb · pyyaml ·
-typer · pytest · ruff · import-linter. GUI (M5) will be React/TS under `web/`.
+typer · pytest · ruff · import-linter. GUI: React/TS under `web/` (Vite), served by the API.
 
 ## Architecture
 ```
@@ -64,10 +64,15 @@ Each has its own CLAUDE.md. Read it before adding files there.
 
 ## Commands
 - `uv sync` — install
-- `uv run pytest` — tests
+- `uv run pytest` — tests (`-m "not e2e"` skips the real-server tests in `tests/e2e/`)
+- `uv run pytest tests/e2e` — product wired together: GUI↔API contract, `demo` + `serve` +
+  MCP over HTTP and stdio (needs `web/dist`: `cd web && npm run build`)
 - `uv run lint-imports` — layering contracts
 - `uv run ruff check . && uv run ruff format --check .` — lint
+- `cd web && npm run typecheck && npm test && npm run build` — GUI checks and build
 - `uv run python examples/seed_warehouse.py` — build `examples/warehouse.duckdb`
+- `uv run cteforge demo [DIR]` then `source DIR/env.sh && uv run cteforge serve` — local
+  product (GUI + API on :8765, MCP at /mcp); `uv run cteforge mcp` — MCP over stdio
 - `uv run cteforge --help` — CLI
 
 ## Out of scope

@@ -12,15 +12,21 @@ Support modules (shared by use-cases; not use-cases themselves):
 - `connections.py` — warehouse registry: profile name → lazily opened `Warehouse`
   (dispatch on dialect to warehouse/ connectors), each wrapped in `SerializedWarehouse`
   (one call at a time per warehouse: connectors share one driver connection, so concurrent
-  execute+fetch would mix result sets); `open_warehouse(path)` kept for the M1 CLI.
+  execute+fetch would mix result sets; a caller waits at most `BUSY_TIMEOUT_SECONDS` for
+  the lock, then gets WarehouseError "busy"; `close()` waits at most
+  `CLOSE_TIMEOUT_SECONDS`); `open_warehouse(path)` kept for the M1 CLI. No per-statement
+  timeout/cancel yet: that needs the connectors (warehouse/, hardened).
 - `auth.py` — token → User (SHA-256 lookup), `require(user, action)` via trust.approval,
   local-mode user (`local_user`: the stored CTEFORGE_USER as is; created as a human admin
-  only while the store has no users, else PermissionDeniedError), token generation
+  only while the store has no users and `create=True` (CLI, auth-off HTTP), never for
+  stdio MCP (`create=False`), else PermissionDeniedError), token generation
   (`secrets.token_urlsafe`), shown once.
 - `cards.py` — response models shared by use-cases and adapters: VariableCard (name, type,
-  role, input_format, description, allowed, unit, column, shape, original_value),
-  DefinitionCard, SearchHit, RunOutcome (with `used`: UsedDefinition per version — state,
-  verified_by, verified_at), ParseReport, ProposalOutcome, ProposalView,
+  role, input_format, description, allowed, unit, column, shape, original_value,
+  comparisons — on DefinitionCard only), DefinitionCard, SearchHit (with use_when,
+  dont_use_when, grain, matched_terms, matched_fields), RunOutcome (with `used`:
+  UsedDefinition per version — state, verified_by, verified_at; `values_used` per alias),
+  TableCard / ColumnCard, ParseReport, ProposalOutcome, ProposalView,
   DefinitionDrift, TeamSettings, AuditPage; `json_safe` (enums → values) / `json_rows`.
 - `_audit.py` — records an AuditEvent for a use-case call (`record`, fail closed by
   default); the one outcome rule (`failure_outcome`) and `audit_failures` (records a raised
@@ -29,8 +35,10 @@ Support modules (shared by use-cases; not use-cases themselves):
   no audit): `parse_dialect`; version visibility (`usable_states`, `visible_states`,
   `newest_in_states` — search shows, and compile_and_run floats to, the same version);
   rebuilding a stored definition (`original_sql`, `annotations_of`, `annotation_file`);
-  the join map (`canonical_edge`, `join_edge_id`, `mined_edges`, `refresh_join_map`: base-
-  table joins only, usage_count over all latest definitions; `same_table`, `matching_edge`).
+  the join map (`canonical_edge`, `join_edge_id`, `mined_edges`, `refresh_join_map`: joins
+  between base tables, also through CTEs/derived tables whose key columns pass through
+  unchanged from one base table (parsing's JoinInfo `*_base_table`/`base_keys`); usage_count
+  over all latest definitions; `same_table`, `matching_edge`).
 - `_apply.py` — proposal plumbing shared by propose, propose_other, review and library_io
   (no permission checks of its own): definition checks via import_query, recipe checks
   (render + compose dry-run), owner rule, `submit` (store + auto-apply via trust.approval),
@@ -43,6 +51,8 @@ Support modules (shared by use-cases; not use-cases themselves):
 - `import_query.py` — the checks engine for a trusted query + annotations (DESIGN §7:
   same query back, types, EXPLAIN, result comparison): `import_query`, `fetch_schema`,
   `analyze_query`; plus the M1 file-based `import_files` / `analyze_file` used by the CLI.
+  Runtime (not EXPLAIN) failures of check runs keep only the error class: driver messages
+  can quote data values and proposal issues are readable by any viewer.
   Support module: parse_query, propose, revalidate and library_io build on it.
 - `render_definition.py` — M1 file-based render/run (CLI). No ctx/user (pre-M3 path).
 Use-cases (one file each; a use-case never imports another use-case — share via support
@@ -61,11 +71,17 @@ modules or the core):
 - `review.py` — `list_proposals(ctx, user, status=None)`, `get_proposal(ctx, user, id)` →
   ProposalView (diff + impact); `approve(ctx, user, id, *, verify=False, comment="")` →
   ProposalOutcome; `reject(ctx, user, id, comment)`, `withdraw(ctx, user, id)` →
-  ProposalView; `verify_definition(ctx, user, id, version)` → DefinitionCard.
+  ProposalView; `verify_definition(ctx, user, id, version)` → DefinitionCard;
+  `count_proposals(ctx, user, status=None)` → int (nav badge: no diffs, not audited).
 - `run.py` — `compile_and_run(ctx, user, *, uses=None, recipe_id=None, values=None,
   select=None, dialect=None, profile=None, run=True, limit=100, question=None)`,
   `check_and_run(ctx, user, sql, *, profile=None, run=True, limit=100, question=None)` →
   RunOutcome (render → compose → trust → explain → run → audit; SQL tagged per ADR 0008).
+- `catalog.py` — discovery: `list_recipes(ctx, user, *, query="", include_drafts=False)`
+  → list[Recipe]; `list_joins(ctx, user, *, table=None, include_drafts=False)` →
+  list[JoinEdge]; `describe_tables(ctx, user, tables=None, *, profile=None)` →
+  list[TableCard] (columns + types from the warehouse, definitions reading it, join edges,
+  units the library's variables declare; at most 50 tables). Visibility as search.
 - `revalidate.py` — `revalidate(ctx, user, ids=None) -> list[DefinitionDrift]`: drift check
   over latest versions (DESIGN §10, §18); reports, never changes state.
 - `admin.py` — users, roles, tokens, settings (team mode); an agent admin may not create
@@ -98,9 +114,11 @@ whether a failed write fails the call (closed) or is only logged (best effort).
 | propose_definition, revise_definition, propose_join, propose_recipe | PROPOSE (contributor); owner rule (`_apply.check_owner`) | propose (op) | closed |
 | import_library | PROPOSE (contributor) | propose (op) | closed |
 | list_proposals, get_proposal | DESCRIBE (viewer) | review (op) | best effort |
+| list_recipes, list_joins, describe_tables | DESCRIBE (viewer) | get_definition (op) | best effort |
+| count_proposals | SEARCH (viewer) | none (cheap badge poll) | — |
 | approve, reject | APPROVE on target (approver/admin, or the definition's owner; a VERIFIED target needs a human); approve(verify=True) also VERIFY | review (op) | closed |
 | withdraw | PROPOSE, and the proposal's author | review (op) | closed |
-| verify_definition | VERIFY (human approver/admin; owners may not) | review (op) | closed |
+| verify_definition | VERIFY (human approver/admin; owners may not); four-eyes over every author since the last logic change | review (op) | closed |
 | list_audit | approver role (APPROVE, no target); then bad `kind` / naive `since` → PolicyError | admin (op=list_audit) | best effort |
 | export_library | DESCRIBE (viewer) | admin (op) | closed |
 | bootstrap_admin | none; only while no users exist | admin (op) | closed |

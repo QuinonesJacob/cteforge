@@ -431,7 +431,7 @@ def test_verify_definition(ctx: AppContext) -> None:
     assert card.state is DefinitionState.VERIFIED and card.verified_by == "ann"
     assert card.verified_at == FIXED.date()
     change = revise_definition(
-        ctx, APPROVER, id="realization_rate", base_version=1, metadata={"title": "x"}
+        ctx, ALICE, id="realization_rate", base_version=1, metadata={"title": "x"}
     )
     assert change.proposal.status is ProposalStatus.PENDING  # verified: never auto-applied
     review.approve(ctx, APPROVER, change.proposal.id)
@@ -548,3 +548,245 @@ def test_concurrent_approve_and_reject_only_one_wins(
             assert final is ProposalStatus.APPROVED and edge_applied
         else:
             assert final is ProposalStatus.REJECTED and not edge_applied
+
+
+# ── four-eyes rule (ADR 0018 addendum) ────────────────────────────────────────────────
+
+BO = User(name="bo", role=UserRole.APPROVER)
+ADMIN = User(name="root", role=UserRole.ADMIN)
+
+
+def test_approver_cannot_approve_own_proposal(ctx: AppContext) -> None:
+    _strict(ctx)
+    own = _propose(ctx, APPROVER)
+    with pytest.raises(PermissionDeniedError, match="four-eyes"):
+        review.approve(ctx, APPROVER, own.proposal.id)
+    with pytest.raises(PermissionDeniedError, match="four-eyes"):
+        review.approve(ctx, APPROVER, own.proposal.id, verify=True)
+    assert ctx.store.get_definition("realization_rate") is None
+    assert ctx.store.get_proposal(own.proposal.id).status is ProposalStatus.PENDING
+    events = ctx.audit.list_events(kind=AuditKind.REVIEW)
+    assert events[0].outcome is AuditOutcome.REJECTED
+    out = review.approve(ctx, BO, own.proposal.id, verify=True)  # another person may
+    assert out.definition.state is DefinitionState.VERIFIED and out.definition.verified_by == "bo"
+
+
+def test_owner_cannot_approve_own_revision(ctx: AppContext) -> None:
+    _propose(ctx)  # alice (contributor) owns it
+    _strict(ctx)
+    change = revise_definition(
+        ctx, ALICE, id="realization_rate", base_version=1, metadata={"keywords": ["z"]}
+    )
+    with pytest.raises(PermissionDeniedError, match="four-eyes"):
+        review.approve(ctx, ALICE, change.proposal.id)
+    assert review.approve(ctx, APPROVER, change.proposal.id).definition.version == 2
+
+
+def test_admin_may_approve_and_verify_own_work(ctx: AppContext) -> None:
+    _strict(ctx)
+    own = _propose(ctx, ADMIN)
+    out = review.approve(ctx, ADMIN, own.proposal.id, verify=True)
+    assert out.definition.state is DefinitionState.VERIFIED and out.definition.verified_by == "root"
+
+
+def test_cannot_verify_a_version_you_authored(ctx: AppContext) -> None:
+    _strict(ctx)
+    own = _propose(ctx, APPROVER)  # version 1 will be authored by ann
+    review.approve(ctx, BO, own.proposal.id)  # approved, not verified
+    assert ctx.store.definition_history("realization_rate")[0].author == "ann"
+    with pytest.raises(PermissionDeniedError, match="four-eyes"):
+        review.verify_definition(ctx, APPROVER, "realization_rate", 1)
+    assert ctx.store.get_definition("realization_rate").state is DefinitionState.LLM_ANNOTATED
+    card = review.verify_definition(ctx, BO, "realization_rate", 1)
+    assert card.state is DefinitionState.VERIFIED and card.verified_by == "bo"
+
+
+def test_verify_definition_author_is_per_version(ctx: AppContext) -> None:
+    _propose(ctx)  # v1 by alice, auto-applied
+    _strict(ctx)
+    change = revise_definition(
+        ctx, APPROVER, id="realization_rate", base_version=1, metadata={"keywords": ["y"]}
+    )
+    review.approve(ctx, BO, change.proposal.id)  # v2 authored by ann
+    with pytest.raises(PermissionDeniedError):
+        review.verify_definition(ctx, APPROVER, "realization_rate", 2)
+    assert review.verify_definition(ctx, BO, "realization_rate", 2).verified_by == "bo"
+
+
+# ── verify only on complete, passing checks (defense in depth in _apply) ──────────────
+
+
+def test_apply_proposal_refuses_verify_on_incomplete_checks() -> None:
+    from cteforge.services import _apply
+
+    with _open(None) as c:
+        pending = _propose(c)
+        stored = c.store.get_proposal(pending.proposal.id)
+        assert _apply.proposed_state(stored) is DefinitionState.DRAFT
+        with pytest.raises(PolicyError, match="not fully checked"):
+            _apply.apply_proposal(c, stored, APPROVER, auto=False, verify=True)
+        assert c.store.get_definition("realization_rate") is None
+        assert c.store.get_proposal(stored.id).status is ProposalStatus.PENDING
+
+
+def test_apply_proposal_refuses_verify_on_errors_and_drafts(ctx: AppContext) -> None:
+    from cteforge.domain.issues import Issue, Severity
+    from cteforge.services import _apply
+
+    _strict(ctx)
+    clean = ctx.store.get_proposal(_propose(ctx).proposal.id)
+    assert _apply.verify_refusal(clean) is None
+    error = Issue(code=IssueCode.NOT_FOUND, severity=Severity.ERROR, message="x")
+    with pytest.raises(PolicyError, match="failing checks"):
+        _apply.apply_proposal(
+            ctx, clean.model_copy(update={"checks": [error]}), APPROVER, auto=False, verify=True
+        )
+    draft_use = Issue(code=IssueCode.DRAFT_NOT_USABLE, severity=Severity.WARNING, message="x")
+    assert "draft definition" in _apply.verify_refusal(
+        clean.model_copy(update={"checks": [draft_use]})
+    )
+    blob = ctx.store.get_proposal(_propose_blob(ctx).proposal.id)
+    with pytest.raises(PolicyError, match="draft"):
+        _apply.apply_proposal(ctx, blob, APPROVER, auto=False, verify=True)
+    assert ctx.store.get_definition("realization_rate") is None
+    assert ctx.store.get_definition("blob_deals") is None
+
+
+# ── compare-and-swap across processes ─────────────────────────────────────────────────
+
+
+def test_two_processes_cannot_both_decide(
+    warehouse_copy: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Two contexts on one database stand in for two server processes: the in-process
+    lock does not help, the store's compare-and-swap does."""
+    from cteforge.services import _apply
+
+    profile = WarehouseProfile(
+        name="demo", dialect=Dialect.DUCKDB, options={"path": str(warehouse_copy)}
+    )
+    config = AppConfig(db_url=f"sqlite:///{tmp_path / 'two.db'}")
+    with (
+        open_context(config, profiles=[profile], clock=lambda: FIXED) as a,
+        open_context(config, profiles=[profile], clock=lambda: FIXED) as b,
+    ):
+        _strict(a)
+        pid = _propose(a).proposal.id
+        review.reject(a, APPROVER, pid, "wrong grain")
+        # Process b read the proposal while it was still pending: skip its pending checks.
+        monkeypatch.setattr(review, "_pending", lambda proposal: None)
+        monkeypatch.setattr(_apply, "still_pending", lambda ctx, id: ctx.store.get_proposal(id))
+        stale = a.store.get_proposal(pid).model_copy(update={"status": ProposalStatus.PENDING})
+        monkeypatch.setattr(review, "_get", lambda ctx, id: stale)
+        with pytest.raises(PolicyError, match="rejected meanwhile"):
+            review.approve(b, BO, pid)
+        assert b.store.get_definition("realization_rate") is None
+        final = b.store.get_proposal(pid)
+        assert final.status is ProposalStatus.REJECTED and final.decided_by == "ann"
+
+
+def test_failed_write_releases_the_claim(ctx: AppContext, monkeypatch: pytest.MonkeyPatch) -> None:
+    from cteforge.domain.errors import StoreError
+
+    _strict(ctx)
+    pid = _propose(ctx).proposal.id
+
+    def broken(*args: Any, **kwargs: Any) -> None:
+        raise StoreError("disk full")
+
+    monkeypatch.setattr(ctx.store, "add_definition_version", broken)
+    with pytest.raises(StoreError):
+        review.approve(ctx, APPROVER, pid)
+    stored = ctx.store.get_proposal(pid)
+    assert stored.status is ProposalStatus.PENDING and stored.resulting_version is None
+    monkeypatch.undo()
+    assert review.approve(ctx, APPROVER, pid).definition.version == 1
+
+
+# ── four-eyes across metadata-only versions ──────────────────────────────────────────
+
+
+def test_metadata_only_revision_does_not_launder_the_logic_author(ctx: AppContext) -> None:
+    """ann writes the logic (v1); an agent's metadata-only v2 (auto-applied in open mode)
+    must not let ann verify her own unreviewed SQL."""
+    first = _propose(ctx, APPROVER)  # v1 by ann, auto-applied
+    assert first.auto_applied
+    with pytest.raises(PermissionDeniedError, match="four-eyes"):
+        review.verify_definition(ctx, APPROVER, "realization_rate", 1)
+    cosmetic = revise_definition(
+        ctx, BOT, id="realization_rate", base_version=1, metadata={"keywords": ["count"]}
+    )
+    assert cosmetic.auto_applied
+    history = ctx.store.definition_history("realization_rate")
+    assert (history[-1].author, history[-1].logic_changed) == ("bot", False)
+    with pytest.raises(PermissionDeniedError, match="four-eyes"):
+        review.verify_definition(ctx, APPROVER, "realization_rate", 2)
+    assert ctx.store.get_definition("realization_rate").state is DefinitionState.LLM_ANNOTATED
+    assert review.verify_definition(ctx, BO, "realization_rate", 2).verified_by == "bo"
+
+
+def test_approve_with_verify_of_metadata_only_revision_checks_the_logic_author(
+    ctx: AppContext,
+) -> None:
+    _propose(ctx, APPROVER)  # v1 logic by ann
+    _strict(ctx)
+    cosmetic = revise_definition(
+        ctx, BOT, id="realization_rate", base_version=1, metadata={"keywords": ["count"]}
+    )
+    assert not cosmetic.auto_applied
+    with pytest.raises(PermissionDeniedError, match="four-eyes"):
+        review.approve(ctx, APPROVER, cosmetic.proposal.id, verify=True)
+    assert ctx.store.get_proposal(cosmetic.proposal.id).status is ProposalStatus.PENDING
+    out = review.approve(ctx, BO, cosmetic.proposal.id, verify=True)
+    assert out.definition.state is DefinitionState.VERIFIED and out.definition.verified_by == "bo"
+
+
+def test_a_logic_change_starts_a_new_authorship(ctx: AppContext) -> None:
+    """Once someone else rewrites the logic, the earlier author reviews it like anyone."""
+    _propose(ctx, APPROVER)  # v1 by ann
+    changed_sql = SQL.replace("ROUND(", "ROUND(1.0 * ", 1)
+    rewrite = revise_definition(ctx, ALICE, id="realization_rate", base_version=1, sql=changed_sql)
+    assert rewrite.auto_applied, rewrite.issues
+    assert ctx.store.definition_history("realization_rate")[-1].logic_changed
+    assert review.verify_definition(ctx, APPROVER, "realization_rate", 2).verified_by == "ann"
+
+
+# ── proposal checks never leak data through driver errors ────────────────────────────
+
+
+def test_strict_mode_proposal_checks_do_not_echo_runtime_error_text(ctx: AppContext) -> None:
+    """Strict mode refuses exploratory SQL; a proposal's check run must not become a way to
+    read table contents through a failing cast's error message (stored on the proposal,
+    readable by any viewer)."""
+    from cteforge.services.run import check_and_run
+
+    _strict(ctx)
+    refused = check_and_run(ctx, BOT, "SELECT name FROM accounts")
+    assert not refused.usable and not refused.ran
+    out = propose_definition(
+        ctx,
+        BOT,
+        sql="SELECT CAST((SELECT string_agg(name, '|') FROM accounts) AS INTEGER) AS x",
+        dialect="duckdb",
+        metadata={"id": "exfil", "title": "x"},
+        annotations=[],
+    )
+    failed = [i for i in out.issues if i.code is IssueCode.COMPILE_FAILED]
+    assert failed and "Conversion Error" in failed[0].message
+    names = [r[0] for r in ctx.warehouses.get("demo").run("SELECT name FROM accounts", 5).rows]
+    stored = review.list_proposals(ctx, VIEWER, ProposalStatus.PENDING)
+    for text in [*(i.message for i in out.issues), stored[0].model_dump_json()]:
+        assert not any(name in text for name in names), text
+
+
+def test_compile_errors_in_proposal_checks_keep_their_message(ctx: AppContext) -> None:
+    out = propose_definition(
+        ctx,
+        BOT,
+        sql="SELECT no_such_column FROM accounts",
+        dialect="duckdb",
+        metadata={"id": "typo", "title": "x"},
+        annotations=[],
+    )
+    messages = " ".join(i.message for i in out.issues)
+    assert "no_such_column" in messages  # schema facts help fix the SQL

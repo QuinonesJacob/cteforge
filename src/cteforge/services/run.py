@@ -35,7 +35,12 @@ Choices made here (documented contract):
 - Provenance: `RunOutcome.used` lists each definition version with its state and, when
   verified, `verified_by` / `verified_at` (DESIGN §8).
 - Row limit: `limit` clamped to 1..profile.max_rows; the warehouse enforces it again.
-  `row_limit_reached` warning when more rows existed.
+  Rows are also capped at MAX_RESULT_BYTES of JSON. `row_limit_reached` warning when more
+  rows existed or the size cap dropped some.
+- A warehouse failure (EXPLAIN or run) returns `usable=False` with a `run_failed` issue:
+  nothing ran, so there is no answer (never an empty one).
+- `values_used`: alias → every variable's rendered value; a changeable variable the caller
+  left out gets a `default_value_used` info issue (it kept the original value).
 - Audit (fail closed for executed runs: the event is written before rows are returned):
   definitions as id@version, values actually used per alias, label, compile_id, SHA-256 of
   the tagged SQL, row count, duration. Never SQL text or rows. Refusals → outcome rejected;
@@ -46,7 +51,9 @@ Choices made here (documented contract):
 check_and_run: raw SQL on a profile (default profile unless named). One read-only
 SELECT/UNION only (compose.checks.ensure_query; else refused with `not_read_only`; SQL that
 does not parse, including several statements, raises SqlParseError). Its joins
-(parsing.analyze) are compared with the join map as above, and every base table it reads
+(parsing.analyze) are compared with the join map as above — on the BASE tables and key
+columns behind each side (JoinInfo `*_base_table` / `base_keys`), as join mining does, so
+SQL written with CTEs is judged like the flat equivalent — and every base table it reads
 must be connected to the others through known joins: tables read with no known join
 between them (a comma/CROSS join, LATERAL, a subquery in FROM or WHERE, a UNION of
 different tables) make joins unknown. → `new_logic_on_known_joins` or `exploratory`
@@ -55,6 +62,7 @@ different tables) make joins unknown. → `new_logic_on_known_joins` or `explora
 
 from __future__ import annotations
 
+import json
 import time
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
@@ -86,7 +94,8 @@ from cteforge.domain.models import (
     TrustLabel,
 )
 from cteforge.domain.users import User
-from cteforge.parsing.analyze import analyze, parse
+from cteforge.domain.variables import Role
+from cteforge.parsing.analyze import JoinInfo, analyze, parse
 from cteforge.services import _audit, _library
 from cteforge.services.auth import require
 from cteforge.services.cards import (
@@ -113,6 +122,23 @@ def _error(code: IssueCode, message: str) -> Issue:
 def _require(ctx: AppContext, user: User, kind: AuditKind, question: str | None) -> None:
     with _audit.audit_failures(ctx, user, kind, question=question):
         require(user, Action.RUN)
+
+
+# ── Result size ──────────────────────────────────────────────────────────────────────
+
+# Rows handed back per call are capped by size as well as count: max_rows bounds the count,
+# but a row can be arbitrarily wide (DESIGN §14).
+MAX_RESULT_BYTES = 8 * 1024 * 1024
+
+
+def _cap_bytes(rows: list[list[Any]], budget: int) -> tuple[list[list[Any]], bool]:
+    """The leading rows whose JSON fits in `budget` bytes, and whether any were dropped."""
+    used = 0
+    for n, row in enumerate(rows):
+        used += len(json.dumps(row, separators=(",", ":"), default=str).encode("utf-8"))
+        if used > budget:
+            return rows[:n], True
+    return rows, False
 
 
 # ── Join map ─────────────────────────────────────────────────────────────────────────
@@ -144,6 +170,40 @@ def _unconnected(tables: list[str], known_pairs: list[tuple[str, str]]) -> list[
     for t in tables:
         groups.setdefault(find(t), []).append(t)
     return list(groups.values())
+
+
+def _base_join(join: JoinInfo, edges: list[JoinEdge]) -> tuple[str, str] | tuple[()] | None:
+    """How a join in exploratory SQL relates to the join map, judged on the BASE tables
+    behind its sides (JoinInfo `*_base_table` / `base_keys`: a CTE or derived table whose
+    key columns pass through unchanged from one base table), as join mining does:
+    - the base tables' pair when an edge matches it (known);
+    - `()` when both sides lead to the same column(s) of one base table (two CTEs over
+      one table aligned on its key: no relationship between tables, nothing to connect);
+    - None when it is unknown (no edge, or a side whose keys are computed)."""
+    left, right = join.left_base_table, join.right_base_table
+    if left is not None and right is not None and join.base_keys:
+        if _library.matching_edge(left, right, join.base_keys, edges) is not None:
+            return (left, right)
+        through_cte = (join.left_table, join.right_table) != (left, right)
+        same_columns = all(a.lower() == b.lower() for a, b in join.base_keys)
+        if through_cte and _library.same_table(left, right) and same_columns:
+            return ()
+        return None
+    if _library.matching_edge(join.left_table, join.right_table, join.keys, edges) is not None:
+        return (join.left_table, join.right_table)
+    return None
+
+
+def _through(join: JoinInfo) -> str:
+    """' (base tables a ↔ b on ...)' when a side is a CTE/derived table, else ''."""
+    left, right = join.left_base_table, join.right_base_table
+    if left is None or right is None or not join.base_keys:
+        if (join.left_base_table, join.right_base_table) == (join.left_table, join.right_table):
+            return ""
+        return " (a side's key is computed in a CTE, so its base table is unknown)"
+    if (left, right) == (join.left_table, join.right_table):
+        return ""
+    return f" (base tables '{left}' and '{right}' on {_describe_keys(join.base_keys)})"
 
 
 def _describe_keys(keys: Iterable[tuple[str, str]]) -> str:
@@ -322,6 +382,25 @@ def _target(
     return name, target
 
 
+def _defaults_used(alias: str, definition: Definition, given: Mapping[str, Any]) -> list[Issue]:
+    """An info issue per changeable variable the caller left out: it silently keeps the
+    trusted query's original value, which is rarely what a new question means."""
+    return [
+        Issue(
+            code=IssueCode.DEFAULT_VALUE_USED,
+            severity=Severity.INFO,
+            message=(
+                f"'{alias}.{v.name}' was not given, so the original value "
+                f"{json.dumps(json_safe(v.original_value))} was used. Pass it in `values` "
+                "if the question needs another one."
+            ),
+            variable=v.name,
+        )
+        for v in definition.variables
+        if v.role is Role.CHANGEABLE and v.name not in given
+    ]
+
+
 # ── Execution (shared) ───────────────────────────────────────────────────────────────
 
 
@@ -363,6 +442,7 @@ def _refused(
         ran=False,
         definitions=definitions,
         used=used or [],
+        values_used=json_safe(values or {}),
     )
 
 
@@ -398,6 +478,7 @@ def _execute(
         "compile_id": compile_id,
         "definitions": definitions,
         "used": used or [],
+        "values_used": json_safe(values or {}),
     }
     audit_fields: dict[str, Any] = {
         "question": question,
@@ -429,6 +510,15 @@ def _execute(
         issues.append(
             _error(IssueCode.RUN_FAILED, f"The warehouse could not compile or run it: {exc}")
         )
+        failed = {
+            **common,
+            "usable": False,  # Nothing ran: there is no answer, not an empty one.
+            "reasons": [
+                *trust.reasons,
+                "Not usable: the warehouse could not compile or run the query (see the "
+                "run_failed issue); no rows were produced.",
+            ],
+        }
         _audit.record(
             ctx,
             user,
@@ -439,7 +529,7 @@ def _execute(
             extra=extra,
             **audit_fields,
         )
-        return RunOutcome(**common, issues=issues, ran=False, duration_ms=duration)
+        return RunOutcome(**failed, issues=issues, ran=False, duration_ms=duration)
     duration = int((time.perf_counter() - started) * 1000)
     if result is None:
         _audit.record(
@@ -454,7 +544,16 @@ def _execute(
                 f"{max_rows}). Aggregate or filter further.",
             )
         )
-    rows = json_rows(result.rows)
+    rows, capped = _cap_bytes(json_rows(result.rows), MAX_RESULT_BYTES)
+    if capped:
+        issues.append(
+            _warning(
+                IssueCode.ROW_LIMIT_REACHED,
+                f"Only the first {len(rows)} rows are returned: the result is larger than "
+                f"{MAX_RESULT_BYTES // (1024 * 1024)} MiB. Select fewer or narrower columns.",
+            )
+        )
+    truncated = result.truncated or capped
     # Fail closed: if this event cannot be written, no rows are handed back.
     _audit.record(
         ctx,
@@ -463,7 +562,7 @@ def _execute(
         sql=tagged,
         row_count=len(rows),
         duration_ms=duration,
-        extra={**extra, "truncated": result.truncated},
+        extra={**extra, "truncated": truncated},
         **audit_fields,
     )
     return RunOutcome(
@@ -472,7 +571,7 @@ def _execute(
         columns=list(result.columns),
         rows=rows,
         row_count=len(rows),
-        truncated=result.truncated,
+        truncated=truncated,
         ran=True,
         duration_ms=duration,
     )
@@ -562,6 +661,7 @@ def _compile_and_run(
             raise RenderError(f"Alias '{alias}' must be lower_snake_case.") from None
         issues += rendered.issues
         plain[alias] = rendered.values
+        issues += _defaults_used(alias, definition, request.values.get(alias, {}))
 
     final = request.select if request.select and request.select.strip() else None
     if final is not None:
@@ -715,16 +815,17 @@ def check_and_run(
     issues: list[Issue] = []
     known_pairs: list[tuple[str, str]] = []
     for j in joins:
-        if _library.matching_edge(j.left_table, j.right_table, j.keys, edges) is None:
+        pair = _base_join(j, edges)
+        if pair is None:
             issues.append(
                 _warning(
                     IssueCode.UNKNOWN_JOIN,
                     f"Join between '{j.left_table}' and '{j.right_table}' "
-                    f"({_describe_keys(j.keys)}) is not in the join map.",
+                    f"({_describe_keys(j.keys)}) is not in the join map{_through(j)}.",
                 )
             )
-        else:
-            known_pairs.append((j.left_table, j.right_table))
+        elif pair:
+            known_pairs.append(pair)
     groups = _unconnected(tables, known_pairs)
     if len(groups) > 1:
         issues.append(

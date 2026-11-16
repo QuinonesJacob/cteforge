@@ -54,7 +54,7 @@ describe("ProposalActions", () => {
   it("lets a contributor who owns the target approve or reject, without verify", async () => {
     const api = mockApi({
       "POST /proposals/p1/approve": () => ({ body: { proposal: { ...proposal, status: "approved" }, issues: [], auto_applied: false } }),
-      "GET /proposals": () => ({ body: [] }),
+      "GET /proposals/count": () => ({ body: { count: 0 } }),
     });
     const done = vi.fn();
     renderActions({ target: { owner: "jq", state: "llm_annotated" }, onDone: done });

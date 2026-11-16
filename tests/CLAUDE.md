@@ -5,6 +5,11 @@ pytest suite. Project root: ../CLAUDE.md
 ## What belongs here (authoritative)
 - `unit/<module>/test_*.py` — mirrors src/cteforge/<module>/; pure, no warehouse.
 - `integration/` — tests using a DuckDB warehouse (built in a tmp dir by fixtures).
+- `e2e/` — the product wired together: `test_gui_contract.py` (every API call the GUI in
+  `web/src/api/endpoints.ts` makes, with the GUI's body shapes, asserting the fields the GUI
+  reads) and `test_server_e2e.py` (marked `e2e`: real `cteforge demo` + `cteforge serve`
+  subprocess, built GUI, /api/v1, MCP over streamable HTTP and stdio; skipped without
+  `web/dist`). Run only these: `uv run pytest tests/e2e`; skip the slow ones: `-m "not e2e"`.
 - `golden/` — per-dialect expected SQL snapshots (ADR 0012).
 - `conftest.py` — shared fixtures.
 

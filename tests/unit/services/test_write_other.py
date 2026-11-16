@@ -113,8 +113,30 @@ AD = "accounts__deals__account_id=account_id"
 DI = "deals__invoices__deal_id=deal_id"
 
 
-def test_cte_joins_are_not_mined(ctx: AppContext) -> None:
+def test_cte_joins_are_mined_through_pass_through_keys(ctx: AppContext) -> None:
+    # realization_rate joins only CTEs, but their key columns pass through from deals,
+    # accounts and invoices, so the base-table edges are mined.
     _example(ctx, "realization_rate")
+    assert _usage(ctx) == {AD: 1, DI: 1}
+    ad, di = ctx.store.get_join(AD), ctx.store.get_join(DI)
+    assert (ad.left_table, ad.right_table, ad.join_type) == ("accounts", "deals", "inner")
+    assert (di.left_table, di.right_table, di.join_type) == ("deals", "invoices", "left")
+    assert ad.state is DefinitionState.LLM_ANNOTATED and di.state is DefinitionState.LLM_ANNOTATED
+    _example(ctx, "booked_vs_collected")  # same two edges, now used by two definitions
+    assert _usage(ctx) == {AD: 2, DI: 2}
+
+
+def test_computed_cte_keys_are_not_mined(ctx: AppContext) -> None:
+    sql = """
+    WITH acc AS (SELECT a.account_id + 0 AS account_id, a.region FROM accounts AS a)
+    SELECT acc.region, SUM(d.amount) AS booked
+    FROM deals AS d
+    JOIN acc ON acc.account_id = d.account_id
+    WHERE d.status = 'closed_won'
+    GROUP BY acc.region
+    """
+    out = _region(ctx, sql)
+    assert out.auto_applied
     assert ctx.store.list_joins() == []
 
 
@@ -336,7 +358,8 @@ def test_export_is_deterministic_and_complete(ctx: AppContext, tmp_path: Path) -
     ]
     assert len(written) == 5 and files == _files(tmp_path / "b")
     join = yaml.safe_load(files[f"joins/{DI}.yml"])
-    assert join["relationship"] == "one_to_many" and join["usage_count"] == 1
+    # Both definitions use deals<->invoices (realization_rate through its CTEs).
+    assert join["relationship"] == "one_to_many" and join["usage_count"] == 2
 
 
 def test_export_prune_removes_stale_files(ctx: AppContext, tmp_path: Path) -> None:
@@ -379,8 +402,14 @@ def test_import_in_strict_mode_writes_nothing(warehouse_copy: Path, tmp_path: Pa
     with _open(warehouse_copy) as target:
         set_team_mode(target, TeamMode.STRICT)
         outcomes = import_library(target, ALICE, tmp_path)
-        assert [o.proposal.status for o in outcomes] == [ProposalStatus.PENDING]
-        assert target.store.list_definitions() == []
+        # The definition plus the two join edges mined from it in the source.
+        assert [o.proposal.kind for o in outcomes] == [
+            ProposalKind.NEW_DEFINITION,
+            ProposalKind.NEW_JOIN,
+            ProposalKind.NEW_JOIN,
+        ]
+        assert {o.proposal.status for o in outcomes} == {ProposalStatus.PENDING}
+        assert target.store.list_definitions() == [] and target.store.list_joins() == []
         review.approve(target, APPROVER, outcomes[0].proposal.id)
         assert target.store.get_definition("realization_rate").version == 1
 

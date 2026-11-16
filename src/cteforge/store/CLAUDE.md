@@ -44,7 +44,10 @@ class Store:
     def get_proposal(self, id: str) -> Proposal | None
     def list_proposals(self, status: ProposalStatus | None = None,
                        target_id: str | None = None) -> list[Proposal]    # newest first
-    def update_proposal(self, p: Proposal) -> Proposal                    # replace by id
+    def update_proposal(self, p: Proposal, *,
+                        expected_status: ProposalStatus | None = None) -> Proposal
+        # replace by id; with expected_status a compare-and-swap (UPDATE ... WHERE status =
+        # expected): a row whose stored status differs → StoreError (missing → StoreError)
     # users (tokens arrive already hashed; the store never sees a raw token)
     def add_user(self, user: User, token_sha256: str) -> User             # duplicate name -> StoreError
     def get_user(self, name: str) -> User | None
@@ -60,7 +63,9 @@ Errors: `StoreError`, `StaleVersionError` from domain/errors.py. Missing rows re
 (getters) or raise StoreError (mutators).
 
 Concurrency: a Store is safe to share across threads. In-memory SQLite ("sqlite://") uses
-one shared connection, so every call is serialized by a lock. Upserts (`upsert_join`,
+one shared connection, so every call is serialized by a lock. Across processes on one
+database, `update_proposal(..., expected_status=...)` is the compare-and-swap services use
+to decide a proposal at most once. Upserts (`upsert_join`,
 `set_setting`) retry once in a fresh transaction when a concurrent first-time INSERT of
 the same key wins (READ COMMITTED on Postgres).
 

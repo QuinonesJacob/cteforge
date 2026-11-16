@@ -1,12 +1,12 @@
 // Pending proposal count for the nav and Review-tab badges.
 //
-// GET /proposals is not free: the backend builds a diff and impact preview for every pending
-// proposal and writes a `review` audit event (op list_proposals) on each call. So every
-// component using this hook shares ONE store per tab: at most one request in flight, a slow
+// Uses GET /proposals/count (no diffs, no audit event), not GET /proposals (which builds a
+// diff and impact preview per proposal and writes a `review` audit event). Every component
+// using this hook still shares ONE store per tab: at most one request in flight, a slow
 // refresh only while the tab is visible, and an immediate refresh when a proposal changes in
 // this tab (notifyProposalsChanged) or when the tab comes back after the interval passed.
 import { useEffect, useState } from "react";
-import { listProposals } from "../api/endpoints";
+import { countProposals } from "../api/endpoints";
 
 const EVENT = "cteforge:proposals-changed";
 /** Background refresh interval while the tab is visible. */
@@ -42,9 +42,9 @@ function load() {
   const ctrl = new AbortController();
   store.ctrl = ctrl;
   store.lastLoad = Date.now();
-  listProposals("pending", { signal: ctrl.signal })
-    .then((ps) => {
-      if (!ctrl.signal.aborted) publish(ps.length);
+  countProposals("pending", { signal: ctrl.signal })
+    .then((res) => {
+      if (!ctrl.signal.aborted) publish(res.count);
     })
     .catch(() => undefined)
     .finally(() => {

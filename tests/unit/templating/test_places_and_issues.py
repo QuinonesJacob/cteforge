@@ -184,6 +184,19 @@ def test_negated_range_keeps_shape_but_needs_a_description_when_changeable():
     assert _apply(sql, fixed)[1] == []
 
 
+@pytest.mark.parametrize("op", ["<>", "!="])
+def test_changeable_value_compared_with_not_equal_needs_a_description(op: str):
+    """`s <> 'void'` EXCLUDES the value: a later agent passing 'paid' would silently drop
+    paid rows, so the analyst must say so."""
+    sql = f"SELECT * FROM t WHERE s {op} 'void'"
+    ann = Annotation(name="st", type=VariableType.TEXT, role=Role.CHANGEABLE, literals=["main.L1"])
+    _, issues = _apply(sql, ann)
+    assert _codes(issues) == [(IssueCode.DESCRIPTION_REQUIRED, Severity.ERROR)]
+    assert "negated" in issues[0].message
+    described = ann.model_copy(update={"description": "Status to EXCLUDE."})
+    assert _apply(sql, described)[1] == []
+
+
 # ── types (compared expression type) ────────────────────────────────────────────────
 
 

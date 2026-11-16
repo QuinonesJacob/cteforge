@@ -34,6 +34,7 @@ class IssueCode(StrEnum):
     FIXED_OVERRIDE = "fixed_override"
     VALUE_NOT_ALLOWED = "value_not_allowed"
     TRANSPILED = "transpiled"
+    DEFAULT_VALUE_USED = "default_value_used"  # A changeable variable kept its original value.
     # Compose / run
     UNKNOWN_ALIAS = "unknown_alias"
     UNKNOWN_JOIN = "unknown_join"
