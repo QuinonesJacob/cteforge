@@ -1,0 +1,117 @@
+schema_version: 1
+id: realization_rate
+version: 1
+title: Realization Rate (monthly, by region)
+meaning: Share of booked revenue on won deals that has been collected as paid invoices.
+keywords:
+- realization
+- collection rate
+- collected revenue
+- cash realization
+use_when: Finance questions about how much won revenue turned into cash.
+dont_use_when: Pipeline or forecast questions — this only covers closed-won deals.
+source_dialect: duckdb
+template: |-
+  /* Realization rate: share of booked revenue on won deals that has actually been collected. */
+  /* Trusted query (synthetic example). */
+  WITH closed_deals AS (
+    SELECT
+      d.deal_id,
+      d.account_id,
+      d.amount,
+      d.closed_at
+    FROM deals AS d
+    WHERE
+      d.closed_at >= $period__start
+      AND d.closed_at < $period__end
+      AND d.status IN ($won_statuses)
+  ), deals_in_region AS (
+    SELECT
+      cd.deal_id,
+      cd.amount,
+      a.region,
+      DATE_TRUNC('MONTH', cd.closed_at) AS month
+    FROM closed_deals AS cd
+    JOIN accounts AS a
+      ON a.account_id = cd.account_id
+    WHERE
+      a.region IN ($regions)
+  ), collected AS (
+    SELECT
+      i.deal_id,
+      SUM(i.paid_amount) AS paid
+    FROM invoices AS i
+    WHERE
+      i.status = $paid_status
+    GROUP BY
+      i.deal_id
+  )
+  SELECT
+    dr.month,
+    dr.region,
+    ROUND(SUM(COALESCE(c.paid, 0)) / SUM(dr.amount), 4) AS realization_rate
+  FROM deals_in_region AS dr
+  LEFT JOIN collected AS c
+    ON c.deal_id = dr.deal_id
+  GROUP BY
+    dr.month,
+    dr.region
+  ORDER BY
+    dr.month,
+    dr.region
+variables:
+- name: period
+  type: date_range
+  role: changeable
+  column: deals.closed_at
+  column_type: TIMESTAMP
+  literal_form: typed
+  cast_type: TIMESTAMP
+  shape: half_open
+  original_value:
+    start: '2026-01-01'
+    end: '2026-04-01'
+  description: Deal close date range (end exclusive).
+- name: won_statuses
+  type: text_list
+  role: fixed
+  column: deals.status
+  column_type: VARCHAR
+  literal_form: bare
+  original_value:
+  - closed_won
+  - closed_won_renewal
+  description: What counts as a won deal. Business logic — do not change.
+- name: regions
+  type: text_list
+  role: changeable
+  column: accounts.region
+  column_type: VARCHAR
+  literal_form: bare
+  original_value:
+  - EMEA
+  - NA
+  allowed:
+  - EMEA
+  - NA
+  - APAC
+  - LATAM
+  description: ''
+- name: paid_status
+  type: text
+  role: fixed
+  column: invoices.status
+  column_type: VARCHAR
+  literal_form: bare
+  original_value: paid
+  description: Only paid invoices count as collected.
+tables:
+- accounts
+- deals
+- invoices
+outputs:
+- month
+- region
+- realization_rate
+grain: one row per month per region
+state: llm_annotated
