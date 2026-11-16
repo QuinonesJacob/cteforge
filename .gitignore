@@ -7,3 +7,10 @@ dist/
 *.duckdb
 *.duckdb.wal
 .env
+
+# web
+web/node_modules/
+web/dist/
+# local server data
+cteforge.db
+connections.yml

@@ -1,0 +1,167 @@
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { ApiError, buildUrl, onUnauthorized, parseErrorBody, request } from "./client";
+import { createUser, rotateToken, searchDefinitions, toAuditPage, toCreatedUser } from "./endpoints";
+import { clearToken, getToken, setToken } from "./token";
+
+function mockFetch(status: number, body: unknown) {
+  const fn = vi.fn(async (_url: string, _init?: RequestInit) =>
+    new Response(body === undefined ? null : typeof body === "string" ? body : JSON.stringify(body), {
+      status,
+      headers: { "Content-Type": "application/json" },
+    }),
+  );
+  vi.stubGlobal("fetch", fn);
+  return fn;
+}
+
+function headersOf(fn: ReturnType<typeof mockFetch>, call = 0): Record<string, string> {
+  return (fn.mock.calls[call]?.[1]?.headers ?? {}) as Record<string, string>;
+}
+
+beforeEach(() => clearToken());
+afterEach(() => {
+  vi.unstubAllGlobals();
+  onUnauthorized(null);
+});
+
+describe("auth header", () => {
+  it("adds Authorization: Bearer <token> from sessionStorage", async () => {
+    setToken("tok-123");
+    const fetchFn = mockFetch(200, { name: "jq", role: "admin", kind: "human" });
+    await request("GET", "/me");
+    expect(headersOf(fetchFn).Authorization).toBe("Bearer tok-123");
+    expect(fetchFn.mock.calls[0]?.[0]).toBe("/api/v1/me");
+  });
+
+  it("sends no Authorization without a token or when anonymous", async () => {
+    const fetchFn = mockFetch(200, {});
+    await request("GET", "/me");
+    expect(headersOf(fetchFn).Authorization).toBeUndefined();
+    setToken("tok");
+    await request("GET", "/me", { anonymous: true });
+    expect(headersOf(fetchFn, 1).Authorization).toBeUndefined();
+  });
+
+  it("uses an explicit token over the stored one", async () => {
+    setToken("stored");
+    const fetchFn = mockFetch(200, {});
+    await request("GET", "/me", { token: "explicit" });
+    expect(headersOf(fetchFn).Authorization).toBe("Bearer explicit");
+  });
+
+  it("keeps the token in sessionStorage only", () => {
+    setToken("abc");
+    expect(sessionStorage.getItem("cteforge.token")).toBe("abc");
+    expect(localStorage.getItem("cteforge.token")).toBeNull();
+    expect(getToken()).toBe("abc");
+  });
+});
+
+describe("JSON bodies and query strings", () => {
+  it("serializes the body and sets Content-Type", async () => {
+    const fetchFn = mockFetch(200, { ok: true });
+    await request("POST", "/parse", { body: { sql: "select 1", dialect: "duckdb" } });
+    const init = fetchFn.mock.calls[0]?.[1];
+    expect(init?.method).toBe("POST");
+    expect(init?.body).toBe('{"sql":"select 1","dialect":"duckdb"}');
+    expect(headersOf(fetchFn)["Content-Type"]).toBe("application/json");
+  });
+
+  it("builds query strings and skips empty values", () => {
+    expect(buildUrl("/audit", { actor: "jq", kind: "", limit: 50, definition_id: undefined })).toBe(
+      "/api/v1/audit?actor=jq&limit=50",
+    );
+  });
+
+  it("search passes q and include_drafts", async () => {
+    const fetchFn = mockFetch(200, []);
+    await searchDefinitions("revenue by month", true);
+    expect(fetchFn.mock.calls[0]?.[0]).toBe("/api/v1/definitions?q=revenue+by+month&include_drafts=true&limit=100");
+  });
+});
+
+describe("error parsing", () => {
+  it("mirrors {error: {type, message, issues}}", async () => {
+    mockFetch(422, {
+      error: {
+        type: "VariableValueError",
+        message: "Invalid value for 'period'",
+        issues: [{ code: "value_not_allowed", severity: "warning", message: "m", variable: "period" }],
+      },
+    });
+    const err = await request("POST", "/run", { body: {} }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ApiError);
+    const api = err as ApiError;
+    expect(api.status).toBe(422);
+    expect(api.type).toBe("VariableValueError");
+    expect(api.message).toBe("Invalid value for 'period'");
+    expect(api.issues).toHaveLength(1);
+    expect(api.issues[0]?.variable).toBe("period");
+  });
+
+  it("handles FastAPI {detail} bodies", () => {
+    expect(parseErrorBody(404, { detail: "Not Found" }).message).toBe("Not Found");
+    const v = parseErrorBody(422, { detail: [{ loc: ["body", "sql"], msg: "Field required" }] });
+    expect(v.type).toBe("RequestValidationError");
+    expect(v.message).toBe("sql: Field required");
+  });
+
+  it("handles non-JSON and empty bodies", () => {
+    expect(parseErrorBody(502, "Bad gateway").message).toBe("Bad gateway");
+    expect(parseErrorBody(500, undefined, "Internal Server Error").message).toBe("Internal Server Error");
+    expect(parseErrorBody(500, { error: { type: "X" } }).issues).toEqual([]);
+  });
+
+  it("calls the unauthorized handler on 401", async () => {
+    setToken("expired");
+    const handler = vi.fn();
+    onUnauthorized(handler);
+    mockFetch(401, { error: { type: "Unauthorized", message: "invalid token", issues: [] } });
+    await expect(request("GET", "/definitions")).rejects.toMatchObject({ status: 401 });
+    expect(handler).toHaveBeenCalledOnce();
+  });
+
+  it("does not call the unauthorized handler for anonymous probes", async () => {
+    const handler = vi.fn();
+    onUnauthorized(handler);
+    mockFetch(401, { error: { type: "Unauthorized", message: "token required" } });
+    await expect(request("GET", "/me", { anonymous: true })).rejects.toBeInstanceOf(ApiError);
+    expect(handler).not.toHaveBeenCalled();
+  });
+
+  it("wraps network failures", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => Promise.reject(new TypeError("Failed to fetch"))));
+    await expect(request("GET", "/me")).rejects.toMatchObject({ status: 0, type: "NetworkError" });
+  });
+});
+
+describe("user creation responses", () => {
+  it("accepts {user, token} and flat shapes", async () => {
+    expect(toCreatedUser({ user: { name: "a", role: "viewer", kind: "agent" }, token: "t1" })).toEqual({
+      token: "t1",
+      user: { name: "a", role: "viewer", kind: "agent", created_at: undefined },
+    });
+    expect(toCreatedUser({ name: "b", role: "admin", kind: "human", token: "t2" }).user.name).toBe("b");
+    const fetchFn = mockFetch(200, { user: { name: "bot", role: "contributor", kind: "agent" }, token: "secret" });
+    const created = await createUser({ name: "bot", role: "contributor", kind: "agent" });
+    expect(created.token).toBe("secret");
+    expect(JSON.parse(String(fetchFn.mock.calls[0]?.[1]?.body))).toEqual({ name: "bot", role: "contributor", kind: "agent" });
+  });
+});
+
+describe("response normalizers", () => {
+  it("rotate token accepts a bare string or {token}", async () => {
+    mockFetch(200, "\"new-secret\"");
+    expect(await rotateToken("bot")).toEqual({ token: "new-secret", user: { name: "bot", role: "viewer", kind: "human" } });
+    mockFetch(200, { token: "t3" });
+    const r = await rotateToken("bot");
+    expect(r.token).toBe("t3");
+    expect(r.user.name).toBe("bot");
+  });
+
+  it("audit accepts the AuditPage wrapper or a list", () => {
+    expect(toAuditPage({ events: [], limit: 50, has_more: true }, 100)).toEqual({ events: [], limit: 50, has_more: true });
+    expect(toAuditPage([{ id: "1" }, { id: "2" }], 2).has_more).toBe(true);
+    expect(toAuditPage(null, 10)).toEqual({ events: [], limit: 10, has_more: false });
+  });
+});
