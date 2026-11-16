@@ -18,9 +18,14 @@ column could not be annotated at all.
   join — filters attached rows, not the driving rows), `having`, `subquery`, and any
   value-side wrapper.
 - Range **suggestions** pair a lower and upper bound only when they are direct operands of
-  the same AND chain (or one BETWEEN), on the same column expression, with no `NOT`/`OR`/`CASE`
-  between them. Only then is a shape recorded: `half_open` [a, b), `inclusive` [a, b],
-  `exclusive` (a, b), `start_exclusive` (a, b].
+  the same AND chain (or one BETWEEN), on the same column expression. Only then is a shape
+  recorded: `half_open` [a, b), `inclusive` [a, b], `exclusive` (a, b), `start_exclusive`
+  (a, b]. The chain itself may sit under `NOT` or inside one `OR` branch (e.g. an excluded
+  window, or one of two windows); that is reported as context on both literals, never hidden.
+  Bounds in different AND chains (`a OR b`, CASE vs WHERE) are never paired.
+- A changeable variable whose literals carry `negated`, `or_branch`, `case_condition` or
+  `outer_join_on` context must have a description (`description_required`), because its
+  name alone can't convey what it does.
 - An analyst may still annotate any two bounds as a `date_range`. If they are not a
   suggested pair, the shape is `null`, the import returns a `range_not_simple` issue, and the
   variable must have a description before the definition can leave `draft`.
