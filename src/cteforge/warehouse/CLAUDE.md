@@ -10,13 +10,13 @@ that conflicts.
   `explain(sql) -> None` (raises on failure), `run(sql, limit) -> QueryResult`.
 - `duckdb.py` — DuckDB implementation.
 - (M6) one file per connector: `postgres.py`, `snowflake.py`, `bigquery.py`, `databricks.py`.
-- `redshift.py` — Redshift via `redshift_connector` (ADR 0022). **Security review with the
-  user pending: do not commit before it is approved.** Password auth only (IAM/IdP options
+- `redshift.py` — Redshift via `redshift_connector` (ADR 0022). Security-reviewed and approved
+  by the user 2026-11-17. Password auth only (IAM/IdP options
   refused by an option allowlist); every call `BEGIN READ ONLY` + transaction-local
   `statement_timeout`, rolled back; extended query protocol (one statement); column types
   from `svv_columns`; server ErrorResponse fields reduced to the message (`base.error_text`).
-- `clickhouse.py` — ClickHouse via `clickhouse-connect` over HTTP(S) (ADR 0025). **Security
-  review with the user pending: do not commit before it is approved.** Password auth only,
+- `clickhouse.py` — ClickHouse via `clickhouse-connect` over HTTP(S) (ADR 0025). Security-reviewed
+  and approved by the user 2026-11-17. Password auth only,
   `user` required (option allowlist refuses dsn / interface / access_token / client certs /
   settings); every request carries `readonly=2`, `max_execution_time` +
   `timeout_overflow_mode=throw`, `cancel_http_readonly_queries_on_client_close=1` and the

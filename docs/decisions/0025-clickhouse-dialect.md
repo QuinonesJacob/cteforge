@@ -1,6 +1,6 @@
 # 0025 — ClickHouse is a dialect and a connector
 
-Status: accepted · 2026-11-17 · amends ADR 0011, 0020 · **connector PENDING security review**
+Status: accepted · 2026-11-17 · amends ADR 0011, 0020 · connector security review approved 2026-11-17
 
 ## Context
 ClickHouse is widely used for AI workloads: agent platforms store traces there (traces →
@@ -74,7 +74,7 @@ which sqlglot (30.31.0) parses as the same `exp.Placeholder` cteforge templates 
   profile-capped timeouts, scan guards, scrubbed auth errors, and the trace definition's
   same-query-back and new-value / weekly-grain renders. Not in CI yet.
 
-## Addendum (2026-11-17): connector — PENDING security review
+## Addendum (2026-11-17): connector — security review approved 2026-11-17
 Driver: `clickhouse-connect` (ClickHouse Inc., Apache-2.0, HTTP/HTTPS), reviewed at 1.13.0
 (`>=1.13,<2`). Options are an allowlist (host, port, database, user, secure, verify,
 ca_cert, connect_timeout, send_receive_timeout, max_rows_to_read, max_bytes_to_read);

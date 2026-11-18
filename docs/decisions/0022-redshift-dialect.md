@@ -21,7 +21,7 @@ mis-check SQL.
 ## Consequences
 - Teams with Postgres + Redshift configure two profiles; each definition maps to one.
 
-## Addendum (2026-11-17): implementation — PENDING security review
+## Addendum (2026-11-17): implementation — security review approved 2026-11-17
 Driver: AWS `redshift_connector` (Apache-2.0), extra `cteforge[redshift]`, not psycopg:
 psycopg 3 does not support Redshift officially (psycopg issue #122, open), and the Postgres
 connector's single-statement mechanism (named prepared statements) makes psycopg send
