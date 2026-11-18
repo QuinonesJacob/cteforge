@@ -1,7 +1,7 @@
 # 0028 — MySQL is a dialect and a connector
 
-Status: accepted · 2026-11-17 · amends ADR 0020 · **connector security review with the user
-pending: not to be committed before it is approved**
+Status: accepted · 2026-11-17 · amends ADR 0020 · connector security review approved by the user
+2026-11-17
 
 ## Context
 Many teams keep operational and reporting data in MySQL, and their trusted SQL is written in

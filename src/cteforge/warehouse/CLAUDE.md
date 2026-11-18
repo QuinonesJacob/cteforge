@@ -26,8 +26,8 @@ that conflicts.
   parameters; `EXPLAIN PLAN`; errors reduced to the last `DB::Exception:` message
   (`clickhouse.error_message`), then scrubbed; no HTTP session; the driver refuses to start
   if its `invalid_setting_action` is `drop`.
-- `mysql.py` — MySQL 8 via PyMySQL (ADR 0028). **Security review with the user pending: do
-  not commit before it is approved.** Password auth only, `user` required (option allowlist
+- `mysql.py` — MySQL 8 via PyMySQL (ADR 0028). Security-reviewed and approved by the
+  user 2026-11-17. Password auth only, `user` required (option allowlist
   host / port / database / user / ssl_ca / ssl_verify_cert / ssl_verify_identity /
   ssl_disabled / connect_timeout / read_timeout; refuses local_infile, client_flag,
   init_command, sql_mode, autocommit, read_default_file / read_default_group, unix_socket,
