@@ -75,6 +75,7 @@ from pydantic import ValidationError
 
 from cteforge.compose import relationship
 from cteforge.compose.checks import ensure_query
+from cteforge.domain.access import Tool
 from cteforge.domain.audit import AuditKind
 from cteforge.domain.codec import AnnotationFile, definition_from_yaml, definition_to_yaml
 from cteforge.domain.dialects import Dialect
@@ -103,6 +104,7 @@ from cteforge.domain.proposals import Proposal, ProposalKind, ProposalStatus
 from cteforge.domain.users import User
 from cteforge.parsing.analyze import parse
 from cteforge.services import _audit, _compose, _library, _meaning
+from cteforge.services.auth import permitted
 from cteforge.services.cards import (
     ProposalOutcome,
     ProposalView,
@@ -402,7 +404,10 @@ def stale_rename_error(proposal: Proposal) -> StaleVersionError:
     return error
 
 
-_JOIN_BASIS_IGNORED = {"usage_count", "sources"}
+_JOIN_BASIS_IGNORED = {"usage_count", "sources", "trusted_sources"}
+# The annotations a person confirms (ADR 0026): changing them un-confirms an edge unless a
+# person approves the change.
+_JOIN_ANNOTATIONS = ("relationship", "traps", "notes")
 
 
 def _join_basis(edge: JoinEdge | None) -> dict[str, Any] | None:
@@ -524,11 +529,12 @@ def join_proposal(
     the relationship evidence when a relationship is claimed) and the edge it is based on
     (`payload.base_join`)."""
     existing = ctx.store.get_join(edge.id)
-    keep: dict[str, Any] = {"usage_count": 0, "sources": []}
+    keep: dict[str, Any] = {"usage_count": 0, "sources": [], "trusted_sources": []}
     if existing is not None:
         keep = {
             "usage_count": existing.usage_count,
             "sources": list(existing.sources),
+            "trusted_sources": list(existing.trusted_sources),
             "added_by": existing.added_by,
             "added_by_kind": existing.added_by_kind,
             "confirmed_by": existing.confirmed_by,
@@ -538,9 +544,30 @@ def join_proposal(
     edge = edge.model_copy(update=keep)
     checks = join_checks(ctx, edge)
     evidence: RelationshipEvidence | None = None
-    if edge.relationship is not None and not has_errors(checks):
+    claim_changed = edge.relationship is not None and (
+        existing is None or edge.relationship != existing.relationship
+    )
+    if claim_changed and not permitted(user, Tool.CHECK_AND_RUN):
+        # Counting rows of named tables and columns is exploratory SQL: without
+        # check_and_run the proposer would get a row-count oracle (security review).
+        checks.append(
+            _incomplete(
+                "The relationship was not checked against the data: checking it counts rows "
+                "on the warehouse, which needs the check_and_run tool the proposer does not "
+                "hold. A reviewer can still decide."
+            )
+        )
+    elif claim_changed and not checks:
+        # Only when join_checks positively confirmed both tables and every key column.
         evidence, evidence_issues = relationship_evidence(ctx, edge)
         checks += evidence_issues
+    elif claim_changed:
+        checks.append(
+            _incomplete(
+                "The relationship was not checked against the data: the tables and key "
+                "columns could not be confirmed first."
+            )
+        )
     if evidence is not None or (
         existing is not None and edge.relationship != existing.relationship
     ):
@@ -831,15 +858,26 @@ def _apply_definition(
 
 
 def _apply_join(ctx: AppContext, proposal: Proposal, user: User, auto: bool) -> JoinEdge:
-    """Write the proposed edge. Mining-owned fields (sources, usage_count) are taken from
-    the stored edge; a person's approval confirms it (`confirmed_by`)."""
+    """Write the proposed edge. Mining-owned fields (sources, trusted_sources, usage_count)
+    are taken from the stored edge. A person's approval confirms it (`confirmed_by`);
+    any other approval of a change to its relationship, traps or notes un-confirms it (a
+    confirmation covers what the person saw; ADR 0026)."""
     proposed = JoinEdge.model_validate(proposal.payload["join"])
     current = ctx.store.get_join(proposed.id)
     update: dict[str, Any] = {}
     if current is not None:
-        update |= {"sources": list(current.sources), "usage_count": current.usage_count}
+        update |= {
+            "sources": list(current.sources),
+            "trusted_sources": list(current.trusted_sources),
+            "usage_count": current.usage_count,
+            "confirmed_by": current.confirmed_by,
+        }
     if confirms_join(user.kind, auto=auto):
         update["confirmed_by"] = user.name
+    elif current is not None and any(
+        getattr(current, k) != getattr(proposed, k) for k in _JOIN_ANNOTATIONS
+    ):
+        update["confirmed_by"] = None
     edge = proposed.model_copy(update=update)
     ctx.store.upsert_join(edge)
     return edge

@@ -44,6 +44,7 @@ const composed: DefinitionCard = {
       traps: [],
       notes: "",
       sources: ["realization_rate"],
+      trusted_sources: ["realization_rate"],
       known: true,
       confirmed: true,
       pending_proposals: [],

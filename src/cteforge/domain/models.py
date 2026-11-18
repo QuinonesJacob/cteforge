@@ -357,9 +357,12 @@ class JoinEdge(BaseModel):
     """Join map entry (DESIGN §3, ADR 0026): mined from definitions' SQL, or added by a
     proposal. A reference, not a gate.
 
-    `is_known()` (counts for trust labels): mined from a definition (`sources`), added by a
+    `is_known()` (counts for trust labels): mined from a definition a PERSON stands behind
+    (`trusted_sources`: authored by a human, approved by a human, or verified), added by a
     person, or confirmed by a person (`confirmed_by`: a human approved a proposal on it).
-    An agent-added edge is not known until a person approves it."""
+    An edge only agents put there — added by an agent, or mined only from definitions
+    agents wrote and that auto-applied — is listed (with its `sources`) but not known
+    until a person approves or confirms it (ADR 0026: an agent alone can't raise trust)."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -373,6 +376,8 @@ class JoinEdge(BaseModel):
     traps: list[str] = Field(default_factory=list)  # e.g. "fan-out: one deal has many invoices"
     notes: str = ""
     sources: list[str] = Field(default_factory=list)  # Definition ids it was mined from.
+    # The subset of `sources` a person stands behind (recomputed by mining).
+    trusted_sources: list[str] = Field(default_factory=list)
     added_by: str | None = None  # Who proposed it when no definition contained it.
     added_by_kind: Kind | None = None
     confirmed_by: str | None = None  # A PERSON who approved a proposal on this edge.
@@ -388,4 +393,8 @@ class JoinEdge(BaseModel):
         return data
 
     def is_known(self) -> bool:
-        return bool(self.sources) or self.added_by_kind == "human" or self.confirmed_by is not None
+        return (
+            bool(self.trusted_sources)
+            or self.added_by_kind == "human"
+            or self.confirmed_by is not None
+        )

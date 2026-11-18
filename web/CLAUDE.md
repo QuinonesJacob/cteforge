@@ -81,8 +81,9 @@ If something does not clearly fit one of the above, it does not belong here.
   do that through MCP); the Edit tab offers metadata only, and Import's revise mode refuses
   them. `ProposalView.impact` = ids of composed definitions using the target ("Used by").
 - Join map (ADR 0026): `GET /joins?table=&known_only=` → JoinCard (edge + `known`,
-  `confirmed`, `pending_proposals`; `sources`, `relationship`, `traps`, `notes`,
-  `evidence`). `POST /proposals/joins {action: "annotate", id, relationship?, traps?,
+  `confirmed`, `pending_proposals`; `sources`, `trusted_sources` — the sources a person
+  stands behind, the only ones that make a mined edge known —, `relationship`, `traps`,
+  `notes`, `evidence`). `POST /proposals/joins {action: "annotate", id, relationship?, traps?,
   notes?, summary}` (only changed fields) or `{action: "add", left_table, right_table,
   keys, join_type, relationship?, traps?, notes?, summary}`; forms only with propose_join.
   Pending additions are proposals, not edges: the page lists them from

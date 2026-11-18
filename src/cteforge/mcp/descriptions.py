@@ -248,11 +248,12 @@ LIST_JOINS = """\
 The team's join map. Per edge: tables, `keys`, `join_type`, `sources` (definitions it was \
 mined from), `relationship`, `traps`, `notes`, `confirmed` (a person approved it, or it \
 was mined from a verified definition) and `known` (counts for trust labels: mined from a \
-definition, or added/approved by a person). Exploratory SQL and final SELECTs that join \
-only on known edges keep the label new_logic_on_known_joins (or better); other joins make \
-the result exploratory. `table` limits it to edges touching one table; `known_only` hides \
-the rest. Read `traps` and `relationship` before joining (one_to_many fans out the "one" \
-side). If a join you need is missing and you are sure of it, `propose_join` (action add).\
+definition a person wrote, approved or verified, or added/approved by a person). \
+Exploratory SQL and final SELECTs that join only on known edges keep the label \
+new_logic_on_known_joins (or better); other joins make the result exploratory. `table` \
+limits it to edges touching one table; `known_only` hides the rest. Read `traps` and \
+`relationship` before joining (one_to_many fans out the "one" side). If a join you need \
+is missing and you are sure of it, `propose_join` (action add).\
 """
 
 DESCRIBE_TABLES = """\

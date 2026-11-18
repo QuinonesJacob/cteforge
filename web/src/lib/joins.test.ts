@@ -13,6 +13,7 @@ const edge: JoinCard = {
   traps: ["fan-out"],
   notes: "",
   sources: ["rr"],
+  trusted_sources: ["rr"],
   known: true,
   confirmed: false,
   pending_proposals: [],

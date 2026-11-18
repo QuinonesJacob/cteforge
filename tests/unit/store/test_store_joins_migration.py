@@ -74,7 +74,9 @@ def test_list_joins_matches_either_side_case_insensitively(store: Store) -> None
 
 
 def test_edge_known_rules() -> None:
-    assert edge("a", "b", sources=["rr"]).is_known()  # mined from a definition
+    # Mined: known only when a person stands behind a source definition (ADR 0026).
+    assert not edge("a", "b", sources=["rr"]).is_known()
+    assert edge("a", "b", sources=["rr"], trusted_sources=["rr"]).is_known()
     assert edge("a", "b", added_by="ann", added_by_kind="human").is_known()
     assert not edge("a", "b", added_by="bot", added_by_kind="agent").is_known()
     assert edge("a", "b", added_by="bot", added_by_kind="agent", confirmed_by="ann").is_known()

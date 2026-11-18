@@ -237,6 +237,7 @@ def test_raw_tables_on_a_known_join_are_refused_in_strict_mode(ctx: AppContext) 
             right_table="deals",
             keys=[JoinKey(left="account_id", right="account_id")],
             sources=["realization_rate"],
+            trusted_sources=["realization_rate"],
         )
     )
     set_team_mode(ctx, TeamMode.STRICT)

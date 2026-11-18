@@ -49,7 +49,7 @@ from cteforge.domain.issues import has_errors
 from cteforge.domain.models import Definition, DefinitionState, DefinitionVersionInfo
 from cteforge.domain.proposals import DEFINITION_KINDS, Proposal, ProposalKind, ProposalStatus
 from cteforge.domain.users import User
-from cteforge.services import _apply, _audit, _library
+from cteforge.services import _apply, _audit, _compose, _library
 from cteforge.services.auth import require
 from cteforge.services.cards import (
     DefinitionCard,
@@ -291,5 +291,7 @@ def verify_definition(ctx: AppContext, user: User, id: str, version: int) -> Def
             verified_by=user.name,
             verified_at=ctx.now().date(),
         )
+    # A verified definition's joins become known (ADR 0026: a person stands behind it).
+    _library.refresh_join_map(ctx, lambda d: _compose.compiled_sql(ctx, d))
     _audit.record(ctx, user, AuditKind.REVIEW, **fields)
     return card_from_definition(verified)

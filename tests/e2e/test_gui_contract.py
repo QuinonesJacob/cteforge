@@ -195,6 +195,7 @@ JOIN_CARD = {
     "traps",
     "notes",
     "sources",
+    "trusted_sources",
     "added_by",
     "added_by_kind",
     "confirmed_by",

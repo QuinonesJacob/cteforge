@@ -44,7 +44,7 @@ from cteforge.domain.models import (
     TeamMode,
 )
 from cteforge.domain.proposals import DEFINITION_KINDS, ProposalKind, ProposalStatus
-from cteforge.domain.users import User
+from cteforge.domain.users import ActorKind, User
 from cteforge.parsing.analyze import analyze
 from cteforge.services.auth import permitted
 from cteforge.services.cards import (
@@ -379,17 +379,69 @@ def mined_edges(definition: Definition, sql: str | None = None) -> list[JoinEdge
 SqlOf = Callable[[Definition], str | None]
 
 
+Backing = dict[tuple[str, int], bool]
+
+
+def human_backing(ctx: AppContext) -> Backing:
+    """(definition id, version) → whether a person stood behind the approved proposal that
+    made it: its author was human (`author_kind`), or a human approved it (not
+    auto-applied, `decided_by_kind` human)."""
+    out: Backing = {}
+    for p in ctx.store.list_proposals(ProposalStatus.APPROVED):
+        if p.kind not in DEFINITION_KINDS or p.resulting_version is None:
+            continue
+        human = p.author_kind is ActorKind.HUMAN or (
+            not p.auto_applied and p.decided_by_kind is ActorKind.HUMAN
+        )
+        key = (p.target_id, p.resulting_version)
+        out[key] = out.get(key, False) or human
+    return out
+
+
+def person_stands_behind(
+    ctx: AppContext,
+    definition: Definition,
+    kinds: dict[str, ActorKind] | None = None,
+    backing: Backing | None = None,
+) -> bool:
+    """Whether a PERSON stands behind this definition version (ADR 0026: what makes the
+    joins mined from it known): it is verified, a human authored it, or a human approved
+    the proposal that made it (not auto-applied). The author's kind comes from that
+    proposal, else from the users table (versions written without a proposal); an unknown
+    author is not a person. `kinds` (user → kind) and `backing` (`human_backing`) may be
+    passed in when checking many definitions."""
+    if definition.state is DefinitionState.VERIFIED:
+        return True
+    if backing is None:
+        backing = human_backing(ctx)
+    if backing.get((definition.id, definition.version)):
+        return True
+    if kinds is None:
+        kinds = {u.name: u.kind for u in ctx.store.list_users()}
+    history = ctx.store.definition_history(definition.id)
+    authors = [h.author for h in history if h.version == definition.version]
+    return bool(authors) and kinds.get(authors[0]) is ActorKind.HUMAN
+
+
 def refresh_join_map(ctx: AppContext, sql_of: SqlOf | None = None) -> None:
     """Mine every latest definition (ADR 0026: composed ones from their compiled SQL,
     `sql_of`), insert edges not in the map yet, and recompute each edge's `sources`
-    (definition ids whose SQL contains it) and `usage_count`. Annotations, who added and
-    who confirmed an edge are kept. Mining never fails a caller."""
+    (definition ids whose SQL contains it), `trusted_sources` (those a person stands
+    behind: `person_stands_behind`) and `usage_count`. Annotations, who added and who
+    confirmed an edge are kept. Mining never fails a caller."""
     sources: dict[str, set[str]] = {}
+    trusted: dict[str, set[str]] = {}
     mined: dict[str, JoinEdge] = {}
+    kinds = {u.name: u.kind for u in ctx.store.list_users()}
+    backing = human_backing(ctx)
     for definition in ctx.store.list_definitions():
         sql = sql_of(definition) if sql_of is not None and definition.composition else None
-        for edge in mined_edges(definition, sql):
+        edges = mined_edges(definition, sql)
+        behind = bool(edges) and person_stands_behind(ctx, definition, kinds, backing)
+        for edge in edges:
             sources.setdefault(edge.id, set()).add(definition.id)
+            if behind:
+                trusted.setdefault(edge.id, set()).add(definition.id)
             mined.setdefault(edge.id, edge)
     stored = {e.id: e for e in ctx.store.list_joins()}
     for id, edge in mined.items():
@@ -398,15 +450,22 @@ def refresh_join_map(ctx: AppContext, sql_of: SqlOf | None = None) -> None:
             stored[id] = edge
     for edge in stored.values():
         found = sorted(sources.get(edge.id, ()))
-        if edge.sources != found or edge.usage_count != len(found):
+        backed = sorted(trusted.get(edge.id, ()))
+        if (
+            edge.sources != found
+            or edge.usage_count != len(found)
+            or edge.trusted_sources != backed
+        ):
             ctx.store.upsert_join(
-                edge.model_copy(update={"sources": found, "usage_count": len(found)})
+                edge.model_copy(
+                    update={"sources": found, "trusted_sources": backed, "usage_count": len(found)}
+                )
             )
 
 
 def known_edges(ctx: AppContext) -> list[JoinEdge]:
     """Join-map edges that count as known for trust labels (ADR 0026): mined from a
-    definition, added by a person, or confirmed by a person."""
+    definition a person stands behind, added by a person, or confirmed by a person."""
     return [e for e in ctx.store.list_joins() if e.is_known()]
 
 

@@ -624,3 +624,125 @@ def test_each_imported_proposal_is_audited_when_submitted(
             if e.outcome.value == "ok" and e.extra.get("op") == "import_library"
         }
         assert applied <= audited  # ... and each has a success audit event
+
+
+# ── security review (ADR 0026): counts, laundering, confirmations ─────────────────────
+
+ACCTS = "SELECT account_id, name, region FROM accounts"
+DLS = "SELECT deal_id, account_id, amount FROM deals"
+BOGUS = (
+    "SELECT a.name, SUM(d.amount) AS amt FROM a JOIN d ON a.account_id = d.deal_id GROUP BY a.name"
+)
+BOGUS_EDGE = "accounts__deals__account_id=deal_id"
+
+
+def test_relationship_is_counted_only_for_proposers_who_may_run_exploratory_sql(
+    ctx: AppContext,
+) -> None:
+    from cteforge.domain.access import Tool
+
+    narrow = BOT.model_copy(update={"tools": frozenset({Tool.PROPOSE_JOIN})})
+    out = propose_join(
+        ctx,
+        narrow,
+        action="add",
+        left_table="accounts",
+        right_table="invoices",
+        keys=[{"left": "region", "right": "status"}],
+        relationship="one_to_one",
+    )
+    assert out.proposal.payload["evidence"] is None  # no row-count oracle
+    (issue,) = out.issues
+    assert issue.code is IssueCode.CHECKS_INCOMPLETE and "check_and_run" in issue.message
+    assert not out.auto_applied
+
+
+def test_relationship_is_not_counted_when_columns_could_not_be_confirmed(
+    ctx: AppContext, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from cteforge.domain.errors import WarehouseError
+
+    warehouse = ctx.warehouses.get("demo")
+    real = warehouse.column_types
+    ran: list[str] = []
+
+    def flaky(table: str) -> dict[str, str]:
+        if table == "invoices":
+            raise WarehouseError("boom")
+        return real(table)
+
+    monkeypatch.setattr(type(warehouse), "column_types", lambda self, t: flaky(t))
+    monkeypatch.setattr(type(warehouse), "run", lambda self, sql, limit: ran.append(sql))
+    out = propose_join(
+        ctx,
+        ALICE,
+        action="add",
+        left_table="deals",
+        right_table="invoices",
+        keys=[("deal_id", "deal_id")],
+        relationship="one_to_many",
+    )
+    assert ran == [] and out.proposal.payload["evidence"] is None
+    assert {i.code for i in out.issues} == {IssueCode.CHECKS_INCOMPLETE}
+    assert any("could not be confirmed" in i.message for i in out.issues)
+
+
+def _define(ctx: AppContext, user: User, id: str, sql: str):
+    return propose_definition(
+        ctx, user, sql=sql, dialect="duckdb", metadata={"id": id, "title": id}, annotations=[]
+    )
+
+
+def test_an_agent_cannot_make_a_join_known_through_mining(ctx: AppContext) -> None:
+    """launder.py: an agent's composed definition joining on a bogus key auto-applies in
+    open mode; mining must list the edge without making it known."""
+    _define(ctx, ALICE, "accts", ACCTS)
+    _define(ctx, ALICE, "dls", DLS)
+    out = propose_definition(
+        ctx,
+        BOT,
+        composition={"uses": {"a": {"id": "accts"}, "d": {"id": "dls"}}, "select": BOGUS},
+        dialect="duckdb",
+        metadata={"id": "bogus", "title": "bogus"},
+    )
+    assert out.auto_applied
+    edge = ctx.store.get_join(BOGUS_EDGE)
+    assert edge.sources == ["bogus"] and edge.trusted_sources == [] and not edge.is_known()
+    # The same through a plain SQL definition by an agent (it existed before ADR 0026).
+    flat = "SELECT a.name FROM accounts AS a JOIN deals AS d ON a.account_id = d.deal_id"
+    assert _define(ctx, BOT, "flat_bogus", flat).auto_applied
+    edge = ctx.store.get_join(BOGUS_EDGE)
+    assert edge.sources == ["bogus", "flat_bogus"] and not edge.is_known()
+    # A person verifying one of the definitions stands behind it: now the edge is known.
+    review.verify_definition(ctx, APPROVER, "flat_bogus", 1)
+    edge = ctx.store.get_join(BOGUS_EDGE)
+    assert edge.trusted_sources == ["flat_bogus"] and edge.is_known()
+
+
+def test_mined_edges_are_known_when_a_person_wrote_or_approved_the_definition(
+    ctx: AppContext,
+) -> None:
+    _region(ctx)  # alice, a person, auto-applied in open mode
+    assert ctx.store.get_join(AD).trusted_sources == ["region_bookings"]
+    set_team_mode(ctx, TeamMode.STRICT)
+    agent = _define(ctx, BOT, "bot_bookings", REGION_SQL)
+    review.approve(ctx, APPROVER, agent.proposal.id)  # a person approved the agent's work
+    assert ctx.store.get_join(AD).trusted_sources == ["bot_bookings", "region_bookings"]
+
+
+def test_changing_a_confirmed_edge_unconfirms_it_unless_a_person_approves(
+    ctx: AppContext,
+) -> None:
+    admin_agent = User(name="adminbot", role=UserRole.ADMIN, kind=ActorKind.AGENT)
+    _example(ctx, "booked_vs_collected")
+    set_team_mode(ctx, TeamMode.STRICT)
+    first = propose_join(ctx, BOT, action="annotate", id=DI, notes="v1")
+    review.approve(ctx, APPROVER, first.proposal.id)
+    assert ctx.store.get_join(DI).confirmed_by == "ann"
+    change = propose_join(ctx, BOT, action="annotate", id=DI, traps=["many invoices"])
+    review.approve(ctx, admin_agent, change.proposal.id)  # an agent approves a change
+    edge = ctx.store.get_join(DI)
+    assert edge.traps == ["many invoices"] and edge.confirmed_by is None
+    again = propose_join(ctx, BOT, action="annotate", id=DI, notes="v2")
+    review.approve(ctx, User(name="ben", role=UserRole.APPROVER), again.proposal.id)
+    assert ctx.store.get_join(DI).confirmed_by == "ben"

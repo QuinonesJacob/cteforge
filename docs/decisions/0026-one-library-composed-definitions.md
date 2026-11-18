@@ -64,7 +64,12 @@ Status: accepted · 2026-11-17 · implemented 2026-11-18 (see "as built" below) 
 
 ### Joins come from definitions; agents can annotate and add
 - The join map stays mined from every applied definition (including composed ones: their
-  compiled SQL is CTEs + a final select). Mined edges are **known** automatically.
+  compiled SQL is CTEs + a final select). A mined edge is **known** when a person stands
+  behind at least one definition it was mined from: authored by a human, approved by a
+  human (not auto-applied) or verified. An edge mined only from definitions agents wrote
+  and that auto-applied is listed (with its sources) but not known until a person
+  approves, verifies or confirms (amended 2026-11-18, security review: otherwise an agent
+  could raise join trust through mining).
 - `list_joins` (read-only) returns per edge: tables, keys, the definitions it came from,
   `relationship`, `traps`, notes, and whether a person confirmed it.
 - `propose_join` (write) takes `action`:
@@ -149,8 +154,8 @@ select's.
 mined from; recomputed with `usage_count` after every apply, composed definitions mined
 from their compiled SQL), `added_by` / `added_by_kind`, `confirmed_by` (a PERSON who
 approved a proposal on it; auto-apply and admin agents never confirm) and `evidence` (the
-last relationship check). Known (counts for trust) = mined, added by a person, or
-confirmed by a person. `list_joins` returns `JoinCard` (edge + `known`, `confirmed` — a
+last relationship check). Known (counts for trust) = mined from a definition a person
+stands behind (`trusted_sources`), added by a person, or confirmed by a person. `list_joins` returns `JoinCard` (edge + `known`, `confirmed` — a
 person approved it or a source definition is verified — and `pending_proposals` for
 callers holding list_proposals) and filters `table`, `known_only`, `definition`. A
 confirmed edge is treated like a verified definition: changes to it wait for a person or
@@ -161,6 +166,26 @@ duplicate keys is a `relationship_contradicted` ERROR (data may be stricter than
 never looser); a failed count is `checks_incomplete` with the error class only. The
 default `action` is `annotate`; `annotate` never changes the join type (only a library
 import does, from a file).
+
+**Security review (2026-11-18).**
+- *Relationship counts are not an oracle.* The relationship is counted only when the
+  claim is new or changed, the proposer holds `check_and_run` (counting rows of named
+  tables is exploratory SQL) and `join_checks` positively confirmed both tables and every
+  key column (no issue at all; a `column_types` failure means no count). Otherwise the
+  proposal carries a `checks_incomplete` warning saying why, no evidence, and waits for a
+  reviewer.
+- *Mining does not launder agent joins.* `JoinEdge.trusted_sources` (recomputed by every
+  mining, `_library.person_stands_behind`): the source definitions whose latest version
+  is verified, was authored by a human (the approved proposal's `author_kind`, else the
+  users table; unknown authors are not people) or approved by a human (not
+  auto-applied). Only those make a mined edge known; `sources` still lists every
+  definition. Verifying a definition re-mines the map. The join map is re-mined once per
+  database for this rule (`join_map_version` 3), so edges stored under the earlier rule
+  are recomputed. This also closes the same route for plain SQL definitions, which
+  existed before ADR 0026.
+- *A confirmation covers what the person saw.* Approving a change to a confirmed edge's
+  relationship, traps or notes keeps it confirmed only when a person approves (who then
+  becomes `confirmed_by`); an admin agent's approval clears `confirmed_by`.
 
 **Store migration (schema 3)** in `Store.init_schema`, one transaction: each recipe's
 latest version → a composed definition v1 (same id when free and not a former id, else

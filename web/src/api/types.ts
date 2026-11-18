@@ -581,6 +581,9 @@ export interface JoinEdge {
   notes: string;
   /** Definition ids it was mined from. */
   sources: string[];
+  /** The subset of `sources` a person stands behind (authored/approved by a human, or
+   * verified): only these make a mined edge known (ADR 0026 security review). */
+  trusted_sources: string[];
   added_by?: string | null;
   added_by_kind?: ActorKind | null;
   /** A person who approved a proposal on it. */

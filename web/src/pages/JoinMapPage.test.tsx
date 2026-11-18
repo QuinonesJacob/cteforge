@@ -21,6 +21,7 @@ const edge: JoinCard = {
   traps: ["fan-out: a deal has many invoices"],
   notes: "",
   sources: ["realization_rate"],
+  trusted_sources: ["realization_rate"],
   evidence: {
     claimed: "one_to_many",
     observed: "one_to_many",
@@ -41,6 +42,7 @@ const added: JoinCard = {
   relationship: null,
   traps: [],
   sources: [],
+  trusted_sources: [],
   evidence: null,
   added_by: "bot",
   added_by_kind: "agent",

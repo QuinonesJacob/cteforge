@@ -65,6 +65,11 @@ def test_list_joins_by_table_and_known(ctx: AppContext) -> None:
     assert catalog.list_joins(ctx, AGENT, table="invoices") == []
     assert catalog.list_joins(ctx, AGENT, known_only=True) == []
     ctx.store.upsert_join(_edge(sources=["realization_rate"], usage_count=1))
+    # Mined only from definitions no person stands behind: listed, not known (ADR 0026).
+    assert catalog.list_joins(ctx, AGENT, known_only=True) == []
+    ctx.store.upsert_join(
+        _edge(sources=["realization_rate"], trusted_sources=["realization_rate"], usage_count=1)
+    )
     (mined,) = catalog.list_joins(ctx, AGENT, known_only=True)
     # Mined from a verified definition: known and confirmed.
     assert mined.known and mined.confirmed and mined.sources == ["realization_rate"]

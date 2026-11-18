@@ -57,8 +57,10 @@ Export to WrenAI/dbt formats is a possible later feature, not a goal. See ADR 00
   their compiled SQL): tables, keys, join type, the definitions it was mined from
   (`sources`), and what mining cannot see — `relationship`, `traps`, `notes` — added
   through proposals (`propose_join` annotate / add). An edge is **known** (counts for trust
-  labels) when it is mined from a definition, added by a person or confirmed by a person;
-  an edge an agent adds never auto-applies and is not known until a person approves it.
+  labels) when it is mined from a definition a person stands behind (authored or approved
+  by a human, or verified), added by a person or confirmed by a person; an edge an agent
+  adds never auto-applies, and neither it nor one mined only from agents' auto-applied
+  definitions is known until a person approves, verifies or confirms it.
   **Confirmed**: a person approved it, or it was mined from a verified definition. A
   reference for exploration, not a restriction.
 - **Trust label** — attached to every result (§8).
@@ -172,7 +174,10 @@ Result labels, best to worst: `verified` · `built_from_verified_parts` · `llm_
   the label (verifying the whole does not verify the parts). A floating part with no
   usable version makes it unusable (`part_not_usable`); a pinned part that was superseded
   is shown (`part_superseded`).
-- Known joins (§3): mined from a definition, added by a person, or confirmed by a person.
+- Known joins (§3): mined from a definition a person stands behind (authored by a human,
+  approved by a human without auto-apply, or verified), added by a person, or confirmed by
+  a person (changing a confirmed edge's annotations keeps it confirmed only if a person
+  approves).
   An agent cannot raise labels by declaring joins.
 - Any `llm_annotated` definition caps the label at `llm_annotated`.
 - Raw SQL (`check_and_run`) → `new_logic_on_known_joins` if every join matches the join map,

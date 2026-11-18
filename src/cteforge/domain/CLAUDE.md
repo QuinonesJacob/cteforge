@@ -10,8 +10,9 @@ cteforge. Project root: ../../../CLAUDE.md
   `fixed` alias → var → value), Annotation, VariableSpec, VariableSlot (one place a
   variable fills; M1 files migrate on read), DefinitionVersionInfo, DefinitionRef,
   FormerId (a renamed definition's earlier id → its current id; ADR 0024), JoinEdge
-  (relationship, traps, notes, `sources`, `added_by(_kind)`, `confirmed_by`, `evidence`;
-  `is_known()`: mined, added by a person or confirmed by a person; a legacy `state` is
+  (relationship, traps, notes, `sources`, `trusted_sources`, `added_by(_kind)`,
+  `confirmed_by`, `evidence`; `is_known()`: mined from a definition a person stands behind
+  (`trusted_sources`), added by a person or confirmed by a person; a legacy `state` is
   dropped on read), JoinKey, RelationshipEvidence + SideCount, JOIN_TYPES, RELATIONSHIPS,
   DefinitionState, TrustLabel (+ TRUST_ORDER), TeamMode.
 - `variables.py` — VariableType enum and the strict input model + validation per type.

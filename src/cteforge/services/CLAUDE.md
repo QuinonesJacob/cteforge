@@ -78,8 +78,10 @@ Support modules (shared by use-cases; not use-cases themselves):
   sql_of)`: mines every latest definition, inserts new edges, recomputes `sources` and
   usage_count, keeps annotations; joins between base tables, also through CTEs/derived
   tables whose key columns pass through unchanged from one base table (parsing's JoinInfo
-  `*_base_table`/`base_keys`); `known_edges` (ADR 0026: mined, added or confirmed by a
-  person); `same_table`, `matching_edge`, `final_select_joins` (raw-table joins of a final
+  `*_base_table`/`base_keys`); `trusted_sources` via `person_stands_behind` /
+  `human_backing` (verified, or authored / approved by a human, not auto-applied);
+  `known_edges` (ADR 0026: mined from a definition a person stands behind, added or
+  confirmed by a person); `same_table`, `matching_edge`, `final_select_joins` (raw-table joins of a final
   SELECT vs known edges); `join_cards(ctx, user, edges)` → JoinCard); definition lookup by id
   (ADR 0024): `get_definition` / `definition_not_found` — the ONE place a missing id
   becomes NotFoundError, a former id naming the current one ("Definition 'a' was renamed
@@ -102,7 +104,9 @@ Support modules (shared by use-cases; not use-cases themselves):
   warehouse); `require_exploratory(user, raw)` (the ADR 0027 raw-table gate).
 - `_upgrade.py` — run by `open_context` once per open: audits the store's schema-3
   migration note (admin event, op `migrate_adr_0026`, actor `cteforge`, fail closed, then
-  cleared) and re-mines the join map once per database (setting `join_map_version`).
+  cleared) and re-mines the join map once per mining-rule version (setting
+  `join_map_version`, 3: trusted_sources). `review.verify_definition` re-mines too (a
+  verified definition's joins become known).
 - `_meaning.py` — meaning search (ADR 0023; no permission checks, no audit):
   `document_for(definition, former_ids=())` (domain search document + `_library.mined_edges`;
   `former_ids_of(ctx)` maps current id → former ids);
@@ -127,8 +131,11 @@ Support modules (shared by use-cases; not use-cases themselves):
   are checked on the default profile (`join_checks`: tables and key columns exist;
   `relationship_evidence`: COUNT(*) vs COUNT(DISTINCT key) per side through
   compose.relationship, `relationship_contradicted` error, evidence in the payload and on
-  the edge) and carry `payload.base_join` (stale → StaleVersionError); an agent's `add`
-  never auto-applies; joins are never verified. A composed definition proposal is
+  the edge — only for a new or changed claim, a proposer holding check_and_run, and tables
+  and key columns join_checks positively confirmed; else a `checks_incomplete` warning
+  and no counts) and carry `payload.base_join` (stale → StaleVersionError); an agent's
+  `add` never auto-applies; joins are never verified; approving a change to a confirmed
+  edge's relationship / traps / notes keeps it confirmed only for a human approver. A composed definition proposal is
   re-checked for cycles when applied. `ensure_read_only` (called first by `checked_definition`)
   refuses definition SQL that is not one read-only SELECT/UNION (compose.checks.
   ensure_query) with PolicyError + a `not_read_only` issue, before any check runs.

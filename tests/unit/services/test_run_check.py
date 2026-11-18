@@ -50,7 +50,8 @@ def _edge() -> JoinEdge:
         left_table="deals",
         right_table="accounts",
         keys=[JoinKey(left="account_id", right="account_id")],
-        sources=["some_definition"],  # mined: known (ADR 0026)
+        sources=["some_definition"],  # mined from a definition a person stands behind (ADR 0026)
+        trusted_sources=["some_definition"],
     )
 
 
@@ -179,7 +180,7 @@ def test_known_join_still_connects_its_tables(ctx: AppContext) -> None:
 
 def test_agent_added_join_edge_is_not_known_until_a_person_confirms(ctx: AppContext) -> None:
     agent_edge = _edge().model_copy(
-        update={"sources": [], "added_by": "bot", "added_by_kind": "agent"}
+        update={"sources": [], "trusted_sources": [], "added_by": "bot", "added_by_kind": "agent"}
     )
     ctx.store.upsert_join(agent_edge)
     assert check_and_run(ctx, AGENT, JOIN_SQL).label is TrustLabel.EXPLORATORY
@@ -219,7 +220,8 @@ def _invoice_edge() -> JoinEdge:
         left_table="deals",
         right_table="invoices",
         keys=[JoinKey(left="deal_id", right="deal_id")],
-        sources=["some_definition"],  # mined: known (ADR 0026)
+        sources=["some_definition"],  # mined from a definition a person stands behind (ADR 0026)
+        trusted_sources=["some_definition"],
     )
 
 
