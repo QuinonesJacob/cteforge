@@ -77,7 +77,7 @@ def main() -> None:
         for table, columns in TABLES.items():
             con.execute(sql.SQL("CREATE TABLE {} (" + columns + ")").format(sql.Identifier(table)))
             rows = source.execute(f"SELECT * FROM {table}").fetchall()  # constant table names
-            width = len(columns.split(","))
+            width = len(rows[0])  # not columns.split(","): NUMERIC(12, 2) has a comma
             insert = sql.SQL("INSERT INTO {} VALUES ({})").format(
                 sql.Identifier(table), sql.SQL(", ").join(sql.Placeholder() * width)
             )
