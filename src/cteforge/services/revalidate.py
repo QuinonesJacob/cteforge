@@ -17,9 +17,10 @@ Drift is reported, never acted on: no state, version or proposal changes (DESIGN
 A definition is `ok` when it has no `drift` issue. Without a usable profile (none
 configured, unknown name) it is `checked=False` with a `checks_incomplete` warning.
 
-Permissions: re-validating named `ids` needs Action.RUN (viewer: it only reads, like a
-run). Re-validating the whole library (`ids=None`) runs every definition's query twice on
-the warehouses, so it needs an approver or admin (the APPROVE role minimum). Audit: one
+Permissions (ADR 0027): re-validating named `ids` needs the compile_and_run tool (it only
+reads, like a run). Re-validating the whole library (`ids=None`) runs every definition's
+query twice on the warehouses, so it needs review_proposal with review_all (built-in
+approver and admin). Audit: one
 `revalidate` event per call (fail closed), listing the definitions checked and those that
 drifted; never SQL text. Refusals and unknown ids are recorded by `_audit.audit_failures`.
 Returns `cards.DefinitionDrift` per definition.
@@ -30,6 +31,7 @@ Cost: like import, each definition's query runs twice (original vs template), ca
 
 from __future__ import annotations
 
+from cteforge.domain.access import Tool
 from cteforge.domain.audit import AuditKind
 from cteforge.domain.errors import (
     CteforgeError,
@@ -45,7 +47,6 @@ from cteforge.services.auth import permitted, require
 from cteforge.services.cards import DefinitionDrift
 from cteforge.services.context import AppContext
 from cteforge.services.import_query import import_query
-from cteforge.trust.approval import Action
 
 
 def _drift(severity: Severity, message: str, variable: str | None = None) -> Issue:
@@ -119,12 +120,16 @@ def revalidate(ctx: AppContext, user: User, ids: list[str] | None = None) -> lis
     Raises NotFoundError for an unknown id. Never changes anything."""
     scope = "all" if ids is None else "ids"
     with _audit.audit_failures(ctx, user, AuditKind.REVALIDATE, extra={"scope": scope}):
-        require(user, Action.RUN)
-        if ids is None and not permitted(user, Action.APPROVE):
-            raise PermissionDeniedError(
-                f"User '{user.name}' may not re-validate the whole library (approver or "
-                "admin only); pass the ids to check."
-            )
+        if ids is None:
+            # Library-wide: a reviewer's job (review_proposal with review_all: can_approve
+            # with no target needs both).
+            if not permitted(user, Tool.REVIEW_PROPOSAL):
+                raise PermissionDeniedError(
+                    f"User '{user.name}' may not re-validate the whole library (reviewers "
+                    "of everything only, e.g. approvers); pass the ids to check."
+                )
+        else:
+            require(user, Tool.COMPILE_AND_RUN)
         if ids is None:
             definitions = ctx.store.list_definitions()
         else:

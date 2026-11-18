@@ -9,7 +9,7 @@ an issue says why:
 - the schema lookup fails → `checks_incomplete` (warning; error class only, no driver text);
 - a table the warehouse does not know → `type_unknown` (warning).
 
-Needs Action.DESCRIBE (viewer): parsing only reads table schemas, it changes nothing. Audit
+Needs Tool.PARSE_QUERY (a build tool; ADR 0027): parsing only reads table schemas. Audit
 is best-effort (`fail_closed=False`) and keeps only the SQL's SHA-256. The schema lookup
 reuses the import checks engine (`import_query.fetch_schema`), which DESIGN/services
 CLAUDE.md name as the engine behind parse_query.
@@ -17,6 +17,7 @@ CLAUDE.md name as the engine behind parse_query.
 
 from __future__ import annotations
 
+from cteforge.domain.access import Tool
 from cteforge.domain.audit import AuditKind
 from cteforge.domain.dialects import Dialect
 from cteforge.domain.errors import (
@@ -31,7 +32,6 @@ from cteforge.services.auth import require
 from cteforge.services.cards import ParseReport, parse_report
 from cteforge.services.context import AppContext, default_connection_issues
 from cteforge.services.import_query import fetch_schema
-from cteforge.trust.approval import Action
 
 
 def _issue(code: IssueCode, message: str) -> Issue:
@@ -115,7 +115,7 @@ def parse_query(
     for SQL that does not parse, NotFoundError for an unknown profile name, PolicyError for
     an unknown dialect or when no dialect can be resolved."""
     with _audit.audit_failures(ctx, user, AuditKind.PARSE_QUERY, sql=sql):
-        require(user, Action.DESCRIBE)
+        require(user, Tool.PARSE_QUERY)
         dialect = _library.resolve_dialect(ctx, dialect, profile)
     used: str | None = profile
     fields = {"sql": sql, "extra": {"dialect": dialect.value, "profile": profile}}

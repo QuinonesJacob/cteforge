@@ -1,8 +1,12 @@
-"""MCP server (ADR 0018, DESIGN §6): twelve tools, each one service call.
+"""MCP server (ADR 0018, 0027, DESIGN §6): seventeen tools, each one service call.
 
 - `build_server(ctx, resolve_user)` registers the tools on a FastMCP server. Every call
   resolves the acting user (`resolve_user()`), calls exactly one service function and
   returns its card model (cards.py) as structured output.
+- Tool access (ADR 0027): `tools/list` shows only the tools the caller's token (or local
+  user) allows (`MCP_TOOL_ACCESS`; services.auth.user_tools). Calling any other tool is
+  refused with a PermissionDeniedError tool error and audited (`auth.refuse_tool`), before
+  the tool runs; the services check the same tools again.
 - Errors: a CteforgeError becomes a tool error whose text is "<ErrorType>: message" plus,
   when the error carries any, its issues as JSON; `structuredContent` holds the same as
   {"error": {"type", "message", "issues"}} (the HTTP API's error shape). Invalid arguments
@@ -11,7 +15,8 @@
 - Service calls block (store, warehouse), so they run in a worker thread; the thread sees
   the caller's contextvars, and `current_request()` returns the HTTP request carrying the
   MCP message (None over stdio).
-- `run_stdio()`: the local server behind `cteforge mcp`, acting as CTEFORGE_USER.
+- `run_stdio()`: the local server behind `cteforge mcp`, acting as CTEFORGE_TOKEN's user
+  and tools when set, else CTEFORGE_USER with its role's defaults (`auth.stdio_user`).
 - `http_app(server)`: the streamable-HTTP ASGI app the API mounts (see its docstring for
   the lifespan requirement).
 """
@@ -22,28 +27,33 @@ import contextvars
 import json
 import logging
 from collections.abc import Callable
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 import anyio.to_thread
 from mcp.server.fastmcp import Context, FastMCP
 from mcp.server.fastmcp.exceptions import ToolError
 from mcp.server.transport_security import TransportSecuritySettings
 from mcp.types import CallToolResult, TextContent, ToolAnnotations
-from pydantic import Field, ValidationError
+from mcp.types import Tool as MCPTool
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from starlette.applications import Starlette
 
+from cteforge.domain.access import Tool, ToolMode
 from cteforge.domain.dialects import Dialect
-from cteforge.domain.errors import CteforgeError
+from cteforge.domain.errors import CteforgeError, PermissionDeniedError, PolicyError
 from cteforge.domain.models import Annotation, DefinitionRef, JoinEdge, JoinKey, Recipe
-from cteforge.domain.users import User
+from cteforge.domain.proposals import ProposalStatus
+from cteforge.domain.users import ActorKind, User
 from cteforge.mcp import descriptions as text
 from cteforge.services import (
+    admin,
     auth,
     catalog,
     describe,
     parse_query,
     propose,
     propose_other,
+    review,
     search,
     search_index,
 )
@@ -52,9 +62,13 @@ from cteforge.services.cards import (
     DefinitionCard,
     ParseReport,
     ProposalOutcome,
+    ProposalView,
+    RoleCard,
     RunOutcome,
     SearchHit,
     TableCard,
+    TokenCard,
+    UserView,
     json_safe,
 )
 from cteforge.services.context import AppConfig, AppContext, open_context
@@ -77,7 +91,25 @@ TOOL_NAMES = (
     "list_recipes",
     "list_joins",
     "describe_tables",
+    "list_proposals",
+    "review_proposal",
+    "list_users",
+    "manage_user",
+    "manage_role",
 )
+
+# Which of the caller's tools (domain/access.py) show each MCP tool (ADR 0027). Every MCP
+# tool is the operation of the same name; review_proposal also shows for the verify tool
+# (its "verify" action).
+MCP_TOOL_ACCESS: dict[str, frozenset[Tool]] = {
+    name: frozenset({Tool(name)}) for name in TOOL_NAMES if name != "review_proposal"
+} | {"review_proposal": frozenset({Tool.REVIEW_PROPOSAL, Tool.VERIFY})}
+
+
+def visible_tools(tools: frozenset[Tool]) -> frozenset[str]:
+    """The MCP tool names a caller holding `tools` may see and call."""
+    return frozenset(name for name, needs in MCP_TOOL_ACCESS.items() if needs & tools)
+
 
 _REQUEST: contextvars.ContextVar[Any | None] = contextvars.ContextVar(
     "cteforge_mcp_request", default=None
@@ -126,9 +158,60 @@ def error_result(error: BaseException) -> CallToolResult:
 
 class CteforgeMCP(FastMCP):
     """FastMCP that turns tool failures into `error_result` (FastMCP itself would prefix
-    "Error executing tool ..." and pass any exception text through)."""
+    "Error executing tool ..." and pass any exception text through), shows each caller
+    only the tools it may use, and refuses (and audits) calls to the others."""
+
+    cteforge_ctx: AppContext | None = None
+    cteforge_resolve_user: ResolveUser | None = None
+
+    async def _as_caller[T](self, work: Callable[[User], T]) -> T:
+        """Resolve the caller (in a worker thread, with the HTTP request visible to
+        `current_request()`) and run `work` with it there."""
+        resolve = self.cteforge_resolve_user
+        if resolve is None:
+            raise RuntimeError("CteforgeMCP has no resolve_user")
+        request = _http_request(self.get_context())
+
+        def run() -> T:
+            token = _REQUEST.set(request)
+            try:
+                return work(resolve())
+            finally:
+                _REQUEST.reset(token)
+
+        return await anyio.to_thread.run_sync(run)
+
+    async def list_tools(self) -> list[MCPTool]:
+        tools = await super().list_tools()
+        try:
+            visible = await self._as_caller(lambda user: visible_tools(auth.user_tools(user)))
+        except CteforgeError:
+            return []  # No (valid) caller: show nothing.
+        except Exception:  # noqa: BLE001 - never leak details through tools/list
+            logger.error("Unexpected error resolving the MCP caller", exc_info=True)
+            return []
+        return [t for t in tools if t.name in visible]
+
+    async def _refusal(self, name: str) -> BaseException | None:
+        ctx = self.cteforge_ctx
+
+        def check(user: User) -> BaseException | None:
+            if name in visible_tools(auth.user_tools(user)):
+                return None
+            if ctx is None:
+                return PermissionDeniedError(f"Tool '{name}' is not available")
+            return auth.refuse_tool(ctx, user, name)
+
+        try:
+            return await self._as_caller(check)
+        except Exception as exc:  # noqa: BLE001 - reported by error_result, never raw
+            return exc
 
     async def call_tool(self, name: str, arguments: dict[str, Any]) -> Any:
+        if name in MCP_TOOL_ACCESS:
+            refusal = await self._refusal(name)
+            if refusal is not None:
+                return error_result(refusal)
         try:
             return await super().call_tool(name, arguments)
         except ToolError as exc:
@@ -168,6 +251,54 @@ _RUN = ToolAnnotations(readOnlyHint=True, idempotentHint=False, openWorldHint=Fa
 _WRITE = ToolAnnotations(
     readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=False
 )
+# Writes that can remove or lock out (reject, deactivate, revoke, delete a role).
+_DESTRUCTIVE = ToolAnnotations(
+    readOnlyHint=False, destructiveHint=True, idempotentHint=False, openWorldHint=False
+)
+
+_CARD = ConfigDict(extra="forbid", frozen=True)
+
+
+class ReviewResult(BaseModel):
+    """What `review_proposal` changed: the approval outcome, the rejected proposal, or
+    the verified definition (one of them)."""
+
+    model_config = _CARD
+
+    action: str
+    outcome: ProposalOutcome | None = None
+    proposal: ProposalView | None = None
+    definition: DefinitionCard | None = None
+
+
+class AccessOverview(BaseModel):
+    """`list_users`: users (with token metadata, never values) and roles."""
+
+    model_config = _CARD
+
+    users: list[UserView]
+    roles: list[RoleCard]
+
+
+class ManageUserResult(BaseModel):
+    """`manage_user`: the user as it is now, and the token changed (set_tools, revoke)."""
+
+    model_config = _CARD
+
+    action: str
+    user: UserView | None = None
+    token: TokenCard | None = None
+
+
+class ManageRoleResult(BaseModel):
+    """`manage_role`: the role as it is now (None after delete)."""
+
+    model_config = _CARD
+
+    action: str
+    role: RoleCard | None = None
+    deleted: bool = False
+
 
 # Shared parameter docs.
 _Question = Annotated[
@@ -215,10 +346,11 @@ def build_server(
     *,
     transport_security: TransportSecuritySettings | None = None,
 ) -> FastMCP:
-    """The cteforge MCP server with its twelve tools (DESIGN §6). No approve/verify tool
-    exists (ADR 0007). `resolve_user` is called once per tool call, in the calling
-    request's context. `transport_security`: Host/Origin checks for streamable HTTP
-    (None = the SDK default: DNS-rebinding protection allowing localhost only)."""
+    """The cteforge MCP server with its seventeen tools (DESIGN §6), each shown only to
+    callers allowed to use it (ADR 0027). `resolve_user` is called per tool call (and per
+    tools/list), in the calling request's context. `transport_security`: Host/Origin
+    checks for streamable HTTP (None = the SDK default: DNS-rebinding protection allowing
+    localhost only)."""
     server = CteforgeMCP(
         name=text.SERVER_NAME,
         instructions=text.INSTRUCTIONS,
@@ -226,6 +358,8 @@ def build_server(
         transport_security=transport_security,
         warn_on_duplicate_tools=False,
     )
+    server.cteforge_ctx = ctx
+    server.cteforge_resolve_user = resolve_user
 
     async def search_tool(
         query: Annotated[str, Field(description="Plain words from the user's question.")],
@@ -495,6 +629,177 @@ def build_server(
             lambda user: catalog.describe_tables(ctx, user, tables, profile=profile),
         )
 
+    async def list_proposals_tool(
+        mcp_context: Context,
+        status: Annotated[
+            ProposalStatus | None,
+            Field(description="pending (default), approved, rejected or withdrawn."),
+        ] = ProposalStatus.PENDING,
+    ) -> list[ProposalView]:
+        return await _call(
+            mcp_context,
+            resolve_user,
+            lambda user: review.list_proposals(ctx, user, status),
+        )
+
+    async def review_proposal_tool(
+        action: Annotated[
+            Literal["approve", "reject", "verify"],
+            Field(description="approve | reject | verify"),
+        ],
+        mcp_context: Context,
+        id: Annotated[
+            str | None, Field(description="Proposal id (approve, reject, verify a proposal).")
+        ] = None,
+        comment: Annotated[
+            str, Field(description="Why (required to reject); kept on the proposal.")
+        ] = "",
+        definition_id: Annotated[
+            str | None, Field(description="verify only: an applied definition's id.")
+        ] = None,
+        version: Annotated[
+            int | None, Field(ge=1, description="verify only: its latest version.")
+        ] = None,
+    ) -> ReviewResult:
+        def work(user: User) -> ReviewResult:
+            if action == "verify" and id is None:
+                if definition_id is None or version is None:
+                    raise PolicyError("verify needs `id`, or `definition_id` and `version`")
+                card = review.verify_definition(ctx, user, definition_id, version)
+                return ReviewResult(action=action, definition=card)
+            if id is None:
+                raise PolicyError(f"{action} needs the proposal `id`")
+            if action == "reject":
+                return ReviewResult(action=action, proposal=review.reject(ctx, user, id, comment))
+            outcome = review.approve(ctx, user, id, verify=action == "verify", comment=comment)
+            return ReviewResult(action=action, outcome=outcome)
+
+        return await _call(mcp_context, resolve_user, work)
+
+    async def list_users_tool(mcp_context: Context) -> AccessOverview:
+        return await _call(
+            mcp_context,
+            resolve_user,
+            lambda user: AccessOverview(
+                users=admin.list_users(ctx, user), roles=admin.list_roles(ctx, user)
+            ),
+        )
+
+    async def manage_user_tool(
+        action: Annotated[
+            Literal["create", "set_role", "set_tools", "deactivate", "activate", "revoke_token"],
+            Field(
+                description="create | set_role | set_tools | deactivate | activate | revoke_token"
+            ),
+        ],
+        name: Annotated[str, Field(description="The user's login name.")],
+        mcp_context: Context,
+        role: Annotated[str | None, Field(description="create, set_role: a role name.")] = None,
+        kind: Annotated[ActorKind, Field(description="create: human or agent.")] = ActorKind.AGENT,
+        token_id: Annotated[
+            str | None, Field(description="set_tools, revoke_token: the token's id.")
+        ] = None,
+        tool_mode: Annotated[
+            ToolMode | None, Field(description="set_tools: follow_role or only.")
+        ] = None,
+        include: Annotated[
+            list[Tool] | None, Field(description="set_tools: tools to add / the only tools.")
+        ] = None,
+        exclude: Annotated[
+            list[Tool] | None, Field(description="set_tools (follow_role): tools to remove.")
+        ] = None,
+    ) -> ManageUserResult:
+        def view(user: User) -> UserView:
+            return UserView(
+                name=user.name,
+                role=user.role,
+                kind=user.kind,
+                active=user.active,
+                created_at=user.created_at,
+            )
+
+        def work(actor: User) -> ManageUserResult:
+            if action == "create":
+                if role is None:
+                    raise PolicyError("create needs a `role`")
+                created, _ = admin.create_user(ctx, actor, name, role, kind, issue_token=False)
+                return ManageUserResult(action=action, user=view(created))
+            if action == "set_role":
+                if role is None:
+                    raise PolicyError("set_role needs a `role`")
+                return ManageUserResult(
+                    action=action, user=admin.update_user(ctx, actor, name, role=role)
+                )
+            if action in ("deactivate", "activate"):
+                updated = admin.update_user(ctx, actor, name, active=action == "activate")
+                return ManageUserResult(action=action, user=updated)
+            if token_id is None:
+                raise PolicyError(f"{action} needs a `token_id`")
+            if action == "revoke_token":
+                card = admin.revoke_token(ctx, actor, token_id, name)
+                return ManageUserResult(action=action, token=card)
+            if tool_mode is None:
+                raise PolicyError("set_tools needs a `tool_mode`")
+            card = admin.set_token_tools(
+                ctx,
+                actor,
+                token_id,
+                name,
+                tool_mode=tool_mode,
+                include=include or [],
+                exclude=exclude or [],
+            )
+            return ManageUserResult(action=action, token=card)
+
+        return await _call(mcp_context, resolve_user, work)
+
+    async def manage_role_tool(
+        action: Annotated[
+            Literal["create", "edit", "delete"], Field(description="create | edit | delete")
+        ],
+        name: Annotated[str, Field(description="The role's name (lower_snake_case).")],
+        mcp_context: Context,
+        description: Annotated[str | None, Field(description="What the role is for.")] = None,
+        allowed: Annotated[
+            list[Tool] | None, Field(description="Every tool the role may ever use.")
+        ] = None,
+        defaults: Annotated[
+            list[Tool] | None,
+            Field(description="Tools a new token starts with (subset of allowed)."),
+        ] = None,
+        review_all: Annotated[
+            bool | None,
+            Field(description="Approve any proposal (else only what the user owns)."),
+        ] = None,
+    ) -> ManageRoleResult:
+        def work(actor: User) -> ManageRoleResult:
+            if action == "create":
+                card = admin.create_role(
+                    ctx,
+                    actor,
+                    name,
+                    description=description or "",
+                    allowed=allowed or [],
+                    defaults=defaults,
+                    review_all=bool(review_all),
+                )
+                return ManageRoleResult(action=action, role=card)
+            if action == "edit":
+                card = admin.update_role(
+                    ctx,
+                    actor,
+                    name,
+                    description=description,
+                    allowed=allowed,
+                    defaults=defaults,
+                    review_all=review_all,
+                )
+                return ManageRoleResult(action=action, role=card)
+            admin.delete_role(ctx, actor, name)
+            return ManageRoleResult(action=action, deleted=True)
+
+        return await _call(mcp_context, resolve_user, work)
+
     tools: list[tuple[Callable[..., Any], str, str, str, ToolAnnotations]] = [
         (search_tool, "search", "Search the library", text.SEARCH, _READ),
         (get_definition_tool, "get_definition", "Get a definition", text.GET_DEFINITION, _READ),
@@ -532,6 +837,17 @@ def build_server(
             text.DESCRIBE_TABLES,
             _READ,
         ),
+        (list_proposals_tool, "list_proposals", "List proposals", text.LIST_PROPOSALS, _READ),
+        (
+            review_proposal_tool,
+            "review_proposal",
+            "Approve, reject or verify",
+            text.REVIEW_PROPOSAL,
+            _DESTRUCTIVE,
+        ),
+        (list_users_tool, "list_users", "List users and roles", text.LIST_USERS, _READ),
+        (manage_user_tool, "manage_user", "Manage a user", text.MANAGE_USER, _DESTRUCTIVE),
+        (manage_role_tool, "manage_role", "Manage a role", text.MANAGE_ROLE, _DESTRUCTIVE),
     ]
     for fn, name, title, description, hints in tools:
         server.add_tool(
@@ -573,21 +889,22 @@ def http_app(server: FastMCP, *, path: str = "/") -> Starlette:
 
 
 def run_stdio() -> None:
-    """`cteforge mcp`: serve over stdio as the local user CTEFORGE_USER (ADR 0018), which
-    must already exist (`services.auth.local_user(create=False)`): an empty store is
-    refused instead of turning the MCP client into its first human admin.
+    """`cteforge mcp`: serve over stdio (ADR 0018, 0027) as CTEFORGE_TOKEN's user with
+    that token's tools when set, else as CTEFORGE_USER with its role's default tools
+    (`services.auth.stdio_user`). The user must already exist: an empty store is refused
+    instead of turning the MCP client into its first human admin.
 
     Opens the context from the environment and resolves the user once at start, so a bad
-    CTEFORGE_USER fails before serving (PermissionDeniedError propagates to the caller);
-    each call then re-reads the user, so role changes apply at once."""
+    token or CTEFORGE_USER fails before serving (PermissionDeniedError propagates to the
+    caller); each call then re-resolves, so revocation and role changes apply at once."""
     ctx = open_context(AppConfig.from_env())
     try:
         # Never creates the user: whoever is on the other end of stdio is an MCP client,
         # usually an agent, and must not become the first human admin of an empty store.
-        auth.local_user(ctx, create=False)
+        auth.stdio_user(ctx)
         # Meaning search (ADR 0023): load the model in the background, never in a call.
         search_index.start_background(ctx)
-        server = build_server(ctx, lambda: auth.local_user(ctx, create=False))
+        server = build_server(ctx, lambda: auth.stdio_user(ctx))
         server.run("stdio")
     finally:
         ctx.close()

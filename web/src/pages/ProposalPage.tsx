@@ -14,7 +14,7 @@ import { RecipeSummary } from "../components/RecipeSummary";
 import { ReferencesList } from "../components/ReferencesList";
 import { SqlViewer } from "../components/SqlViewer";
 import { formatDateTime } from "../lib/format";
-import { canApprove, DEFINITION_KINDS, roleAtLeast, type DecideTarget } from "../lib/roles";
+import { can, canApprove, DEFINITION_KINDS, type DecideTarget } from "../lib/roles";
 import { statusTone } from "../lib/trust";
 import { useAuth } from "../state/AuthContext";
 import { useAsync } from "../state/useAsync";
@@ -30,7 +30,7 @@ export function ProposalPage() {
     data?.status === "pending" &&
     DEFINITION_KINDS.includes(data.kind) &&
     user !== null &&
-    (canApprove(user) ? user.kind === "agent" : roleAtLeast(user.role, "contributor"));
+    (canApprove(user) ? user.kind === "agent" && user.role !== "admin" : can(user, "review_proposal"));
   const targetId = data?.target_id;
   const target = useAsync<DecideTarget | null>(
     (signal) =>
@@ -96,7 +96,8 @@ export function ProposalPage() {
             </p>
             {p.decided_by && (
               <p className="small">
-                Decided by <strong>{p.decided_by}</strong> {formatDateTime(p.decided_at)}
+                Decided by <strong>{p.decided_by}</strong>
+                {p.decided_by_kind === "agent" && " (agent)"} {formatDateTime(p.decided_at)}
                 {p.comment && <> — “{p.comment}”</>}
               </p>
             )}

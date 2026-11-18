@@ -32,7 +32,7 @@ import {
   type VariableDraft,
 } from "../lib/importBuilder";
 import { changedMetadata, draftFromAnnotation, metadataFromCard, seedDrafts } from "../lib/revise";
-import { canPropose } from "../lib/roles";
+import { can as hasTool, canPropose, canRevise } from "../lib/roles";
 import { useAuth } from "../state/AuthContext";
 import { useToast } from "../state/ToastContext";
 import { useAsync } from "../state/useAsync";
@@ -56,6 +56,8 @@ export function ImportPage() {
 
 function ImportFlow({ reviseId }: { reviseId: string | null }) {
   const { user } = useAuth();
+  // Import needs parse_query + propose_definition; revise mode parse_query + revise_definition.
+  const can = (u: typeof user) => (reviseId ? hasTool(u, "parse_query") && canRevise(u) : canPropose(u));
   const toast = useToast();
   const [step, setStep] = useState(0);
   const [maxStep, setMaxStep] = useState(0);
@@ -126,7 +128,7 @@ function ImportFlow({ reviseId }: { reviseId: string | null }) {
   // stored variables (whose literal IDs address that SQL) become editable drafts.
   useEffect(() => {
     const card = base.data;
-    if (!card || seeded.current || !canPropose(user)) return;
+    if (!card || seeded.current || !can(user)) return;
     seeded.current = true;
     const input: ParsedInput = { sql: card.source_sql ?? "", dialect: card.source_dialect, profile: card.profile ?? "" };
     setSql(input.sql);
@@ -162,11 +164,14 @@ function ImportFlow({ reviseId }: { reviseId: string | null }) {
     return <ErrorState error={base.error} title={`Could not load ${reviseId}`} onRetry={base.reload} />;
   const card = base.data ?? null;
 
-  if (!canPropose(user))
+  if (!can(user))
     return (
       <div className="page">
         <PageHeader title={card ? `Revise ${card.title}` : "Import SQL"} />
-        <p className="callout callout-info">Your role ({user?.role}) can't propose definitions. Ask an admin for contributor access.</p>
+        <p className="callout callout-info">
+          Your token can't {reviseId ? "revise" : "propose"} definitions (your role: {user?.role}). Ask an admin for the
+          build tools.
+        </p>
       </div>
     );
 

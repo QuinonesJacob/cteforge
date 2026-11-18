@@ -7,7 +7,8 @@ Use-cases. Orchestrates the pure core and the I/O adapters. The ONLY layer that 
 Support modules (shared by use-cases; not use-cases themselves):
 - `context.py` — `AppConfig` (from env: `CTEFORGE_DB_URL` default `sqlite:///cteforge.db`,
   `CTEFORGE_CONNECTIONS` path to connections.yml, `CTEFORGE_DEFAULT_PROFILE`,
-  `CTEFORGE_AUTH` on|off, `CTEFORGE_USER` for stdio/local, `CTEFORGE_SEARCH_EMBEDDINGS`
+  `CTEFORGE_AUTH` on|off, `CTEFORGE_USER` for stdio/local, `CTEFORGE_TOKEN` for stdio MCP
+  (a SecretStr, never printed; ADR 0027), `CTEFORGE_SEARCH_EMBEDDINGS`
   on|off, `CTEFORGE_EMBED_CACHE` default `~/.cache/cteforge/models`) and `AppContext`
   (store, audit log, warehouse registry, config, `embedder` — None = meaning search off —
   and `background_model`). `open_context(config, *, embedder=<default>) -> AppContext`
@@ -31,11 +32,19 @@ Support modules (shared by use-cases; not use-cases themselves):
   `CLOSE_TIMEOUT_SECONDS`); `open_warehouse(path)` kept for the M1 CLI. Per-statement
   timeouts are enforced by the connectors (profile `statement_timeout_s`, default 60 s;
   warehouse/), not here.
-- `auth.py` — token → User (SHA-256 lookup), `require(user, action)` via trust.approval,
-  local-mode user (`local_user`: the stored CTEFORGE_USER as is; created as a human admin
-  only while the store has no users and `create=True` (CLI, auth-off HTTP), never for
-  stdio MCP (`create=False`), else PermissionDeniedError), token generation
-  (`secrets.token_urlsafe`), shown once.
+- `auth.py` — ADR 0018, 0027. `new_token` (`cfg_pat_` + 43 URL-safe chars), `hash_token`
+  (SHA-256, the only stored form), `display_prefix` (12 chars). `authenticate(ctx, token)`
+  → the acting User with its effective tools (`Store.user_by_token_hash` +
+  `trust.approval.effective_tools`; unknown / revoked / expired / deactivated → the same
+  generic PermissionDeniedError; last_used_at written at most once a minute, best effort).
+  `local_user(ctx, *, create=True, defaults_only=False)` (the stored CTEFORGE_USER with its
+  role's allowed tools, or defaults; deactivated → refused; created as a human admin only
+  while the store has no users and `create=True` (CLI, auth-off HTTP), never for stdio MCP),
+  `stdio_user` (CTEFORGE_TOKEN's user and tools, else CTEFORGE_USER with role defaults),
+  `resolve_user` (HTTP). `require(user, tool, target=None)` / `permitted`: tool membership
+  (REVIEW_PROPOSAL / VERIFY consult the target via can_approve / can_verify).
+  `user_tools(user)` (what MCP shows), `refuse_tool(ctx, user, name)` (audits an MCP call
+  to a hidden tool: admin, op=tool_refused, rejected; returns the PermissionDeniedError).
 - `cards.py` — response models shared by use-cases and adapters: VariableCard (name, type,
   role, input_format, description, allowed, unit, column, shape, original_value,
   comparisons — on DefinitionCard only), DefinitionCard (`search_document` on request),
@@ -44,8 +53,12 @@ Support modules (shared by use-cases; not use-cases themselves):
   UsedDefinition per version — state, verified_by, verified_at; `values_used` per alias),
   TableCard / ColumnCard, ParseReport, ProposalOutcome, ProposalView,
   DefinitionDrift, TeamSettings, AuditPage, DefinitionReferences / RecipeReference /
-  ProposalReference (ADR 0024; DefinitionCard.former_ids); `json_safe` (enums → values) /
-  `json_rows`.
+  ProposalReference (ADR 0024; DefinitionCard.former_ids); access cards (ADR 0027):
+  ToolInfo + `tool_catalog()`, RoleCard (+ `role_card`, `users` count), TokenCard (+
+  `token_card`: effective tools now, state active|revoked|expired; never the value or
+  hash), NewToken {token (shown once), info}, UserView (user + tokens), MeCard (tools,
+  review_all, role_allowed, role_defaults); DefinitionCard.verified_by_kind;
+  `json_safe` (enums → values) / `json_rows`.
 - `_audit.py` — records an AuditEvent for a use-case call (`record`, fail closed by
   default); the one outcome rule (`failure_outcome`) and `audit_failures` (records a raised
   CteforgeError, best effort, and re-raises). Every use-case wraps its permission check in it.
@@ -155,12 +168,19 @@ modules or the core):
   units the library's variables declare; at most 50 tables). Visibility as search.
 - `revalidate.py` — `revalidate(ctx, user, ids=None) -> list[DefinitionDrift]`: drift check
   over latest versions (DESIGN §10, §18); reports, never changes state.
-- `admin.py` — users, roles, tokens, settings (team mode); an agent admin may not create
-  a human user, change a human's role or rotate another human's token (ADR 0007):
-  `bootstrap_admin(ctx, name)`
-  (only while no users exist), `create_user(ctx, user, name, role, kind)` → (User, token
-  shown once), `list_users`, `set_role` (last admin can't be demoted), `rotate_token` →
-  token (admin or self), `get_settings` / `set_settings(mode)` /
+- `admin.py` — users, roles, tokens, settings (ADR 0018, 0027; who-may rules from
+  trust.approval): `bootstrap_admin(ctx, name, kind)` → (User, "default" token shown once;
+  only while no users exist), `create_user(ctx, user, name, role, kind, *,
+  issue_token=True)` → (User, token | None: a "default" token only for a human caller with
+  issue_token), `list_users` → UserView (tokens' metadata), `update_user(ctx, user, name,
+  *, role=None, active=None)` / `set_role` / `set_active` → UserView (last active admin
+  can't be demoted or deactivated), `me` → MeCard; roles: `list_roles`, `create_role`,
+  `update_role` (admin role: Allowed and review_all fixed; shrinking allowed trims
+  defaults), `delete_role` (custom, unused); tokens: `list_tokens(ctx, user, name=None)`,
+  `create_token(ctx, user, owner=None, *, name, expires_at, tool_mode, include, exclude)`
+  → NewToken (never for an agent caller; within the owner's role; self-service never
+  beyond the calling token's own tools), `revoke_token(ctx, user, token_id, owner=None)`,
+  `set_token_tools(...)` → TokenCard; `get_settings` / `set_settings(mode)` /
   `set_default_connection(ctx, user, name | None)` (unknown profile → NotFoundError; blank
   clears) → TeamSettings (mode, default_connection as stored, effective_default_connection,
   issues).
@@ -174,39 +194,54 @@ modules or the core):
   a new definition's id must pass `_library.check_id_available`, so a former id is refused).
 
 ## Permissions and audit per use-case (contract)
-Roles: viewer < contributor < approver < admin (ADR 0018); agents never verify (ADR 0007).
-"Audit" is the AuditKind recorded (with `extra.op` where one kind covers several calls) and
-whether a failed write fails the call (closed) or is only logged (best effort).
+Permissions are tools (ADR 0027): every use-case requires one tool from the catalog
+(domain/access.py) via `auth.require(user, Tool.X, target?)`; the acting user's tools are
+its role ∩ its token's list (trust.approval). Built-in roles: viewer (use tools +
+list_proposals) < contributor (+ build tools, review_proposal for what they own) <
+approver (+ review_all, verify, view_audit) < admin (every tool). Agents verify only with
+the admin role. "Audit" is the AuditKind recorded (with `extra.op` where one kind covers
+several calls) and whether a failed write fails the call (closed) or is only logged
+(best effort).
 
-| Use-case | Permission (`auth.require` / trust.approval) | AuditKind (`extra.op`) | Audit write |
+| Use-case | Tool (`auth.require` / trust.approval) | AuditKind (`extra.op`) | Audit write |
 |---|---|---|---|
-| search | SEARCH (viewer) | search | best effort |
-| get_definition, definition_history, search_document, definition_references | DESCRIBE (viewer) | get_definition (op) | best effort |
-| parse_query | DESCRIBE (viewer) | parse_query (SQL as SHA-256 only) | best effort |
-| compile_and_run | RUN (viewer) | compile_and_run | closed: written before rows return |
-| check_and_run | RUN (viewer) | check_and_run | closed: written before rows return |
-| revalidate(ids) / revalidate() | RUN (viewer) / approver role (whole library) | revalidate | closed |
-| propose_definition, revise_definition, rename_definition, propose_join, propose_recipe | PROPOSE (contributor); owner rule (`_apply.check_owner`) | propose (op; a rename also lists `old@v` and `new@v` and `extra.renamed_from/renamed_to`) | closed |
-| import_library | PROPOSE (contributor) | propose (op) | closed |
-| list_proposals, get_proposal | DESCRIBE (viewer) | review (op) | best effort |
-| list_recipes, list_joins, describe_tables | DESCRIBE (viewer) | get_definition (op) | best effort |
-| count_proposals | SEARCH (viewer) | none (cheap badge poll) | — |
-| approve, reject | APPROVE on target (approver/admin, or the definition's owner; a VERIFIED target needs a human); approve(verify=True) also VERIFY | review (op) | closed |
-| withdraw | PROPOSE, and the proposal's author | review (op) | closed |
-| verify_definition | VERIFY (human approver/admin; owners may not); four-eyes over every author since the last logic change | review (op) | closed |
-| list_audit | approver role (APPROVE, no target); then bad `kind` / naive `since` → PolicyError | admin (op=list_audit) | best effort |
-| export_library | DESCRIBE (viewer) | admin (op) | closed |
-| bootstrap_admin | none; only while no users exist | admin (op) | closed |
-| create_user, list_users, set_role | MANAGE_USERS (admin); agents not over human users | admin (op) | closed (list: best effort) |
-| rotate_token | the user themselves, else MANAGE_USERS (agents not for a human) | admin (op) | closed |
-| get_settings, set_settings, set_default_connection | MANAGE_SETTINGS (admin) | admin (op) | closed (get: best effort) |
-| rebuild_search_index | MANAGE_SETTINGS (admin); meaning search off → PolicyError | admin (op=rebuild_search_index) | closed |
+| search | search | search | best effort |
+| get_definition, definition_history, search_document, definition_references | get_definition | get_definition (op) | best effort |
+| parse_query | parse_query (a build tool) | parse_query (SQL as SHA-256 only) | best effort |
+| compile_and_run | compile_and_run | compile_and_run | closed: written before rows return |
+| check_and_run | check_and_run | check_and_run | closed: written before rows return |
+| revalidate(ids) / revalidate() | compile_and_run / review_proposal with review_all (whole library) | revalidate | closed |
+| propose_definition | propose_definition; owner rule (`_apply.check_owner`: any owner needs review_all) | propose (op) | closed |
+| revise_definition, rename_definition | revise_definition; owner rule | propose (op; a rename also lists `old@v` and `new@v` and `extra.renamed_from/renamed_to`) | closed |
+| propose_join / propose_recipe | propose_join / propose_recipe | propose (op) | closed |
+| import_library | propose_definition | propose (op) | closed |
+| list_proposals, get_proposal | list_proposals | review (op) | best effort |
+| list_recipes, list_joins, describe_tables | the tool of the same name | get_definition (op) | best effort |
+| count_proposals | list_proposals | none (cheap badge poll) | — |
+| approve, reject | review_proposal on target (review_all, or the definition's owner; recipes/joins need review_all; a VERIFIED target needs a human or an admin agent); four-eyes (human admins exempt, agents never); approve(verify=True) also verify | review (op) | closed |
+| withdraw | the build tool of the proposal's kind, and the proposal's author | review (op) | closed |
+| verify_definition | verify (humans whose role allows it; agents only with the admin role; owners may not); four-eyes over every author since the last logic change | review (op) | closed |
+| list_audit | view_audit; then bad `kind` / naive `since` → PolicyError | admin (op=list_audit) | best effort |
+| export_library | get_definition | admin (op) | closed |
+| bootstrap_admin | none; only while no users exist | admin (op; token id + prefix) | closed |
+| create_user | manage_user; `can_grant_role` (agents never grant admin); token only to a human caller | admin (op; token id + prefix) | closed |
+| list_users, list_roles | list_users | admin (op) | best effort |
+| update_user, set_role, set_active | manage_user; `can_manage_user` (agents never touch an admin user), `can_grant_role`; last active admin guard | admin (op) | closed |
+| create_role, update_role, delete_role | manage_role; `can_edit_role` (agents never the admin role) | admin (op) | closed |
+| me | none (the caller's own access) | none | — |
+| list_tokens | own: none; another user's: list_users | admin (op=list_tokens) | best effort |
+| create_token | never an agent caller; own: none (no escalation beyond the calling token); another user's: manage_user | admin (op; token id + prefix, never the value) | closed |
+| revoke_token, set_token_tools | own: none (set_tools: no escalation); another user's: manage_user + `can_manage_user` | admin (op) | closed |
+| MCP call to a hidden tool (`auth.refuse_tool`) | — (refused) | admin (op=tool_refused, rejected) | best effort |
+| get_settings, set_settings, set_default_connection | manage_settings | admin (op) | closed (get: best effort) |
+| rebuild_search_index | manage_settings; meaning search off → PolicyError | admin (op=rebuild_search_index) | closed |
 
 Outcome rule (`_audit.failure_outcome`, applied by `_audit.audit_failures`): OK on success;
 REJECTED for PermissionDeniedError, PolicyError, StaleVersionError and for refusals returned
 as outcomes (trust/strict mode, not read-only; check_and_run also counts SQL that does not
 parse as refused); ERROR for any other failure (class name only). Never stored: SQL text
-(SHA-256 only), result rows, tokens, credentials.
+(SHA-256 only), result rows, tokens or token hashes (ids and 12-char prefixes only),
+credentials.
 
 Every use-case: takes `ctx` and the acting `user` first; checks permissions
 (`auth.require`) inside `_audit.audit_failures`; records an audit event on success; raises

@@ -271,3 +271,18 @@ button.step-btn:hover { border-color: var(--accent); }
   .card { padding: var(--s3); }
   .signin-card { padding: var(--s4); }
 }
+
+/* Access: tool checklists, tokens, roles (ADR 0027) */
+.tool-checklist { border: 0; padding: 0; margin: 0 0 var(--s3); min-width: 0; display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: var(--s2) var(--s4); }
+.tool-checklist > legend { margin-bottom: var(--s2); }
+.tool-group { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.tool-group-label { margin: 0; font-size: 0.75rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; color: var(--text-muted); }
+.token-form { display: flex; flex-direction: column; gap: 0; }
+.token-form-row { display: flex; flex-wrap: wrap; gap: 0 var(--s3); align-items: flex-end; }
+.token-form-row .field { flex: 1 1 200px; }
+.token-form .radio-group { margin-bottom: var(--s3); }
+.user-tokens { margin: var(--s2) 0 0; }
+.role-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: var(--s3); }
+.role-item { border: 1px solid var(--border); border-radius: var(--radius); padding: var(--s3); }
+.role-item-head { display: flex; flex-wrap: wrap; gap: var(--s2); align-items: center; justify-content: space-between; }
+.role-item-head h3 { margin: 0; }

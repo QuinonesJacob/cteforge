@@ -8,13 +8,25 @@ Project root: ../../../CLAUDE.md
   pointer + indexed columns), `definition_versions` (codec YAML text per version + author,
   created_at, change_note, logic_changed, state, verified_by/at), `recipes`/`recipe_versions`
   (JSON), `join_edges` (JSON + indexed tables), `proposals` (JSON + indexed status/target),
-  `users` (name, role, kind, token_sha256 unique), `settings` (key/value),
+  `users` (name, role = a role name, kind, `active`, legacy token_sha256 unique — a
+  random never-matched value for new users and after migration; ADR 0027), `roles` (name PK, description,
+  allowed/defaults JSON tool lists, review_all, builtin, updated_at), `tokens` (id PK,
+  user_name FK, name, prefix, token_sha256 unique, created_at/by, last_used_at,
+  expires_at, revoked_at, tool_mode, include_tools/exclude_tools JSON), `settings`
+  (key/value),
   `search_vectors` (PK definition_id + version + model; dim, doc_sha256, vector as
   little-endian float32 bytes, created_at — derived data for meaning search, ADR 0023;
   created by `create_all`, no schema version bump), `former_ids` (ADR 0024: seq PK,
   former_id unique, definition_id = the CURRENT id, renamed_to, renamed_by, renamed_at,
   proposal_id; `create_all`, no migration).
 - `store.py` — the `Store` class (public API below). Nothing else is imported by services.
+
+Schema version (`tables.STORE_SCHEMA_VERSION`) is 2. `init_schema` runs `create_all`, adds
+`users.active` to an older table (explicit, idempotent `ALTER TABLE`, static DDL), on a
+version-1 database migrates each user's `token_sha256` to a `default` token (follow_role)
+for users with no token rows, then bumps the version; seeds missing built-in roles
+(`domain.access.BUILTIN_ROLES`, edits kept); refuses a newer version. A failed first open
+(concurrent process) is retried once.
 
 If something does not clearly fit one of the above, it does not belong here.
 "Not forbidden" is not the same as "allowed."
@@ -63,13 +75,28 @@ class Store:
                         expected_status: ProposalStatus | None = None) -> Proposal
         # replace by id; with expected_status a compare-and-swap (UPDATE ... WHERE status =
         # expected): a row whose stored status differs → StoreError (missing → StoreError)
-    # users (tokens arrive already hashed; the store never sees a raw token)
-    def add_user(self, user: User, token_sha256: str) -> User             # duplicate name -> StoreError
+    # users (never stored with tools/review_all)
+    def add_user(self, user: User) -> User                                # duplicate name -> StoreError
     def get_user(self, name: str) -> User | None
-    def user_by_token(self, token_sha256: str) -> User | None
-    def list_users(self) -> list[User]
-    def set_user_role(self, name: str, role: UserRole) -> User
-    def set_user_token(self, name: str, token_sha256: str) -> None
+    def list_users(self) -> list[User]                                    # by name
+    def set_user_role(self, name: str, role: str) -> User                 # a role name
+    def set_user_active(self, name: str, active: bool) -> User
+    # roles (ADR 0027); unknown stored tool names are dropped on read
+    def list_roles(self) -> list[Role]                                    # built-ins first, then by name
+    def get_role(self, name: str) -> Role | None
+    def add_role(self, role: Role) -> Role                                # duplicate -> StoreError
+    def update_role(self, role: Role) -> Role                             # builtin flag kept; missing -> StoreError
+    def delete_role(self, name: str) -> None                              # held by a user / missing -> StoreError
+    # tokens (hashes arrive already hashed; reads never return the hash)
+    def add_token(self, info: TokenInfo, token_sha256: str) -> TokenInfo  # unknown user / dup -> StoreError
+    def get_token(self, id: str) -> TokenInfo | None
+    def list_tokens(self, user_name: str | None = None) -> list[TokenInfo]   # oldest first, revoked included
+    def revoke_token(self, id: str, at: datetime) -> TokenInfo            # first revoked_at kept
+    def set_token_tools(self, id, mode, include, exclude) -> TokenInfo
+    def user_by_token_hash(self, token_sha256: str, now: datetime) -> tuple[User, TokenInfo] | None
+        # None: unknown hash, revoked, expired at `now`, or user inactive (checked in SQL and again in Python)
+    def touch_token(self, id: str, at: datetime, *, min_interval=1 minute) -> bool
+        # conditional UPDATE: last_used_at written at most once per min_interval
     # settings
     def get_setting(self, key: str) -> str | None
     def set_setting(self, key: str, value: str) -> None

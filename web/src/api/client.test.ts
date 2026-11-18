@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ApiError, buildUrl, onUnauthorized, parseErrorBody, request } from "./client";
-import { createUser, rotateToken, searchDefinitions, toAuditPage, toCreatedUser } from "./endpoints";
+import { createToken, createUser, revokeToken, searchDefinitions, toAuditPage, toCreatedUser } from "./endpoints";
 import { clearToken, getToken, setToken } from "./token";
 
 function mockFetch(status: number, body: unknown) {
@@ -156,13 +156,20 @@ describe("user creation responses", () => {
 });
 
 describe("response normalizers", () => {
-  it("rotate token accepts a bare string or {token}", async () => {
-    mockFetch(200, "\"new-secret\"");
-    expect(await rotateToken("bot")).toEqual({ token: "new-secret", user: { name: "bot", role: "viewer", kind: "human" } });
-    mockFetch(200, { token: "t3" });
-    const r = await rotateToken("bot");
-    expect(r.token).toBe("t3");
-    expect(r.user.name).toBe("bot");
+  it("create user keeps a null token (agent caller) as null", () => {
+    expect(toCreatedUser({ user: { name: "x", role: "viewer", kind: "human" }, token: null }).token).toBeNull();
+  });
+
+  it("tokens go to /me/tokens or /users/{name}/tokens", async () => {
+    const fetchFn = mockFetch(201, { token: "cfg_pat_x", info: { id: "t1" } });
+    const body = { name: "ci", tool_mode: "only" as const, include: ["search" as const], exclude: [] };
+    expect((await createToken(body)).token).toBe("cfg_pat_x");
+    expect(String(fetchFn.mock.calls[0]?.[0])).toBe("/api/v1/me/tokens");
+    await createToken(body, "bob smith");
+    expect(String(fetchFn.mock.calls[1]?.[0])).toBe("/api/v1/users/bob%20smith/tokens");
+    expect(JSON.parse(String(fetchFn.mock.calls[1]?.[1]?.body))).toEqual(body);
+    mockFetch(200, { id: "t1", state: "revoked" });
+    expect((await revokeToken("t1")).state).toBe("revoked");
   });
 
   it("audit accepts the AuditPage wrapper or a list", () => {

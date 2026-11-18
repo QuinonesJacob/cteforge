@@ -1,16 +1,18 @@
 import { useState, type FormEvent } from "react";
 import { createUser } from "../api/endpoints";
-import type { ActorKind, CreatedUser, UserRole } from "../api/types";
-import { ROLES } from "../lib/roles";
+import type { ActorKind, CreatedUser, RoleCard, UserRole } from "../api/types";
 import { useToast } from "../state/ToastContext";
 import { Field } from "./Field";
 
-export function CreateUserForm({ onCreated }: { onCreated: (created: CreatedUser) => void }) {
+/** Create a user with a role from GET /roles (built-in or custom). A human admin gets the new
+ * user's "default" token back once. */
+export function CreateUserForm({ roles, onCreated }: { roles: RoleCard[]; onCreated: (created: CreatedUser) => void }) {
   const toast = useToast();
   const [name, setName] = useState("");
   const [role, setRole] = useState<UserRole>("viewer");
   const [kind, setKind] = useState<ActorKind>("human");
   const [busy, setBusy] = useState(false);
+  const names = roles.length ? roles.map((r) => r.name) : ["viewer", "contributor", "approver", "admin"];
 
   async function submit(e: FormEvent) {
     e.preventDefault();
@@ -32,8 +34,8 @@ export function CreateUserForm({ onCreated }: { onCreated: (created: CreatedUser
         <input id="cu-name" type="text" value={name} onChange={(e) => setName(e.target.value)} autoComplete="off" />
       </Field>
       <Field label="Role" htmlFor="cu-role">
-        <select id="cu-role" value={role} onChange={(e) => setRole(e.target.value as UserRole)}>
-          {ROLES.map((r) => (
+        <select id="cu-role" value={role} onChange={(e) => setRole(e.target.value)}>
+          {names.map((r) => (
             <option key={r} value={r}>
               {r}
             </option>

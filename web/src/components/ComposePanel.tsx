@@ -10,7 +10,7 @@ import {
   type ComposePart,
   type FormValue,
 } from "../lib/variableForm";
-import { canPropose } from "../lib/roles";
+import { canProposeRecipe } from "../lib/roles";
 import { useAuth } from "../state/AuthContext";
 import { useToast } from "../state/ToastContext";
 import { useAsync } from "../state/useAsync";
@@ -258,7 +258,7 @@ export function ComposePanel({ seed }: { seed: ComposeSeed | null }) {
         </div>
       </form>
       {outcome && <RunResult outcome={outcome} />}
-      {outcome?.usable && canPropose(user) && (
+      {outcome?.usable && canProposeRecipe(user) && (
         <SaveRecipeForm
           key={outcome.compile_id ?? "saved"}
           request={build(false).request}

@@ -29,6 +29,14 @@ import type {
   User,
   UserRole,
   ActorKind,
+  CreateTokenRequest,
+  NewToken,
+  RoleCard,
+  RoleInput,
+  TokenCard,
+  TokenToolsRequest,
+  ToolInfo,
+  UserView,
 } from "./types";
 
 type Opts = { signal?: AbortSignal };
@@ -113,14 +121,16 @@ export function toAuditPage(body: unknown, limit: number): AuditPage {
 export const listAudit = async (filter: AuditFilter, opts: Opts = {}) =>
   toAuditPage(await request<unknown>("GET", "/audit", { ...opts, query: { ...filter } }), filter.limit ?? 100);
 
-// ── Admin ──
-export const listUsers = (opts: Opts = {}) => request<User[]>("GET", "/users", opts);
+// ── Admin: users, roles, tokens (ADR 0027) ──
+export const listTools = (opts: Opts = {}) => request<ToolInfo[]>("GET", "/tools", opts);
+export const listUsers = (opts: Opts = {}) => request<UserView[]>("GET", "/users", opts);
 
-/** Normalizes {user, token}, flat {name, role, kind, token} and bare "token" responses. */
+/** Normalizes {user, token} (token null for an agent caller), flat {name, role, kind, token}
+ * and bare "token" responses. */
 export function toCreatedUser(body: unknown, name = ""): CreatedUser {
   if (typeof body === "string") return { token: body, user: { name, role: "viewer", kind: "human" } };
   const b = (body ?? {}) as Record<string, unknown>;
-  const token = typeof b.token === "string" ? b.token : "";
+  const token = typeof b.token === "string" && b.token ? b.token : null;
   const user = (typeof b.user === "object" && b.user !== null ? b.user : b) as Partial<User>;
   return {
     token,
@@ -130,9 +140,24 @@ export function toCreatedUser(body: unknown, name = ""): CreatedUser {
 
 export const createUser = async (body: { name: string; role: UserRole; kind: ActorKind }) =>
   toCreatedUser(await request<unknown>("POST", "/users", { body }));
-export const rotateToken = async (name: string) =>
-  toCreatedUser(await request<unknown>("POST", `/users/${enc(name)}/token`), name);
-export const setUserRole = (name: string, role: UserRole) =>
-  request<User>("PUT", `/users/${enc(name)}/role`, { body: { role } });
+/** Change a user's role and/or active flag (only the fields given). */
+export const updateUser = (name: string, body: { role?: UserRole; active?: boolean }) =>
+  request<UserView>("PATCH", `/users/${enc(name)}`, { body });
+
+export const listRoles = (opts: Opts = {}) => request<RoleCard[]>("GET", "/roles", opts);
+export const createRole = (body: RoleInput & { name: string }) => request<RoleCard>("POST", "/roles", { body });
+export const updateRole = (name: string, body: RoleInput) => request<RoleCard>("PUT", `/roles/${enc(name)}`, { body });
+export const deleteRole = (name: string) => request<null>("DELETE", `/roles/${enc(name)}`);
+
+/** Tokens: `user` undefined = the signed-in user's (/me/tokens), else /users/{user}/tokens. */
+const tokensPath = (user?: string) => (user ? `/users/${enc(user)}/tokens` : "/me/tokens");
+export const listTokens = (user?: string, opts: Opts = {}) => request<TokenCard[]>("GET", tokensPath(user), opts);
+/** The new token is in this response only. */
+export const createToken = (body: CreateTokenRequest, user?: string) =>
+  request<NewToken>("POST", tokensPath(user), { body });
+export const setTokenTools = (id: string, body: TokenToolsRequest, user?: string) =>
+  request<TokenCard>("PUT", `${tokensPath(user)}/${enc(id)}`, { body });
+export const revokeToken = (id: string, user?: string) =>
+  request<TokenCard>("DELETE", `${tokensPath(user)}/${enc(id)}`);
 export const getSettings = (opts: Opts = {}) => request<Settings>("GET", "/settings", opts);
 export const putSettings = (body: SettingsUpdate) => request<Settings>("PUT", "/settings", { body });

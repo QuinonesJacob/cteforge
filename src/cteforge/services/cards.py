@@ -19,6 +19,15 @@ from typing import Any, Literal
 import yaml
 from pydantic import BaseModel, ConfigDict, Field
 
+from cteforge.domain.access import (
+    ADMIN_ONLY_TOOLS,
+    TOOL_GROUPS,
+    Role,
+    TokenInfo,
+    Tool,
+    ToolGroup,
+    sorted_tools,
+)
 from cteforge.domain.audit import AuditEvent
 from cteforge.domain.codec import definition_to_yaml
 from cteforge.domain.dialects import Dialect
@@ -37,7 +46,9 @@ from cteforge.domain.models import (
     VariableSpec,
 )
 from cteforge.domain.proposals import Proposal, ProposalKind
-from cteforge.domain.variables import RangeShape, Role, VariableType, expected_format
+from cteforge.domain.users import ActorKind
+from cteforge.domain.variables import RangeShape, VariableType, expected_format
+from cteforge.domain.variables import Role as VariableRole
 from cteforge.parsing.analyze import QueryAnalysis, analyze
 from cteforge.templating.render import render
 
@@ -99,7 +110,7 @@ class VariableCard(BaseModel):
 
     name: str
     type: VariableType
-    role: Role
+    role: VariableRole
     input_format: str  # domain.variables.expected_format(type): the strict input format.
     description: str = ""
     allowed: list[Any] | None = None
@@ -169,6 +180,9 @@ class DefinitionCard(BaseModel):
     profile: str | None = None
     state: DefinitionState
     verified_by: str | None = None
+    # The verifier's kind (ADR 0027: an admin agent may verify), from the users table;
+    # set by describe.get_definition. None when unverified or the user is gone.
+    verified_by_kind: ActorKind | None = None
     verified_at: dt.date | None = None
     owner: str | None = None
     grain: str | None = None
@@ -596,3 +610,137 @@ class AuditPage(BaseModel):
 
 def audit_page(events: Sequence[AuditEvent], limit: int) -> AuditPage:
     return AuditPage(events=list(events), limit=limit, has_more=len(events) >= limit > 0)
+
+
+# ── Access: users, roles, tokens (ADR 0027) ──────────────────────────────────────────
+
+
+class ToolInfo(BaseModel):
+    """One entry of the tool catalog (domain/access.py), for pickers."""
+
+    model_config = _CARD
+
+    name: Tool
+    group: ToolGroup
+    admin_only: bool = False
+
+
+def tool_catalog() -> list[ToolInfo]:
+    return [
+        ToolInfo(name=tool, group=group, admin_only=tool in ADMIN_ONLY_TOOLS)
+        for group, tools in TOOL_GROUPS.items()
+        for tool in tools
+    ]
+
+
+class RoleCard(BaseModel):
+    """A role with its tool lists in catalog order. `users` = how many users hold it."""
+
+    model_config = _CARD
+
+    name: str
+    description: str = ""
+    allowed: list[Tool] = Field(default_factory=list)
+    defaults: list[Tool] = Field(default_factory=list)
+    review_all: bool = False
+    builtin: bool = False
+    users: int = 0
+
+
+def role_card(role: Role, users: int = 0) -> RoleCard:
+    return RoleCard(
+        name=role.name,
+        description=role.description,
+        allowed=sorted_tools(role.allowed),
+        defaults=sorted_tools(role.defaults),
+        review_all=role.review_all,
+        builtin=role.builtin,
+        users=users,
+    )
+
+
+TokenState = Literal["active", "revoked", "expired"]
+
+
+class TokenCard(BaseModel):
+    """A token's metadata and its effective tools now. Never the token or its hash."""
+
+    model_config = _CARD
+
+    id: str
+    user_name: str
+    name: str
+    prefix: str
+    created_at: dt.datetime
+    created_by: str
+    last_used_at: dt.datetime | None = None
+    expires_at: dt.datetime | None = None
+    revoked_at: dt.datetime | None = None
+    tool_mode: str
+    include: list[Tool] = Field(default_factory=list)
+    exclude: list[Tool] = Field(default_factory=list)
+    tools: list[Tool] = Field(default_factory=list)  # effective (role ∩ token, kind rule)
+    state: TokenState = "active"
+
+
+def token_card(info: TokenInfo, tools: Iterable[Tool], now: dt.datetime) -> TokenCard:
+    if info.revoked_at is not None:
+        state: TokenState = "revoked"
+    elif info.expires_at is not None and info.expires_at <= now:
+        state = "expired"
+    else:
+        state = "active"
+    return TokenCard(
+        id=info.id,
+        user_name=info.user_name,
+        name=info.name,
+        prefix=info.prefix,
+        created_at=info.created_at,
+        created_by=info.created_by,
+        last_used_at=info.last_used_at,
+        expires_at=info.expires_at,
+        revoked_at=info.revoked_at,
+        tool_mode=info.tool_mode.value,
+        include=sorted_tools(info.include),
+        exclude=sorted_tools(info.exclude),
+        tools=sorted_tools(frozenset(tools)) if state == "active" else [],
+        state=state,
+    )
+
+
+class NewToken(BaseModel):
+    """A freshly generated token: `token` is shown ONCE (only in this response)."""
+
+    model_config = _CARD
+
+    token: str
+    info: TokenCard
+
+
+class UserView(BaseModel):
+    """A user for admins: role, kind, active, and its tokens' metadata (never values)."""
+
+    model_config = _CARD
+
+    name: str
+    role: str
+    kind: ActorKind
+    active: bool = True
+    created_at: dt.datetime | None = None
+    tokens: list[TokenCard] = Field(default_factory=list)
+
+
+class MeCard(BaseModel):
+    """The acting user: effective tools now, and what their role lets a token have."""
+
+    model_config = _CARD
+
+    name: str
+    role: str
+    kind: ActorKind
+    active: bool = True
+    created_at: dt.datetime | None = None
+    tools: list[Tool] = Field(default_factory=list)
+    review_all: bool = False
+    role_allowed: list[Tool] = Field(default_factory=list)
+    role_defaults: list[Tool] = Field(default_factory=list)

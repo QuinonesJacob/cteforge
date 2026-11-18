@@ -53,7 +53,25 @@ def test_mcp_initialize_and_list_tools(api) -> None:
     tools = _result(_rpc(api.client, api.tokens["bot"], "tools/list", {}, id=2))
     names = {t["name"] for t in tools["tools"]}
     assert {"search", "compile_and_run", "propose_definition"} <= names
-    assert not {"approve", "verify"} & names  # ADR 0007
+    assert not {"list_users", "manage_user", "manage_role"} & names  # not an admin
+
+
+def test_mcp_tools_list_is_filtered_per_token_over_http(api) -> None:
+    """ADR 0027: tools/list shows only the bearer token's tools; others are refused."""
+    made = api.post(
+        "/me/tokens", "alice", {"name": "bot", "tool_mode": "only", "include": ["search"]}
+    )
+    narrow = made.json()["token"]
+    tools = _result(_rpc(api.client, narrow, "tools/list", {}))
+    assert [t["name"] for t in tools["tools"]] == ["search"]
+    call = {"name": "check_and_run", "arguments": {"sql": "SELECT 1"}}
+    result = _result(_rpc(api.client, narrow, "tools/call", call, id=2))
+    assert result["isError"] is True
+    assert result["structuredContent"]["error"]["type"] == "PermissionDeniedError"
+    event = api.ctx.audit.list_events(limit=1)[0]
+    assert event.actor == "alice" and event.extra == {"op": "tool_refused", "tool": "check_and_run"}
+    admin_tools = _result(_rpc(api.client, api.tokens["root"], "tools/list", {}))
+    assert {"list_users", "manage_user", "manage_role"} <= {t["name"] for t in admin_tools["tools"]}
 
 
 def test_mcp_trailing_slash_reaches_endpoint(api) -> None:

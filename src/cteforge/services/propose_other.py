@@ -23,6 +23,7 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from cteforge.domain.access import Tool
 from cteforge.domain.audit import AuditKind
 from cteforge.domain.dialects import Dialect
 from cteforge.domain.errors import CodecError
@@ -32,7 +33,6 @@ from cteforge.services import _apply, _audit, _library
 from cteforge.services.auth import require
 from cteforge.services.cards import ProposalOutcome
 from cteforge.services.context import AppContext
-from cteforge.trust.approval import Action
 
 KeyInput = JoinKey | Mapping[str, str] | Sequence[str]
 
@@ -70,7 +70,7 @@ def propose_join(
 ) -> ProposalOutcome:
     """Propose a join-map edge (new, or an update of an existing edge with the same id)."""
     with _audit.audit_failures(ctx, user, AuditKind.PROPOSE, extra={"op": "propose_join"}):
-        require(user, Action.PROPOSE)
+        require(user, Tool.PROPOSE_JOIN)
         if not left_table.strip() or not right_table.strip():
             raise CodecError("A join needs both table names")
         if join_type.strip().lower() not in _library.JOIN_TYPES:
@@ -144,7 +144,7 @@ def propose_recipe(
     when it is applied (a mapping that sets them, or `schema_version`, raises
     CodecError); checks are returned as issues (errors block approval)."""
     with _audit.audit_failures(ctx, user, AuditKind.PROPOSE, extra={"op": "propose_recipe"}):
-        require(user, Action.PROPOSE)
+        require(user, Tool.PROPOSE_RECIPE)
         proposal = _apply.recipe_proposal(ctx, user, recipe_from(recipe), summary)
         result = _apply.submit(ctx, user, proposal)
     _apply.record_proposal(ctx, user, AuditKind.PROPOSE, result.proposal, "propose_recipe")

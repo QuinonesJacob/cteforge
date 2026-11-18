@@ -23,6 +23,7 @@ ENV_KEYS = (
     "CTEFORGE_DEFAULT_PROFILE",
     "CTEFORGE_AUTH",
     "CTEFORGE_USER",
+    "CTEFORGE_TOKEN",
 )
 
 Invoke = Callable[..., Result]

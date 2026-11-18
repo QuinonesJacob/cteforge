@@ -886,3 +886,59 @@ def test_revise_refuses_non_read_only_sql(ctx: AppContext) -> None:
         )
     assert [i.code for i in info.value.issues] == [IssueCode.NOT_READ_ONLY]
     assert ctx.store.latest_version("realization_rate") == 1
+
+
+# ── admin agents (ADR 0027) ──────────────────────────────────────────────────────────
+
+AGENT_ADMIN = User(name="botadmin", role=UserRole.ADMIN, kind=ActorKind.AGENT)
+
+
+def test_agent_admin_approves_verifies_and_changes_verified_work_of_others(
+    ctx: AppContext,
+) -> None:
+    from cteforge.services.describe import get_definition
+
+    ctx.store.add_user(AGENT_ADMIN)
+    _strict(ctx)
+    pending = _propose(ctx)  # alice's
+    out = review.approve(ctx, AGENT_ADMIN, pending.proposal.id, verify=True)
+    assert out.definition.state is DefinitionState.VERIFIED
+    assert out.proposal.decided_by == "botadmin"
+    assert out.proposal.decided_by_kind is ActorKind.AGENT
+    card = get_definition(ctx, ALICE, "realization_rate")
+    assert card.verified_by == "botadmin" and card.verified_by_kind is ActorKind.AGENT
+    # A change to the now verified definition: an admin agent may approve it, an
+    # approver agent may not.
+    change = revise_definition(
+        ctx, ALICE, id="realization_rate", base_version=1, metadata={"keywords": ["z"]}
+    )
+    with pytest.raises(PermissionDeniedError):
+        review.approve(ctx, AGENT_APPROVER, change.proposal.id)
+    assert review.approve(ctx, AGENT_ADMIN, change.proposal.id).definition.version == 2
+    review.verify_definition(ctx, AGENT_ADMIN, "realization_rate", 2)
+
+
+def test_a_human_verifier_kind_is_shown(ctx: AppContext) -> None:
+    from cteforge.services.describe import get_definition
+
+    ctx.store.add_user(APPROVER)
+    _propose(ctx)
+    review.verify_definition(ctx, APPROVER, "realization_rate", 1)
+    card = get_definition(ctx, ALICE, "realization_rate")
+    assert card.verified_by == "ann" and card.verified_by_kind is ActorKind.HUMAN
+
+
+def test_custom_role_without_review_all_approves_only_what_it_owns(ctx: AppContext) -> None:
+    from cteforge.domain.access import Tool
+
+    tools = frozenset({Tool.REVIEW_PROPOSAL, Tool.PROPOSE_JOIN})
+    owner = User(name="alice", role="triage", tools=tools, review_all=False)
+    _propose(ctx)  # alice owns realization_rate
+    _strict(ctx)
+    change = revise_definition(
+        ctx, BOT, id="realization_rate", base_version=1, metadata={"keywords": ["z"]}
+    )
+    new = _propose(ctx, BOT, id="other_def", owner=None)
+    with pytest.raises(PermissionDeniedError):
+        review.approve(ctx, owner, new.proposal.id)  # not hers
+    assert review.approve(ctx, owner, change.proposal.id).definition.version == 2

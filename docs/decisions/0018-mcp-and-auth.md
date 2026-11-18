@@ -58,5 +58,5 @@ attributed for permissions and audit.
   can show the same fallback before parsing.
 
 ## Amendment (2026-11-17): roles, tokens, admin agents — see ADR 0027
-Accepted, not built: configurable roles, many named personal access tokens per user with
+Implemented: configurable roles, many named personal access tokens per user with
 per-token tool lists, admin agents managing non-admin users and verifying.

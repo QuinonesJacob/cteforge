@@ -1,6 +1,8 @@
 # src/cteforge/api/
 
-HTTP API for the GUI and integrations (ADR 0019, 0018). Thin adapter over services.
+HTTP API for the GUI and integrations (ADR 0019, 0018, 0027). Thin adapter over services.
+Every route's permission is the tool of the use-case it calls (services; ADR 0027), so a
+token gets the same answer here as over MCP.
 Project root: ../../../CLAUDE.md
 
 ## What belongs here (authoritative)
@@ -25,7 +27,8 @@ If something does not clearly fit one of the above, it does not belong here.
 "Not forbidden" is not the same as "allowed."
 
 ## Routes (all under /api/v1, JSON)
-GET /me · GET /profiles (name, dialect, `default` = the effective default connection; only these) ·
+GET /me → MeCard {name, role, kind, active, created_at, tools, review_all, role_allowed,
+role_defaults} · GET /tools → ToolInfo[] {name, group, admin_only} · GET /profiles (name, dialect, `default` = the effective default connection; only these) ·
 GET /definitions?q=&include_drafts=&limit= · GET /definitions/{id}?version=&include_source= (adds `source_sql` + `annotations`, for revising) ·
 GET /definitions/{id}/history · GET /definitions/{id}/references → DefinitionReferences
 (recipes, pending proposals, former_ids, outside_warning; ADR 0024) ·
@@ -42,12 +45,21 @@ GET /proposals?status= · GET /proposals/count?status= (cheap, not audited; for 
 POST /proposals/{id}/reject {comment} · POST /proposals/{id}/withdraw ·
 GET /recipes?q=&include_drafts= · GET /joins?table=&include_drafts= ·
 GET /tables?name=&name=&profile= · GET /audit?actor=&kind=&definition_id=&limit= ·
-GET /users · POST /users {name, role, kind} (returns token once) · POST /users/{name}/token ·
-PUT /users/{name}/role · GET /settings → TeamSettings {mode, default_connection,
+GET /users → UserView[] (role, kind, active, tokens' metadata — never values) ·
+POST /users {name, role, kind} → 201 {user, token | null} (a "default" token, once, only
+to a human caller) · PATCH /users/{name} {role?, active?} → UserView ·
+GET /users/{name}/tokens · POST /users/{name}/tokens · PUT /users/{name}/tokens/{id}
+{tool_mode, include, exclude} · DELETE /users/{name}/tokens/{id} (revoke → TokenCard) ·
+GET /me/tokens · POST /me/tokens · PUT /me/tokens/{id} · DELETE /me/tokens/{id} — token
+POST bodies {name, expires_at?, tool_mode: follow_role | only, include, exclude} → 201
+NewToken {token, info}: the ONLY responses that ever carry a token value (human callers
+only; agent callers → 403) · GET /roles → RoleCard[] · POST /roles {name, description,
+allowed, defaults?, review_all} → 201 · PUT /roles/{name} {description?, allowed?,
+defaults?, review_all?} · DELETE /roles/{name} → 204 · GET /settings → TeamSettings {mode, default_connection,
 effective_default_connection, issues} · PUT /settings {mode?, default_connection?: str | null}
 (admin; only the fields given change, at least one; `default_connection` first — an unknown
 profile → 404 — then `mode`, each its own audited service call).
-POST /users → 201 {user, token}; POST /users/{name}/token → {name, token}; /proposals/count
+/proposals/count
 → {count}. GET /recipes, /joins and /tables call services/catalog.py.
 Errors: `{"error": {"type": <ErrorClass>, "message": str, "issues": [Issue]}}` with
 PermissionDenied 403 · NotFound 404 · VariableValue/Annotation/Render/SqlParse/Codec 422 ·

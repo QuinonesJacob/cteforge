@@ -1,20 +1,26 @@
 """Use-cases: review proposals (DESIGN §9, §18; ADR 0007, 0018).
 
-- list/get: any viewer; each proposal comes with a unified diff against its base and the
-  impact preview (ids of recipes using the target definition).
-- approve: approver/admin, or the target definition's owner (trust.approval.can_approve).
-  Changes to a VERIFIED target (definition, recipe or join) need a human. A proposal whose
+Permissions are tools (ADR 0027): list/get/count need list_proposals; approve/reject need
+review_proposal; verify needs verify; withdraw needs the build tool of the proposal's kind.
+
+- list/get: each proposal comes with a unified diff against its base and the impact
+  preview (ids of recipes using the target definition).
+- approve: review_proposal with review_all (built-in approver/admin), or the target
+  definition's owner (trust.approval.can_approve); recipes and joins need review_all.
+  Changes to a VERIFIED target (definition, recipe or join) need a human or an agent
+  with the admin role (ADR 0027). A proposal whose
   checks hold an error cannot be approved (PolicyError): revise it instead. The base version
   is re-checked: a target that moved on raises StaleVersionError (stale_base_version issue
   on `.issues`) and the proposal stays pending.
-- Four-eyes rule (ADR 0018 addendum): nobody but a human admin may approve their own proposal
+- Four-eyes rule (ADR 0018 addendum, ADR 0027: no exemption for agents): nobody but a human
+  admin may approve their own proposal
   (`can_approve(..., author=proposal.author)`) or verify a definition version they
   authored any part of (`can_verify(..., author=...)` for each of `_version_authors`:
   the author of the newest logic-changing version up to it and of every metadata-only
   version since, from the store's history; on approve(verify=True) the proposal's
   author, plus the base version's authors when the revision is metadata-only).
-- approve(verify=True) / verify_definition: human approvers/admins only (can_verify; owners
-  may not verify). Only what passed complete checks can be verified
+- approve(verify=True) / verify_definition: the verify tool (can_verify; owners may not
+  verify; an agent only with the admin role). Only what passed complete checks can be verified
   (`_apply.check_verifiable`): a proposal with an error, a `checks_incomplete` or
   `draft_not_usable` issue, a proposal whose definition the checks left DRAFT (e.g. a
   `type_unknown` warning, or a metadata-only revision of a draft) and verify_definition on
@@ -24,7 +30,7 @@
   approve and reject, in one process or several, only one succeeds; the other raises
   PolicyError.
 - reject: same permission as approve; a comment is required. withdraw: the author only,
-  who must still hold the contributor role (Action.PROPOSE).
+  who must still hold the build tool that makes that kind of proposal.
 """
 
 from __future__ import annotations
@@ -34,12 +40,13 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict
 
+from cteforge.domain.access import Tool
 from cteforge.domain.audit import AuditKind
 from cteforge.domain.errors import NotFoundError, PermissionDeniedError, PolicyError
 from cteforge.domain.issues import has_errors
 from cteforge.domain.models import Definition, DefinitionState, DefinitionVersionInfo
 from cteforge.domain.proposals import DEFINITION_KINDS, Proposal, ProposalKind, ProposalStatus
-from cteforge.domain.users import ActorKind, User
+from cteforge.domain.users import User
 from cteforge.services import _apply, _audit, _library
 from cteforge.services.auth import require
 from cteforge.services.cards import (
@@ -49,11 +56,20 @@ from cteforge.services.cards import (
     card_from_definition,
 )
 from cteforge.services.context import AppContext
-from cteforge.trust.approval import Action, can_approve, can_verify
+from cteforge.trust.approval import can_approve, can_verify, may_change_verified
 
 # Kinds whose target is a definition (renames included: approving one needs what
 # approving any change to that definition needs; ADR 0024).
 _DEFINITION_KINDS = DEFINITION_KINDS
+
+# The build tool that makes each kind of proposal (withdrawing one needs it too).
+_KIND_TOOLS = {
+    ProposalKind.NEW_DEFINITION: Tool.PROPOSE_DEFINITION,
+    ProposalKind.REVISE_DEFINITION: Tool.REVISE_DEFINITION,
+    ProposalKind.RENAME_DEFINITION: Tool.REVISE_DEFINITION,
+    ProposalKind.NEW_RECIPE: Tool.PROPOSE_RECIPE,
+    ProposalKind.NEW_JOIN: Tool.PROPOSE_JOIN,
+}
 
 
 class _Target(BaseModel):
@@ -87,20 +103,21 @@ def _target(ctx: AppContext, proposal: Proposal) -> _Target:
 
 def _require_decide(user: User, proposal: Proposal, target: _Target) -> None:
     """Approve/reject permission: can_approve on the target definition; for recipes and
-    joins the approver role, and a human when the target is verified."""
+    joins review_all, and a human or an admin agent when the target is verified."""
     if proposal.kind in _DEFINITION_KINDS:
-        require(user, Action.APPROVE, target.definition)
+        require(user, Tool.REVIEW_PROPOSAL, target.definition)
         return
-    require(user, Action.APPROVE)
-    if target.state is DefinitionState.VERIFIED and user.kind is ActorKind.AGENT:
+    require(user, Tool.REVIEW_PROPOSAL)
+    if target.state is DefinitionState.VERIFIED and not may_change_verified(user):
         raise PermissionDeniedError(
-            f"'{proposal.target_id}' is verified; only a person may approve changes to it"
+            f"'{proposal.target_id}' is verified; only a person or an admin agent may "
+            "approve changes to it"
         )
 
 
 def _require_not_own_proposal(user: User, proposal: Proposal, target: _Target) -> None:
-    """Four-eyes rule (ADR 0018 addendum): only a human admin may approve their own
-    proposal; an agent admin never may."""
+    """Four-eyes rule (ADR 0018 addendum, ADR 0027): only a human admin may approve their
+    own proposal; an agent admin never may."""
     if not can_approve(user, target.definition, author=proposal.author):
         raise PermissionDeniedError(
             f"User '{user.name}' authored proposal '{proposal.id}' and may not approve it "
@@ -157,7 +174,7 @@ def list_proposals(
 ) -> list[ProposalView]:
     """Proposals, newest first, each with diff and impact preview."""
     with _audit.audit_failures(ctx, user, AuditKind.REVIEW, extra={"op": "list_proposals"}):
-        require(user, Action.DESCRIBE)
+        require(user, Tool.LIST_PROPOSALS)
         views = [_apply.view(ctx, p) for p in ctx.store.list_proposals(status)]
     _audit.record(
         ctx,
@@ -175,15 +192,15 @@ def list_proposals(
 
 def count_proposals(ctx: AppContext, user: User, status: ProposalStatus | None = None) -> int:
     """How many proposals have `status` (all when None), for the GUI's nav badge. Needs
-    Action.SEARCH (any viewer). Deliberately NOT audited: the GUI polls it, and it reveals
-    no proposal content."""
-    require(user, Action.SEARCH)
+    Tool.LIST_PROPOSALS. Deliberately NOT audited: the GUI polls it, and it reveals no
+    proposal content."""
+    require(user, Tool.LIST_PROPOSALS)
     return len(ctx.store.list_proposals(status))
 
 
 def get_proposal(ctx: AppContext, user: User, id: str) -> ProposalView:
     with _audit.audit_failures(ctx, user, AuditKind.REVIEW, **_audit_fields(id, "get_proposal")):
-        require(user, Action.DESCRIBE)
+        require(user, Tool.LIST_PROPOSALS)
         result = _apply.view(ctx, _get(ctx, id))
     _audit.record(
         ctx, user, AuditKind.REVIEW, fail_closed=False, **_audit_fields(id, "get_proposal")
@@ -201,7 +218,7 @@ def approve(
         _require_decide(user, proposal, target)
         _require_not_own_proposal(user, proposal, target)
         if verify:
-            require(user, Action.VERIFY, target.definition)
+            require(user, Tool.VERIFY, target.definition)
             _require_not_own_version(
                 user, _proposal_authors(ctx, proposal), f"(part of) proposal '{id}'"
             )
@@ -236,8 +253,8 @@ def reject(ctx: AppContext, user: User, id: str, comment: str) -> ProposalView:
 def withdraw(ctx: AppContext, user: User, id: str) -> ProposalView:
     """The author takes back their own pending proposal."""
     with _audit.audit_failures(ctx, user, AuditKind.REVIEW, **_audit_fields(id, "withdraw")):
-        require(user, Action.PROPOSE)
         proposal = _get(ctx, id)
+        require(user, _KIND_TOOLS[proposal.kind])
         if proposal.author != user.name:
             raise PermissionDeniedError("Only the author may withdraw a proposal")
         _pending(proposal)
@@ -247,11 +264,11 @@ def withdraw(ctx: AppContext, user: User, id: str) -> ProposalView:
 
 
 def verify_definition(ctx: AppContext, user: User, id: str, version: int) -> DefinitionCard:
-    """Mark the LATEST version of a definition verified by `user` today (human approver)."""
+    """Mark the LATEST version of a definition verified by `user` today (verify tool)."""
     fields = {"definitions": [f"{id}@{version}"], "extra": {"op": "verify_definition"}}
     with _audit.audit_failures(ctx, user, AuditKind.REVIEW, **fields):
         current = ctx.store.get_definition(id)
-        require(user, Action.VERIFY, current)
+        require(user, Tool.VERIFY, current)
         if current is None:
             raise _library.definition_not_found(ctx, id)
         if current.version != version:

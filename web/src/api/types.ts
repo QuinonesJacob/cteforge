@@ -15,20 +15,136 @@ export interface ApiErrorBody {
   error: { type: string; message: string; issues?: Issue[] };
 }
 
-// ── Users / auth (domain/users.py) ──────────────────────────────────────────────
-export type UserRole = "viewer" | "contributor" | "approver" | "admin";
+// ── Users / auth (domain/users.py, domain/access.py; ADR 0027) ─────────────────
+/** Built-in role names; custom roles have other names (ADR 0027). */
+export type BuiltinRole = "viewer" | "contributor" | "approver" | "admin";
+export type UserRole = BuiltinRole | (string & {});
 export type ActorKind = "human" | "agent";
 
+/** The tool catalog (domain/access.py `Tool`): the permission unit. */
+export type ToolName =
+  | "search"
+  | "get_definition"
+  | "compile_and_run"
+  | "check_and_run"
+  | "describe_tables"
+  | "list_joins"
+  | "list_recipes"
+  | "parse_query"
+  | "propose_definition"
+  | "revise_definition"
+  | "propose_join"
+  | "propose_recipe"
+  | "list_proposals"
+  | "review_proposal"
+  | "verify"
+  | "view_audit"
+  | "list_users"
+  | "manage_user"
+  | "manage_role"
+  | "manage_settings";
+export type ToolGroup = "use" | "build" | "review" | "admin";
+export type ToolMode = "follow_role" | "only";
+
+/** GET /tools (services/cards.py ToolInfo). */
+export interface ToolInfo {
+  name: ToolName;
+  group: ToolGroup;
+  admin_only: boolean;
+}
+
+/**
+ * The signed-in user: GET /me (MeCard). `tools` are the effective tools of the token in use;
+ * `role_allowed` / `role_defaults` bound what a new token may get. They are optional so a
+ * plain `{name, role, kind}` (tests, other users) falls back to the built-in role's tools.
+ */
 export interface User {
   name: string;
   role: UserRole;
   kind: ActorKind;
+  active?: boolean;
   created_at?: string | null;
+  tools?: ToolName[];
+  review_all?: boolean;
+  role_allowed?: ToolName[];
+  role_defaults?: ToolName[];
 }
 
+export type TokenState = "active" | "revoked" | "expired";
+
+/** A token's metadata (services/cards.py TokenCard). Never the token itself. */
+export interface TokenCard {
+  id: string;
+  user_name: string;
+  name: string;
+  /** First 12 characters ("cfg_pat_…"); "" for a token migrated from before ADR 0027. */
+  prefix: string;
+  created_at: string;
+  created_by: string;
+  last_used_at?: string | null;
+  expires_at?: string | null;
+  revoked_at?: string | null;
+  tool_mode: ToolMode;
+  include: ToolName[];
+  exclude: ToolName[];
+  /** Effective tools now (empty unless active). */
+  tools: ToolName[];
+  state: TokenState;
+}
+
+/** POST /me/tokens, POST /users/{name}/tokens: `token` is shown once. */
+export interface NewToken {
+  token: string;
+  info: TokenCard;
+}
+
+export interface CreateTokenRequest {
+  name: string;
+  expires_at?: string | null;
+  tool_mode: ToolMode;
+  include: ToolName[];
+  exclude: ToolName[];
+}
+
+export interface TokenToolsRequest {
+  tool_mode: ToolMode;
+  include: ToolName[];
+  exclude: ToolName[];
+}
+
+/** GET /users (services/cards.py UserView). */
+export interface UserView {
+  name: string;
+  role: UserRole;
+  kind: ActorKind;
+  active: boolean;
+  created_at?: string | null;
+  tokens: TokenCard[];
+}
+
+/** GET /roles (services/cards.py RoleCard). */
+export interface RoleCard {
+  name: string;
+  description: string;
+  allowed: ToolName[];
+  defaults: ToolName[];
+  review_all: boolean;
+  builtin: boolean;
+  /** How many users hold it. */
+  users: number;
+}
+
+export interface RoleInput {
+  description?: string;
+  allowed?: ToolName[];
+  defaults?: ToolName[];
+  review_all?: boolean;
+}
+
+/** POST /users: `token` (the "default" token) is shown once, and null for an agent caller. */
 export interface CreatedUser {
   user: User;
-  token: string;
+  token: string | null;
 }
 
 export interface Profile {
@@ -134,6 +250,8 @@ export interface DefinitionCard {
   profile?: string | null;
   state: DefinitionState;
   verified_by?: string | null;
+  /** The verifier's kind (ADR 0027: an admin agent may verify). */
+  verified_by_kind?: ActorKind | null;
   verified_at?: string | null;
   owner?: string | null;
   grain?: string | null;
@@ -491,6 +609,7 @@ export interface ProposalView {
   status: ProposalStatus;
   auto_applied: boolean;
   decided_by?: string | null;
+  decided_by_kind?: ActorKind | null;
   decided_at?: string | null;
   comment: string;
   resulting_version?: number | null;

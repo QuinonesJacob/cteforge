@@ -8,13 +8,15 @@ maps to a status code.
 
 from __future__ import annotations
 
+import datetime as dt
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from cteforge.domain.access import Tool, ToolMode
 from cteforge.domain.dialects import Dialect
 from cteforge.domain.models import TeamMode
-from cteforge.domain.users import ActorKind, UserRole
+from cteforge.domain.users import ActorKind
 
 _REQUEST = ConfigDict(extra="forbid")
 
@@ -137,17 +139,72 @@ class VerifyRequest(BaseModel):
 
 
 class CreateUserRequest(BaseModel):
+    """`role` is a role name (built-in or custom; ADR 0027)."""
+
     model_config = _REQUEST
 
     name: str
-    role: UserRole
+    role: str
     kind: ActorKind = ActorKind.HUMAN
 
 
-class SetRoleRequest(BaseModel):
+class UpdateUserRequest(BaseModel):
+    """Changes only the fields given (at least one): `role` (a role name), `active`."""
+
     model_config = _REQUEST
 
-    role: UserRole
+    role: str | None = None
+    active: bool | None = None
+
+    @model_validator(mode="after")
+    def _something_to_change(self) -> UpdateUserRequest:
+        if self.role is None and self.active is None:
+            raise ValueError("give `role` and/or `active`")
+        return self
+
+
+class CreateRoleRequest(BaseModel):
+    """`defaults` omitted = the same as `allowed`."""
+
+    model_config = _REQUEST
+
+    name: str
+    description: str = ""
+    allowed: list[Tool] = Field(default_factory=list)
+    defaults: list[Tool] | None = None
+    review_all: bool = False
+
+
+class UpdateRoleRequest(BaseModel):
+    """Changes only the fields given."""
+
+    model_config = _REQUEST
+
+    description: str | None = None
+    allowed: list[Tool] | None = None
+    defaults: list[Tool] | None = None
+    review_all: bool | None = None
+
+
+class CreateTokenRequest(BaseModel):
+    """A new personal access token: a name, an optional expiry (timezone-aware), and its
+    tools: `follow_role` (role defaults + include − exclude) or `only` (include)."""
+
+    model_config = _REQUEST
+
+    name: str = Field(min_length=1, max_length=100)
+    expires_at: dt.datetime | None = None
+    tool_mode: ToolMode = ToolMode.FOLLOW_ROLE
+    include: list[Tool] = Field(default_factory=list)
+    exclude: list[Tool] = Field(default_factory=list)
+
+
+class TokenToolsRequest(BaseModel):
+    model_config = _REQUEST
+
+    tool_mode: ToolMode
+    include: list[Tool] = Field(default_factory=list)
+    exclude: list[Tool] = Field(default_factory=list)
 
 
 class SettingsRequest(BaseModel):

@@ -1,6 +1,6 @@
 """Use-cases: compile_and_run (definitions by reference) and check_and_run (exploratory SQL).
 
-DESIGN §6, §8, §11, §17; ADR 0005, 0007, 0008, 0013. Both need Action.RUN (viewer).
+DESIGN §6, §8, §11, §17; ADR 0005, 0007, 0008, 0013. Each needs the tool of its name (ADR 0027).
 
 compile_and_run flow: resolve `uses` (or a recipe) → load each definition → pick the
 warehouse profile and target dialect → render each definition (templating) → compose with
@@ -81,6 +81,7 @@ from pydantic import ValidationError
 from cteforge.audit.tag import new_compile_id, sql_tag, tag_sql
 from cteforge.compose.assemble import ComposedQuery, Part, compose
 from cteforge.compose.checks import ensure_query
+from cteforge.domain.access import Tool
 from cteforge.domain.audit import AuditKind, AuditOutcome
 from cteforge.domain.dialects import Dialect
 from cteforge.domain.errors import (
@@ -115,7 +116,6 @@ from cteforge.services.cards import (
 )
 from cteforge.services.context import AppContext, team_mode
 from cteforge.templating.render import render
-from cteforge.trust.approval import Action
 from cteforge.trust.labels import TrustInputs, TrustResult, assess
 
 
@@ -156,9 +156,15 @@ def _definition_matches(ctx: AppContext, tree: Any, dialect: Dialect) -> list[Is
     return hints
 
 
+_RUN_TOOLS = {
+    AuditKind.COMPILE_AND_RUN: Tool.COMPILE_AND_RUN,
+    AuditKind.CHECK_AND_RUN: Tool.CHECK_AND_RUN,
+}
+
+
 def _require(ctx: AppContext, user: User, kind: AuditKind, question: str | None) -> None:
     with _audit.audit_failures(ctx, user, kind, question=question):
-        require(user, Action.RUN)
+        require(user, _RUN_TOOLS[kind])
 
 
 # ── Result size ──────────────────────────────────────────────────────────────────────

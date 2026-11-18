@@ -47,6 +47,7 @@ from collections import Counter
 from collections.abc import Sequence
 from dataclasses import dataclass
 
+from cteforge.domain.access import Tool
 from cteforge.domain.audit import AuditKind
 from cteforge.domain.models import Definition, DefinitionState
 from cteforge.domain.users import User
@@ -54,7 +55,6 @@ from cteforge.services import _audit, _library, _meaning
 from cteforge.services.auth import require
 from cteforge.services.cards import SearchHit, search_hit
 from cteforge.services.context import AppContext, team_mode
-from cteforge.trust.approval import Action
 
 MAX_LIMIT = 100
 RRF_K = 60
@@ -182,9 +182,9 @@ def search(
     question: str | None = None,
 ) -> list[SearchHit]:
     """Ranked definitions for `query` (see module docstring). `limit` is clamped to
-    1..100. Needs Action.SEARCH (viewer)."""
+    1..100. Needs Tool.SEARCH."""
     with _audit.audit_failures(ctx, user, AuditKind.SEARCH, question=question):
-        require(user, Action.SEARCH)
+        require(user, Tool.SEARCH)
     limit = max(1, min(limit, MAX_LIMIT))
     states = _library.visible_states(team_mode(ctx), include_drafts)
     candidates = [

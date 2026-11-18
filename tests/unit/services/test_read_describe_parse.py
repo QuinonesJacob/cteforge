@@ -36,6 +36,8 @@ from cteforge.services.parse_query import parse_query
 ROOT = Path(__file__).resolve().parents[3]
 EXAMPLES = ROOT / "examples"
 AGENT = User(name="claude-agent", role=UserRole.VIEWER, kind=ActorKind.AGENT)
+# parse_query is a build tool (ADR 0027): a contributor agent.
+BUILDER = User(name="claude-agent", role=UserRole.CONTRIBUTOR, kind=ActorKind.AGENT)
 APPROVER = User(name="ana", role=UserRole.APPROVER)
 CONTRIBUTOR = User(name="carl", role=UserRole.CONTRIBUTOR)
 SQL = (EXAMPLES / "queries" / "realization_rate.sql").read_text()
@@ -102,7 +104,7 @@ def test_include_source_adds_sql_and_annotations_that_parse_back(ctx: AppContext
     names = {a.name: a for a in card.annotations}
     assert set(names) == {v.name for v in card.variables}
     # The literal IDs address the rebuilt SQL (what the revise flow parses first).
-    report = parse_query(ctx, AGENT, card.source_sql, Dialect.DUCKDB, profile="demo")
+    report = parse_query(ctx, BUILDER, card.source_sql, Dialect.DUCKDB, profile="demo")
     ids = {lit["id"] for lit in report.literals} | {g["id"] for g in report.grains or []}
     assert all(set(a.literals) <= ids for a in card.annotations)
 
@@ -135,7 +137,7 @@ def test_definition_history(ctx: AppContext) -> None:
 
 
 def test_parse_with_warehouse_types(ctx: AppContext) -> None:
-    report = parse_query(ctx, AGENT, SQL, Dialect.DUCKDB)
+    report = parse_query(ctx, BUILDER, SQL, Dialect.DUCKDB)
     assert report.schema_found and report.issues == []
     assert report.tables == ["accounts", "deals", "invoices"]
     assert report.outputs == ["month", "region", "realization_rate"]
@@ -153,7 +155,7 @@ def test_parse_with_warehouse_types(ctx: AppContext) -> None:
 
 
 def test_parse_dialect_mismatch_still_reads_types_with_a_warning(ctx: AppContext) -> None:
-    report = parse_query(ctx, AGENT, SQL, Dialect.POSTGRES, profile="demo")
+    report = parse_query(ctx, BUILDER, SQL, Dialect.POSTGRES, profile="demo")
     assert report.schema_found
     assert [(i.code, i.severity) for i in report.issues] == [
         (IssueCode.DIALECT_MISMATCH, Severity.WARNING)
@@ -164,13 +166,13 @@ def test_parse_dialect_mismatch_still_reads_types_with_a_warning(ctx: AppContext
 
 
 def test_parse_unknown_table_and_no_profile(ctx: AppContext, tmp_path: Path) -> None:
-    report = parse_query(ctx, AGENT, "SELECT x FROM ghosts WHERE x = 1", Dialect.DUCKDB)
+    report = parse_query(ctx, BUILDER, "SELECT x FROM ghosts WHERE x = 1", Dialect.DUCKDB)
     assert not report.schema_found
     assert [i.code for i in report.issues] == [IssueCode.TYPE_UNKNOWN]
     assert "ghosts" in report.issues[0].message
     config = AppConfig(db_url=f"sqlite:///{tmp_path / 'bare.db'}")
     with open_context(config, profiles=[]) as bare:
-        report = parse_query(bare, AGENT, SQL, Dialect.DUCKDB)
+        report = parse_query(bare, BUILDER, SQL, Dialect.DUCKDB)
         assert [i.code for i in report.issues] == [IssueCode.CHECKS_INCOMPLETE]
         assert len(report.literals) == 7  # 2 dates, 2 statuses, 2 regions, paid
 
@@ -178,18 +180,18 @@ def test_parse_unknown_table_and_no_profile(ctx: AppContext, tmp_path: Path) -> 
 def test_parse_omitted_dialect_follows_the_connection(ctx: AppContext, tmp_path: Path) -> None:
     """Explicit dialect → the profile's dialect (given, else the default connection) →
     PolicyError (ADR 0021)."""
-    report = parse_query(ctx, AGENT, SQL)
+    report = parse_query(ctx, BUILDER, SQL)
     assert report.dialect is Dialect.DUCKDB  # the only profile's
     assert IssueCode.DIALECT_MISMATCH not in {i.code for i in report.issues}
-    explicit = parse_query(ctx, AGENT, SQL, Dialect.POSTGRES)
+    explicit = parse_query(ctx, BUILDER, SQL, Dialect.POSTGRES)
     assert explicit.dialect is Dialect.POSTGRES
     assert IssueCode.DIALECT_MISMATCH in {i.code for i in explicit.issues}
     assert last_event(ctx).extra["dialect"] == "postgres"
     config = AppConfig(db_url=f"sqlite:///{tmp_path / 'bare.db'}")
     with open_context(config, profiles=[]) as bare:
         with pytest.raises(PolicyError, match="ask an admin to set a default connection"):
-            parse_query(bare, AGENT, SQL)
-        assert parse_query(bare, AGENT, SQL, "duckdb").dialect is Dialect.DUCKDB
+            parse_query(bare, BUILDER, SQL)
+        assert parse_query(bare, BUILDER, SQL, "duckdb").dialect is Dialect.DUCKDB
 
 
 def test_default_connection_picks_the_profile_and_its_dialect(
@@ -202,24 +204,24 @@ def test_default_connection_picks_the_profile_and_its_dialect(
     config = AppConfig(db_url=f"sqlite:///{tmp_path / 'two.db'}")
     with open_context(config, profiles=profiles) as two:
         with pytest.raises(PolicyError, match="No dialect given"):
-            parse_query(two, AGENT, SQL)  # two profiles, no default
+            parse_query(two, BUILDER, SQL)  # two profiles, no default
         save_default_connection(two, "pg")
         assert two.warehouses.default_name == "pg"
         assert _library.resolve_dialect(two, None) is Dialect.POSTGRES
         assert _library.resolve_dialect(two, None, "demo") is Dialect.DUCKDB  # profile wins
-        assert parse_query(two, AGENT, SQL, profile="demo").dialect is Dialect.DUCKDB
+        assert parse_query(two, BUILDER, SQL, profile="demo").dialect is Dialect.DUCKDB
         save_default_connection(two, "demo")
-        report = parse_query(two, AGENT, SQL)
+        report = parse_query(two, BUILDER, SQL)
         assert (report.dialect, report.schema_found) == (Dialect.DUCKDB, True)
         two.store.set_setting("default_connection", "gone")  # removed from connections.yml
         with pytest.raises(PolicyError, match="No dialect given"):
-            parse_query(two, AGENT, SQL)  # no fallback: two profiles, no env default
-        assert parse_query(two, AGENT, SQL, "duckdb").issues[0].code is (
+            parse_query(two, BUILDER, SQL)  # no fallback: two profiles, no env default
+        assert parse_query(two, BUILDER, SQL, "duckdb").issues[0].code is (
             IssueCode.DEFAULT_CONNECTION_MISSING
         )
     env_default = config.model_copy(update={"default_profile": "demo"})
     with open_context(env_default, profiles=profiles) as fallback:
-        report = parse_query(fallback, AGENT, SQL)  # "gone" is still stored
+        report = parse_query(fallback, BUILDER, SQL)  # "gone" is still stored
         assert (report.dialect, report.schema_found) == (Dialect.DUCKDB, True)
         missing = [i for i in report.issues if i.code is IssueCode.DEFAULT_CONNECTION_MISSING]
         assert len(missing) == 1 and missing[0].severity is Severity.WARNING
@@ -232,10 +234,10 @@ def test_default_connection_picks_the_profile_and_its_dialect(
 
 def test_parse_errors(ctx: AppContext) -> None:
     with pytest.raises(SqlParseError):
-        parse_query(ctx, AGENT, "SELEC FROM (", Dialect.DUCKDB)
+        parse_query(ctx, BUILDER, "SELEC FROM (", Dialect.DUCKDB)
     assert last_event(ctx).error == "SqlParseError"
     with pytest.raises(NotFoundError):
-        parse_query(ctx, AGENT, SQL, Dialect.DUCKDB, profile="nope")
+        parse_query(ctx, BUILDER, SQL, Dialect.DUCKDB, profile="nope")
 
 
 # ── audit log ────────────────────────────────────────────────────────────────────────

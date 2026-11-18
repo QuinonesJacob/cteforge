@@ -16,3 +16,6 @@ cteforge.db
 connections.yml
 cteforge-demo/
 env.sh
+
+# agent worktrees
+.claude/worktrees/

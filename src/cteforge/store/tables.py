@@ -19,9 +19,12 @@ from sqlalchemy import (
     Table,
     Text,
     UniqueConstraint,
+    true,
 )
 
-STORE_SCHEMA_VERSION = 1
+# 2: roles, tokens, users.active (ADR 0027). A version-1 database is migrated on open
+# (Store.init_schema): each user's token_sha256 becomes a token named "default".
+STORE_SCHEMA_VERSION = 2
 
 _ID = 200  # Max length of ids and names used as keys.
 _ENUM = 32  # Max length of enum values (state, status, role, kind).
@@ -108,10 +111,47 @@ users = Table(
     "users",
     metadata,
     Column("name", String(_ID), primary_key=True),
-    Column("role", String(_ENUM), nullable=False),
+    Column("role", String(_ENUM), nullable=False),  # a roles.name (not a foreign key)
     Column("kind", String(_ENUM), nullable=False),
+    # Legacy (schema 1): no longer authenticates anything. Version-1 values were migrated
+    # to `tokens`; new users get a random value nobody knows. Kept NOT NULL + unique so a
+    # version-1 binary can't open the database (schema_version 2 refuses it anyway).
     Column("token_sha256", String(64), nullable=False, unique=True),
     Column("created_at", DateTime(timezone=True), nullable=False),
+    # Added to version-1 databases by an explicit ALTER (Store._migrate_v1).
+    Column("active", Boolean, nullable=False, server_default=true()),
+)
+
+# Configurable roles (ADR 0027). Built-ins are seeded by init_schema when missing.
+roles = Table(
+    "roles",
+    metadata,
+    Column("name", String(_ENUM), primary_key=True),
+    Column("description", Text, nullable=False),
+    Column("allowed", Text, nullable=False),  # JSON list of tool names
+    Column("defaults", Text, nullable=False),  # JSON list of tool names (⊆ allowed)
+    Column("review_all", Boolean, nullable=False),
+    Column("builtin", Boolean, nullable=False),
+    Column("updated_at", DateTime(timezone=True), nullable=False),
+)
+
+# Personal access tokens (ADR 0027): many per user, stored only as SHA-256 hashes.
+tokens = Table(
+    "tokens",
+    metadata,
+    Column("id", String(64), primary_key=True),  # uuid4 hex
+    Column("user_name", String(_ID), ForeignKey("users.name"), nullable=False, index=True),
+    Column("name", String(_ID), nullable=False),
+    Column("prefix", String(16), nullable=False),  # display only; "" for migrated tokens
+    Column("token_sha256", String(64), nullable=False, unique=True),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+    Column("created_by", String(_ID), nullable=False),
+    Column("last_used_at", DateTime(timezone=True), nullable=True),
+    Column("expires_at", DateTime(timezone=True), nullable=True),
+    Column("revoked_at", DateTime(timezone=True), nullable=True),
+    Column("tool_mode", String(_ENUM), nullable=False),
+    Column("include_tools", Text, nullable=False),  # JSON list of tool names
+    Column("exclude_tools", Text, nullable=False),  # JSON list of tool names
 )
 
 settings = Table(

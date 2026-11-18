@@ -1,7 +1,7 @@
 """Use-case: the full card of one definition, its version history, its search document and
 what references it (DESIGN §6, §15, §19; ADR 0024).
 
-Needs Action.DESCRIBE (viewer). Any state can be described, drafts included: describing
+Needs Tool.GET_DEFINITION (viewer). Any state can be described, drafts included: describing
 is how a person or agent learns why something is not usable. Audit is best-effort here
 (`fail_closed=False`): a lookup returns no warehouse data. A former id (renamed) fails
 with a NotFoundError naming the current id (`_library.definition_not_found`).
@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from typing import NoReturn
 
+from cteforge.domain.access import Tool
 from cteforge.domain.audit import AuditKind
 from cteforge.domain.models import DefinitionVersionInfo
 from cteforge.domain.users import User
@@ -23,12 +24,11 @@ from cteforge.services.cards import (
     card_from_definition,
 )
 from cteforge.services.context import AppContext
-from cteforge.trust.approval import Action
 
 
 def _require(ctx: AppContext, user: User, what: str) -> None:
     with _audit.audit_failures(ctx, user, AuditKind.GET_DEFINITION, extra={"op": what}):
-        require(user, Action.DESCRIBE)
+        require(user, Tool.GET_DEFINITION)
 
 
 def _not_found(ctx: AppContext, user: User, id: str, version: int | None, what: str) -> NoReturn:
@@ -65,6 +65,10 @@ def get_definition(
     formers = [f.former_id for f in ctx.store.former_ids(id)]
     card = card_from_definition(definition, ctx.store.definition_history(id))
     card = card.model_copy(update={"former_ids": formers})
+    if card.verified_by is not None:
+        verifier = ctx.store.get_user(card.verified_by)
+        if verifier is not None:
+            card = card.model_copy(update={"verified_by_kind": verifier.kind})
     if include_source:
         card = card.model_copy(
             update={

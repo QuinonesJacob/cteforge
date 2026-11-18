@@ -135,11 +135,14 @@ test("admin sets the default connection in Settings; Import starts on it", async
       page.getByText("Differs from connection demo: checks run on SQL translated to duckdb, lower trust."),
     ).toBeVisible();
 
-    // Non-admins have no Settings link (team settings are admin-only).
+    // Non-admins see Settings for their own tokens only (team settings need manage_settings).
     await page.evaluate(() => sessionStorage.clear()); // sign out (the token lives there)
     await signIn(page, tokens.approver);
     await expect(page.getByRole("link", { name: "Import", exact: true })).toBeVisible();
-    await expect(page.getByRole("link", { name: "Settings", exact: true })).toHaveCount(0);
+    await page.getByRole("link", { name: "Settings", exact: true }).click();
+    await expect(page.getByRole("heading", { name: "My tokens" })).toBeVisible();
+    await expect(page.getByLabel("Default connection")).toHaveCount(0);
+    await expect(page.getByRole("heading", { name: "Users", exact: true })).toHaveCount(0);
   } finally {
     await api("PUT", "/settings", tokens.admin, { default_connection: null });
   }

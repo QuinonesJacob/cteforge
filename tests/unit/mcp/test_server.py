@@ -26,6 +26,7 @@ from mcp.types import CallToolResult
 from starlette.applications import Starlette
 from starlette.routing import Mount
 
+from cteforge.domain.access import Tool
 from cteforge.domain.audit import AuditKind
 from cteforge.domain.connections import WarehouseProfile
 from cteforge.domain.dialects import Dialect
@@ -44,6 +45,7 @@ ANALYST = User(name="analyst", role=UserRole.CONTRIBUTOR)
 AGENT = User(name="claude-agent", role=UserRole.CONTRIBUTOR, kind=ActorKind.AGENT)
 AGENT_APPROVER = User(name="robo", role=UserRole.APPROVER, kind=ActorKind.AGENT)
 VIEWER_AGENT = User(name="reader-agent", role=UserRole.VIEWER, kind=ActorKind.AGENT)
+ADMIN_AGENT = User(name="adminbot", role=UserRole.ADMIN, kind=ActorKind.AGENT)
 
 Q3_APAC = {"period": {"start": "2025-07-01", "end": "2025-10-01"}, "regions": ["APAC"]}
 
@@ -120,8 +122,10 @@ async def test_lists_the_tools_with_sane_schemas(ctx: AppContext) -> None:
     async with client(ctx, AGENT) as session:
         tools = (await session.list_tools()).tools
     by_name = {t.name: t for t in tools}
-    assert sorted(by_name) == sorted(TOOL_NAMES) and len(by_name) == 12
-    assert not [n for n in by_name if "approve" in n or "verify" in n]  # ADR 0007
+    assert len(TOOL_NAMES) == 17
+    # A contributor agent: use + build tools, list_proposals and review_proposal (owners
+    # approve what they own); no admin tools (ADR 0027).
+    assert set(by_name) == set(TOOL_NAMES) - {"list_users", "manage_user", "manage_role"}
     for tool in tools:
         assert tool.description and len(tool.description) > 80
         assert tool.inputSchema["type"] == "object"
@@ -152,6 +156,21 @@ async def test_lists_the_tools_with_sane_schemas(ctx: AppContext) -> None:
     assert recipe_schema["additionalProperties"] is False
     assert by_name["search"].annotations.readOnlyHint is True
     assert by_name["propose_definition"].annotations.readOnlyHint is False
+    assert by_name["list_proposals"].annotations.readOnlyHint is True
+    assert by_name["review_proposal"].annotations.readOnlyHint is False
+
+
+@pytest.mark.anyio
+async def test_admin_tools_carry_annotations(ctx: AppContext) -> None:
+    async with client(ctx, ADMIN_AGENT) as session:
+        by_name = {t.name: t for t in (await session.list_tools()).tools}
+    assert set(by_name) == set(TOOL_NAMES)
+    assert by_name["list_users"].annotations.readOnlyHint is True
+    for name in ("manage_user", "manage_role", "review_proposal"):
+        hints = by_name[name].annotations
+        assert hints.readOnlyHint is False and hints.destructiveHint is True
+    for tool in by_name.values():
+        assert tool.description and len(tool.description) > 80
 
 
 def test_server_instructions_carry_the_shared_guidance(ctx: AppContext) -> None:
@@ -371,8 +390,10 @@ async def test_viewer_cannot_propose_and_the_error_is_clean(ctx: AppContext) -> 
         body, err = error(await session.call_tool("propose_definition", args))
     assert body.startswith("PermissionDeniedError: ")
     assert err == {"type": "PermissionDeniedError", "message": err["message"], "issues": []}
-    assert VIEWER_AGENT.name in err["message"]
+    assert "propose_definition" in err["message"]
     assert ctx.store.get_definition("booked_vs_collected") is None
+    event = ctx.audit.list_events(limit=1)[0]
+    assert event.actor == VIEWER_AGENT.name and event.extra["op"] == "tool_refused"
 
 
 @pytest.mark.anyio
@@ -380,8 +401,14 @@ async def test_an_agent_approver_has_no_way_to_verify(ctx: AppContext) -> None:
     async with client(ctx, AGENT_APPROVER) as session:
         names = {t.name for t in (await session.list_tools()).tools}
         result = await session.call_tool("verify_definition", {"id": "realization_rate"})
-    assert names == set(TOOL_NAMES)
+        verify = await session.call_tool(
+            "review_proposal",
+            {"action": "verify", "definition_id": "realization_rate", "version": 1},
+        )
+    assert "review_proposal" in names and "manage_user" not in names
     assert result.isError and "Unknown tool" in text_of(result)
+    body, err = error(verify)
+    assert err["type"] == "PermissionDeniedError" and "verify" in body
     assert ctx.store.get_definition("realization_rate").state is DefinitionState.LLM_ANNOTATED
 
 
@@ -421,10 +448,11 @@ async def test_unknown_definition_is_not_found(ctx: AppContext) -> None:
 
 @pytest.mark.anyio
 async def test_user_is_resolved_on_every_call(ctx: AppContext) -> None:
-    users = iter([AGENT, VIEWER_AGENT])
-    server = build_server(ctx, lambda: next(users))
+    current = [AGENT]
+    server = build_server(ctx, lambda: current[0])
     async with create_connected_server_and_client_session(server) as session:
         await session.call_tool("search", {"query": "realization"})
+        current[0] = VIEWER_AGENT
         await session.call_tool("search", {"query": "realization"})
     actors = [e.actor for e in ctx.audit.list_events(limit=2)]
     assert sorted(actors) == sorted([AGENT.name, VIEWER_AGENT.name])
@@ -485,11 +513,14 @@ async def test_http_app_mounts_and_resolves_the_user_per_request(ctx: AppContext
 # ── stdio ────────────────────────────────────────────────────────────────────────────
 
 
-def _stdio_params(db_url: str, user: str) -> Any:
+def _stdio_params(db_url: str, user: str, token: str | None = None) -> Any:
     from mcp.client.stdio import StdioServerParameters
 
     env = dict(os.environ) | {"CTEFORGE_DB_URL": db_url, "CTEFORGE_USER": user}
     env.pop("CTEFORGE_CONNECTIONS", None)
+    env.pop("CTEFORGE_TOKEN", None)
+    if token is not None:
+        env["CTEFORGE_TOKEN"] = token
     return StdioServerParameters(
         command=sys.executable,
         args=["-c", "from cteforge.mcp.server import run_stdio; run_stdio()"],
@@ -511,12 +542,14 @@ async def test_run_stdio_serves_as_the_local_user(tmp_path: Path) -> None:
     async with stdio_client(params) as (read, write), ClientSession(read, write) as session:
         init = await session.initialize()
         assert init.instructions == descriptions.INSTRUCTIONS
-        assert len((await session.list_tools()).tools) == len(TOOL_NAMES)
+        names = {t.name for t in (await session.list_tools()).tools}
         hits = await session.call_tool("search", {"query": "realization"})
+    # CTEFORGE_USER without a token: the role's defaults (a contributor's 14 tools).
+    assert names == set(TOOL_NAMES) - {"list_users", "manage_user", "manage_role"}
     assert ok(hits)["result"] == []
     with open_context(AppConfig(db_url=db_url)) as context:
         jo = context.store.get_user("jo")
-        assert jo.role is UserRole.CONTRIBUTOR and jo.kind is ActorKind.AGENT  # as stored
+        assert jo.role == UserRole.CONTRIBUTOR and jo.kind is ActorKind.AGENT  # as stored
         assert context.audit.list_events(limit=1)[0].actor == "jo"
 
 
@@ -533,3 +566,165 @@ def test_run_stdio_never_creates_the_local_user(tmp_path: Path, monkeypatch) -> 
         run_stdio()
     with open_context(AppConfig(db_url=db_url)) as context:
         assert context.store.list_users() == []
+
+
+@pytest.mark.anyio
+async def test_run_stdio_with_a_token_shows_only_its_tools(tmp_path: Path) -> None:
+    from mcp.client.stdio import stdio_client
+
+    from cteforge.services import admin
+
+    db_url = f"sqlite:///{tmp_path / 'stdio.db'}"
+    with open_context(AppConfig(db_url=db_url)) as context:
+        root, _ = admin.bootstrap_admin(context, "root")
+        admin.create_user(context, root, "jo", UserRole.CONTRIBUTOR, ActorKind.AGENT)
+        narrow = admin.create_token(
+            context, root, "jo", name="support", tool_mode="only", include=["search"]
+        )
+    # CTEFORGE_USER names someone else: the token decides who and what.
+    params = _stdio_params(db_url, "root", token=narrow.token)
+    async with stdio_client(params) as (read, write), ClientSession(read, write) as session:
+        await session.initialize()
+        names = [t.name for t in (await session.list_tools()).tools]
+        hidden = await session.call_tool("check_and_run", {"sql": "SELECT 1"})
+    assert names == ["search"]
+    body, err = error(hidden)
+    assert err["type"] == "PermissionDeniedError" and "check_and_run" in body
+    with open_context(AppConfig(db_url=db_url)) as context:
+        event = context.audit.list_events(limit=1)[0]
+        assert event.actor == "jo" and event.extra == {
+            "op": "tool_refused",
+            "tool": "check_and_run",
+        }
+
+
+# ── Tool access (ADR 0027) ───────────────────────────────────────────────────────────
+
+
+@pytest.mark.anyio
+async def test_tools_list_follows_the_callers_tools(ctx: AppContext) -> None:
+    narrow = AGENT.model_copy(update={"tools": frozenset({Tool.SEARCH, Tool.VERIFY})})
+    async with client(ctx, narrow) as session:
+        names = sorted(t.name for t in (await session.list_tools()).tools)
+        hidden = await session.call_tool("compile_and_run", {"uses": {}})
+        shown = await session.call_tool("search", {"query": "realization"})
+    assert names == ["review_proposal", "search"]  # verify shows review_proposal
+    body, err = error(hidden)
+    assert err["type"] == "PermissionDeniedError" and "compile_and_run" in body
+    assert ok(shown)["result"][0]["id"] == "realization_rate"
+    refused = [e for e in ctx.audit.list_events(limit=5) if e.extra.get("op") == "tool_refused"]
+    assert refused[0].outcome.value == "rejected" and refused[0].extra["tool"] == "compile_and_run"
+
+
+@pytest.mark.anyio
+async def test_no_caller_means_no_tools(ctx: AppContext) -> None:
+    def refuse() -> User:
+        raise PermissionDeniedError("Invalid or missing token")
+
+    server = build_server(ctx, refuse)
+    async with create_connected_server_and_client_session(server) as session:
+        assert (await session.list_tools()).tools == []
+
+
+@pytest.mark.anyio
+async def test_review_proposal_by_an_admin_agent(ctx: AppContext) -> None:
+    from cteforge.services import admin as admin_service
+    from cteforge.services.propose import revise_definition
+
+    admin_service.create_user(
+        ctx, User(name="r", role=UserRole.ADMIN), "adminbot", "admin", "agent"
+    )
+    ctx.store.set_setting("mode", "strict")
+    pending = revise_definition(
+        ctx, ANALYST, id="realization_rate", base_version=1, metadata={"meaning": "x"}
+    )
+    other = revise_definition(
+        ctx, ANALYST, id="realization_rate", base_version=1, metadata={"meaning": "y"}
+    )
+    mine = revise_definition(
+        ctx, ADMIN_AGENT, id="realization_rate", base_version=1, metadata={"meaning": "z"}
+    )
+    async with client(ctx, ADMIN_AGENT) as session:
+        listed = ok(await session.call_tool("list_proposals", {}))["result"]
+        assert {p["id"] for p in listed} >= {pending.proposal.id, mine.proposal.id}
+        own_body, own = error(
+            await session.call_tool(
+                "review_proposal", {"action": "approve", "id": mine.proposal.id}
+            )
+        )
+        rejected = ok(
+            await session.call_tool(
+                "review_proposal",
+                {"action": "reject", "id": other.proposal.id, "comment": "duplicate"},
+            )
+        )
+        verified = ok(
+            await session.call_tool(
+                "review_proposal", {"action": "verify", "id": pending.proposal.id}
+            )
+        )
+        missing_body, missing = error(
+            await session.call_tool("review_proposal", {"action": "approve"})
+        )
+    assert own["type"] == "PermissionDeniedError" and "four-eyes" in own_body
+    assert rejected["proposal"]["status"] == "rejected"
+    assert rejected["proposal"]["decided_by_kind"] == "agent"
+    assert verified["outcome"]["definition"]["state"] == "verified"
+    assert ctx.store.get_definition("realization_rate").verified_by == "adminbot"
+    assert missing["type"] == "PolicyError"
+
+
+@pytest.mark.anyio
+async def test_admin_agent_manages_users_and_roles_without_tokens(ctx: AppContext) -> None:
+    from cteforge.services import admin as admin_service
+
+    root, _ = admin_service.bootstrap_admin(ctx, "root")
+    admin_service.create_user(ctx, root, "adminbot", "admin", "agent")
+    async with client(ctx, ADMIN_AGENT) as session:
+        created = ok(
+            await session.call_tool(
+                "manage_user", {"action": "create", "name": "helper", "role": "viewer"}
+            )
+        )
+        boss_body, boss = error(
+            await session.call_tool(
+                "manage_user",
+                {"action": "create", "name": "boss", "role": "admin", "kind": "human"},
+            )
+        )
+        role = ok(
+            await session.call_tool(
+                "manage_role",
+                {"action": "create", "name": "support_bot", "allowed": ["search"]},
+            )
+        )
+        moved = ok(
+            await session.call_tool(
+                "manage_user", {"action": "set_role", "name": "helper", "role": "support_bot"}
+            )
+        )
+        off = ok(await session.call_tool("manage_user", {"action": "deactivate", "name": "helper"}))
+        root_off_body, root_off = error(
+            await session.call_tool("manage_user", {"action": "deactivate", "name": "root"})
+        )
+        admin_role_body, admin_role = error(
+            await session.call_tool(
+                "manage_role", {"action": "edit", "name": "admin", "defaults": ["search"]}
+            )
+        )
+        overview = ok(await session.call_tool("list_users", {}))
+    assert created["user"]["name"] == "helper" and created["user"]["kind"] == "agent"
+    assert created["token"] is None and created["user"]["tokens"] == []
+    assert boss["type"] == "PermissionDeniedError" and ctx.store.get_user("boss") is None
+    assert role["role"]["allowed"] == ["search"]
+    assert moved["user"]["role"] == "support_bot" and off["user"]["active"] is False
+    assert root_off["type"] == "PermissionDeniedError"
+    assert ctx.store.get_user("root").active is True
+    assert admin_role["type"] == "PermissionDeniedError"
+    names = {u["name"] for u in overview["users"]}
+    assert names == {"root", "adminbot", "helper"}
+    root_view = next(u for u in overview["users"] if u["name"] == "root")
+    assert root_view["tokens"][0]["prefix"].startswith("cfg_pat_")
+    assert "support_bot" in {r["name"] for r in overview["roles"]}
+    assert ctx.store.list_tokens("helper") == []
+    assert not any(n.startswith("token") for n in TOOL_NAMES)  # no tool returns a token

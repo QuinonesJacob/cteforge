@@ -107,11 +107,9 @@ Rules:
 
 ## 6. MCP tools (M4)
 
-> **Planned (ADR 0026, 0027, accepted, not built):** `propose_recipe` / `list_recipes` /
+> **Planned (ADR 0026, accepted, not built):** `propose_recipe` / `list_recipes` /
 > `recipe_id` go; `propose_definition` takes `sql` or `composition`; `propose_join` takes
-> `action: add | annotate`. Review (`list_proposals`, `review_proposal`) and admin
-> (`list_users`, `manage_user`, `manage_role`) tools are added, and `tools/list` is
-> filtered per token. Admin agents may verify (four-eyes still applies).
+> `action: add | annotate`.
 
 | Use the library | Build the library |
 |---|---|
@@ -121,8 +119,21 @@ Rules:
 | `check_and_run(sql)` — exploratory, labeled; SQL that is a definition's original query gets a `matches_definition` hint to use `compile_and_run` instead | `propose_join(...)` · `propose_recipe(...)` (`version`, `state`, `schema_version` are set by cteforge, never by the caller) |
 | `list_recipes(query?)` · `list_joins(table?)` · `describe_tables(tables?)` — discovery: saved recipes, join-map keys, columns + types (+ units the library declares) | |
 
-Approving and verifying are not MCP tools: they happen in the GUI, HTTP API or CLI by a
-person (ADR 0007, 0018). The GUI (M5) drives the same services; MCP and HTTP are thin adapters.
+| Review (when allowed) | Admin (when allowed) |
+|---|---|
+| `list_proposals(status?)` — proposals with checks, diff and impact | `list_users()` — users, roles, token names / prefixes / last use (never token values) |
+| `review_proposal(action: approve \| reject \| verify, id? \| definition_id + version, comment)` | `manage_user(action: create \| set_role \| set_tools \| deactivate \| activate \| revoke_token, …)` · `manage_role(action: create \| edit \| delete, …)` |
+
+**Tool access (ADR 0027).** The permission unit is the tool: `tools/list` shows only the
+tools the caller's token allows (its user's role ∩ the token's own list; stdio without a
+token: the user's role defaults), and calling any other tool is refused
+(PermissionDeniedError) and audited. The same tools are checked in services, so the HTTP API
+is not a way around them. Write tools carry `readOnlyHint: false` (and `destructiveHint`
+for review, user and role management) so clients can still ask the person first. No tool
+ever returns a token. Approving and verifying are open to agents only through
+`review_proposal`, within the four-eyes rule (no exemption for agents) and, for verify and
+changes to verified work, only with the admin role. The GUI (M5) drives the same services;
+MCP and HTTP are thin adapters.
 
 ## 7. Proposal checks
 
@@ -144,7 +155,7 @@ States: `draft` → `llm_annotated` → `verified`.
 |---|---|---|
 | `draft` | Proposed; checks failed or not run | No |
 | `llm_annotated` | Passed checks; no human review | Yes, labeled |
-| `verified` | Approved by a person | Yes, labeled with verifier + date |
+| `verified` | Approved by a person (or an admin agent, ADR 0027) | Yes, labeled with verifier (+ kind) + date |
 
 Result labels, best to worst: `verified` · `built_from_verified_parts` · `llm_annotated` ·
 `new_logic_on_known_joins` · `exploratory`. Policy (trust/, pure):
@@ -159,23 +170,47 @@ Result labels, best to worst: `verified` · `built_from_verified_parts` · `llm_
 
 Team setting: **strict** (only verified usable) or **open** (llm_annotated usable, labeled).
 An LLM can create and improve unverified definitions; **changes to a verified definition
-always require human approval**. See ADR 0007.
+always require review by a person**, or by an agent holding the admin role (ADR 0027;
+four-eyes still applies). See ADR 0007.
 
 ## 9. Server architecture (M3+)
 
-> **Planned (ADR 0027, accepted, not built):** configurable roles (Allowed = ceiling, On by
-> default), many named show-once personal access tokens per user with per-token tool
-> lists enforced in services; agents never see tokens; admin agents manage non-admin
-> users and roles. Sign-in roadmap: tokens now → optional OIDC GUI sign-in → optional
-> MCP OAuth with cteforge as its own authorization server.
+Sign-in roadmap (ADR 0027): tokens now → optional OIDC GUI sign-in → optional MCP OAuth
+with cteforge as its own authorization server.
 
 - Self-hosted server: Postgres (SQLite for local single-user), web GUI, MCP endpoint.
-- Every change is a proposal; roles: viewer/agent-read, contributor/agent-propose,
-  definition owner (approves changes to what they own), admin.
+- Every change is a proposal. **Roles are configurable** (ADR 0027): each role has
+  **Allowed** tools (the ceiling) and **On by default** tools (what a new token starts
+  with) from one catalog — use (`search`, `get_definition`, `compile_and_run`,
+  `check_and_run`, `describe_tables`, `list_joins`, `list_recipes`), build (`parse_query`,
+  `propose_definition`, `revise_definition`, `propose_join`, `propose_recipe`), review
+  (`list_proposals`, `review_proposal`, `verify`), admin (`view_audit`, `list_users`,
+  `manage_user`, `manage_role`, `manage_settings`) — plus `review_all` (approve anything,
+  else only what the user owns). Built-ins keep today's behaviour: viewer (use +
+  list_proposals), contributor (+ build, review_proposal for what they own), approver
+  (+ review everything, verify, view_audit), admin (everything; its Allowed list is fixed).
+  Admin tools other than `view_audit` exist only in the admin role. A role in use cannot
+  be deleted; built-ins can be edited, not deleted.
+- **Personal access tokens** (GitHub-style): many named tokens per user (`cfg_pat_` + 43
+  random characters), shown once, stored as SHA-256 hashes, with a 12-character prefix,
+  created/last-used times (last use written at most once a minute), an optional expiry and
+  their own tool list: **follow role** (role defaults + include − exclude; new defaults
+  follow) or **only these**. Effective tools = role Allowed ∩ the token's list, minus
+  `verify` for an agent whose role is not admin. A revoked or expired token, or a
+  deactivated user, gets the same generic 401 on the next call. People generate their own
+  tokens (Settings → My tokens, `cteforge token create`); a human admin generates tokens for
+  any user; agents never receive a token from any surface; a token never creates a token
+  of its own user with tools it does not hold itself.
+- **Admin agents** (agent kind + admin role) may create users (no token returned), change
+  role / tools / active of non-admin users, revoke non-admin users' tokens, create and
+  edit roles other than admin, approve / reject and verify (four-eyes, no exemption).
+  Human-only: seeing or minting tokens, anything touching an admin user, granting the admin
+  role, editing the admin role. The last active admin cannot be demoted or deactivated.
 - Full version history per definition with diffs; **impact preview** ("affects 14 recipes").
 - Git is an optional export/import, not the source of truth. See ADR 0003.
-- Users and settings: team settings (strict/open mode, **default connection**) and
-  users/roles/tokens are admin-only. The default connection decides the default dialect:
+- Users and settings: team settings (strict/open mode, **default connection**;
+  `manage_settings`) and users/roles/tokens (`list_users`, `manage_user`, `manage_role`)
+  belong to the admin role. The default connection decides the default dialect:
   the dialect follows the connection (ADR 0021). Resolution: the admin's setting →
   `CTEFORGE_DEFAULT_PROFILE` → the only profile → none.
 
@@ -294,6 +329,15 @@ Revising a definition keeps its source dialect.
   values, and proposals are readable by every viewer, also in strict mode); only its class.
 - `CTEFORGE_AUTH=off` accepts only connections whose socket is loopback (peer and local
   address), whatever the Host header says (ADR 0018).
+- Tokens (ADR 0027): stored only as SHA-256 hashes; the value is returned once, in the
+  response that generates it, to a human caller only (never through MCP or to an agent);
+  every /api response is `no-store`; the audit log records token ids and prefixes, never
+  values or hashes. Unknown, revoked or expired tokens and deactivated users all get the
+  same generic 401. Tool access is enforced in services for every surface, and MCP hides
+  tools a token cannot use. A token's tools never exceed its user's role, and a token
+  cannot create a broader token for its own user (no self-escalation through a narrow token
+  someone handed to an agent). Agents never see tokens; admin agents cannot touch admin
+  users or the admin role.
 - Credentials: environment/profile only, never logged, never returned over MCP/HTTP.
   Database URLs are printed with the password redacted (`postgresql+psycopg://user:***@host/db`).
   Warehouse error messages are scrubbed of connection details; DuckDB's also of host
@@ -349,12 +393,15 @@ and optionally a final SELECT written by the agent over those aliases.
   an impact preview (recipes using the definition).
 - Auto-apply: in **open** mode, a proposal whose checks all pass and that targets a new or
   unverified definition is applied immediately as `llm_annotated`. Everything else waits.
-- Changes to a **verified** definition always wait for a person (approver or the
-  definition's owner). Approving can also verify (human only). Rejections keep a comment.
-- **Four-eyes rule** (ADR 0018 addenda): nobody may approve their own proposal or verify
-  a definition version they authored any part of, unless they are a **human** admin (so
-  single-user local mode keeps working). An agent admin never approves its own proposals
-  and never verifies. A version's authors are the author of the newest
+- Changes to a **verified** definition always wait for review by a person (approver or the
+  definition's owner) or an admin agent (ADR 0027). Approving can also verify (the
+  `verify` tool: humans whose role allows it, or agents with the admin role). Rejections
+  keep a comment. Decisions record the actor's kind (`decided_by_kind`), and a definition
+  card shows `verified_by_kind`, so "verified by an agent" is visible.
+- **Four-eyes rule** (ADR 0018 addenda, ADR 0027): nobody may approve their own proposal
+  or verify a definition version they authored any part of, unless they are a **human**
+  admin (so single-user local mode keeps working). An agent admin never approves or
+  verifies its own work (no exemption for agents). A version's authors are the author of the newest
   logic-changing version up to it and of every metadata-only version since, so a cosmetic
   revision by someone else does not let the logic's author verify it. Auto-apply is not an
   approval and is unaffected.

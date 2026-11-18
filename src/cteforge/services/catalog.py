@@ -3,7 +3,7 @@
 DESIGN §3, §6. They let an agent (or the GUI) discover what it would otherwise learn only
 by trial and error: saved recipes to run by id, the join-map keys that keep a result's
 trust label, and the columns (with types from the warehouse) of the tables the library
-reads. All need Action.DESCRIBE (viewer). Audit: AuditKind.GET_DEFINITION with
+reads. Each needs the tool of its name (ADR 0027). Audit: AuditKind.GET_DEFINITION with
 `extra.op` (`list_recipes`, `list_joins`, `describe_tables`), best effort: they return no
 result rows.
 
@@ -18,6 +18,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
+from cteforge.domain.access import Tool
 from cteforge.domain.audit import AuditKind
 from cteforge.domain.errors import PolicyError, WarehouseError
 from cteforge.domain.models import DefinitionState, JoinEdge, Recipe
@@ -26,14 +27,13 @@ from cteforge.services import _audit, _library
 from cteforge.services.auth import require
 from cteforge.services.cards import ColumnCard, TableCard
 from cteforge.services.context import AppContext, team_mode
-from cteforge.trust.approval import Action
 
 MAX_TABLES = 50  # describe_tables answers for at most this many tables per call.
 
 
 def _require(ctx: AppContext, user: User, op: str) -> None:
     with _audit.audit_failures(ctx, user, AuditKind.GET_DEFINITION, extra={"op": op}):
-        require(user, Action.DESCRIBE)
+        require(user, Tool(op))
 
 
 def _record(ctx: AppContext, user: User, op: str, **extra: object) -> None:

@@ -35,7 +35,7 @@ def test_bootstrap_then_manage_users(cli: Invoke):
     boot = cli("user", "add", "admin", "--bootstrap")
     assert boot.exit_code == 0, boot.output
     assert "created human user 'admin' with role admin" in boot.output
-    assert len(_token(boot.output)) >= 40
+    assert _token(boot.output).startswith("cfg_pat_")
 
     again = cli("user", "add", "other", "--bootstrap")
     assert again.exit_code == 1
@@ -60,9 +60,10 @@ def test_bootstrap_then_manage_users(cli: Invoke):
     role = cli("user", "role", "bob", "approver")
     assert role.exit_code == 0 and "'bob' is now approver" in role.output
 
-    rotated = cli("user", "token", "bob")
-    assert rotated.exit_code == 0
-    assert _token(rotated.output) != _token(bob.output)
+    minted = cli("token", "create", "laptop", "--user", "bob")
+    assert minted.exit_code == 0, minted.output
+    assert _token(minted.output) != _token(bob.output)
+    assert "for 'bob'" in minted.output
 
 
 def test_user_errors(cli: Invoke):
@@ -70,7 +71,7 @@ def test_user_errors(cli: Invoke):
     no_role = cli("user", "add", "bob")
     assert no_role.exit_code == 2 and "--role is required" in no_role.output
     bad_role = cli("user", "add", "bob", "--role", "king")
-    assert bad_role.exit_code == 2
+    assert bad_role.exit_code == 1 and "role must be one of" in bad_role.output
     boot_role = cli("user", "add", "x", "--bootstrap", "--role", "viewer")
     assert boot_role.exit_code == 2
     missing = cli("user", "role", "nobody", "viewer")
@@ -89,8 +90,11 @@ def test_non_admin_is_refused(cli: Invoke):
     refused = cli("user", "list", user="vic")
     assert refused.exit_code == 1 and "may not" in refused.output
     assert cli("settings", "mode", "strict", user="vic").exit_code == 1
-    own = cli("user", "token", "vic", user="vic")  # Anyone may rotate their own token.
-    assert own.exit_code == 0
+    own = cli("token", "create", "mine", user="vic")  # Anyone may generate their own.
+    assert own.exit_code == 0 and _token(own.output).startswith("cfg_pat_")
+    other = cli("token", "create", "x", "--user", "admin", user="vic")
+    assert other.exit_code == 1 and "may not" in other.output
+    assert cli("role", "list", user="vic").exit_code == 1
 
 
 def test_settings_show_and_mode(cli: Invoke):
@@ -125,3 +129,79 @@ def test_settings_connection_set_show_and_clear(fresh_demo: Invoke):
     cleared = cli("settings", "connection", "--clear")
     assert cleared.exit_code == 0 and "default connection: (not set)" in cleared.output
     assert cli("settings", "connection", "demo", user="vic").exit_code == 1  # unknown user
+
+
+def test_token_commands(cli: Invoke):
+    assert cli("user", "add", "admin", "--bootstrap").exit_code == 0
+    assert cli("user", "add", "bot", "--role", "contributor", "--agent").exit_code == 0
+    made = cli(
+        "token",
+        "create",
+        "support",
+        "--user",
+        "bot",
+        "--only",
+        "search,get_definition",
+        "--expires",
+        "2099-01-01",
+    )
+    assert made.exit_code == 0, made.output
+    token = _token(made.output)
+    assert "search, get_definition" in made.output
+    listed = cli("token", "list", "--user", "bot", "--json")
+    tokens = {t["name"]: t for t in json.loads(listed.stdout)}
+    assert set(tokens) == {"default", "support"}
+    assert tokens["support"]["tool_mode"] == "only"
+    assert tokens["support"]["expires_at"].startswith("2099-01-01")
+    assert token not in listed.stdout
+    text = cli("token", "list", "--user", "bot")
+    assert "support" in text.output and token not in text.output
+    revoked = cli("token", "revoke", tokens["support"]["id"], "--user", "bot")
+    assert revoked.exit_code == 0 and "revoked token 'support'" in revoked.output
+    again = json.loads(cli("token", "list", "--user", "bot", "--json").stdout)
+    assert {t["name"]: t["state"] for t in again} == {"default": "active", "support": "revoked"}
+    assert cli("token", "create", "x", "--only", "teleport").exit_code == 2
+    assert cli("token", "create", "x", "--only", "search", "--exclude", "search").exit_code == 2
+    assert cli("token", "create", "x", "--expires", "soon").exit_code == 2
+    beyond = cli("token", "create", "x", "--user", "bot", "--include", "manage_user")
+    assert beyond.exit_code == 1 and "does not allow" in beyond.output
+    agent = cli("token", "create", "x", user="bot")
+    assert agent.exit_code == 1 and "agents never see tokens" in agent.output
+
+
+def test_role_commands_and_deactivate(cli: Invoke):
+    assert cli("user", "add", "admin", "--bootstrap").exit_code == 0
+    made = cli(
+        "role",
+        "create",
+        "support_bot",
+        "--allow",
+        "search",
+        "--allow",
+        "compile_and_run",
+        "--default",
+        "search",
+        "--description",
+        "narrow",
+    )
+    assert made.exit_code == 0, made.output
+    listed = json.loads(cli("role", "list", "--json").stdout)
+    support = next(r for r in listed if r["name"] == "support_bot")
+    assert support["allowed"] == ["search", "compile_and_run"] and support["defaults"] == ["search"]
+    assert "support_bot" in cli("role", "list").output
+    edited = cli("role", "edit", "support_bot", "--default", "search,compile_and_run")
+    assert edited.exit_code == 0 and "on by default: search, compile_and_run" in edited.output
+    assert cli("role", "edit", "admin", "--allow", "search").exit_code == 1
+    assert cli("role", "create", "bad", "--allow", "manage_user").exit_code == 1
+    assert cli("user", "add", "sb", "--role", "support_bot", "--agent").exit_code == 0
+    held = cli("role", "delete", "support_bot")
+    assert held.exit_code == 1 and "held by users" in held.output
+    off = cli("user", "deactivate", "sb")
+    assert off.exit_code == 0 and "deactivated" in off.output
+    users = {u["name"]: u for u in json.loads(cli("user", "list", "--json").stdout)}
+    assert users["sb"]["active"] is False
+    assert cli("user", "activate", "sb").exit_code == 0
+    assert cli("user", "role", "sb", "viewer").exit_code == 0
+    assert cli("role", "delete", "support_bot").exit_code == 0
+    last = cli("user", "deactivate", "admin")
+    assert last.exit_code == 1 and "last admin" in last.output

@@ -48,7 +48,7 @@ a run form and an Edit tab per definition (revise its description, or its SQL an
 in the import builder), Explore (saved recipes, combining definitions with a final SELECT
 and saving it as a recipe, the join map, table schemas, exploratory SQL), Import (paste SQL,
 mark the literals that are variables, check, propose), the Review queue, the Audit log and
-Settings (users, tokens, team mode).
+Settings (users, roles, my tokens, team mode).
 
 ### Connect Claude Code (or any MCP client)
 
@@ -79,8 +79,11 @@ Then ask: *"What was the realization rate in APAC in Q3 2025?"* The agent calls 
 
 MCP tools: `search`, `get_definition`, `compile_and_run`, `check_and_run` (exploratory SQL,
 labeled), `parse_query`, `propose_definition`, `revise_definition`, `propose_join`,
-`propose_recipe`, and for discovery `list_recipes`, `list_joins` and `describe_tables`. There
-is no approve or verify tool: people do that (GUI, API, CLI).
+`propose_recipe`, and for discovery `list_recipes`, `list_joins` and `describe_tables`; when
+the token allows them, `list_proposals` / `review_proposal` (approve, reject, verify — never
+one's own work) and the admin tools `list_users`, `manage_user`, `manage_role`. Each client
+sees only the tools its token allows (ADR 0027). stdio acts as `CTEFORGE_TOKEN`'s user and
+tools when it is set, else as `CTEFORGE_USER` with its role's default tools.
 
 ## Search
 
@@ -126,11 +129,21 @@ nothing sent elsewhere); vectors are stored in cteforge's own database.
 - **Proposals and review** — every change (new or revised definition, recipe, join) is a
   proposal, checked on the warehouse: same query back (AST and results), types, EXPLAIN.
   In **open** mode a passing proposal for a new or unverified definition applies at once as
-  `llm_annotated`; changes to a **verified** definition always wait for a person. **Strict**
+  `llm_annotated`; changes to a **verified** definition always wait for a person (or an
+agent holding the admin role, ADR 0027). **Strict**
   mode only runs verified definitions.
 - **Four-eyes** — nobody approves their own proposal or verifies a version they authored,
-  unless they are a human admin (so single-user local mode works). Agents never verify and
-  never approve their own proposals, whatever their role (ADR 0007, ADR 0018).
+  unless they are a human admin (so single-user local mode works). Agents never approve or
+  verify their own work, whatever their role, and verify at all only with the admin role
+  (ADR 0007, ADR 0018, ADR 0027).
+- **Roles, tokens and tools** (ADR 0027) — the permission unit is the tool (`search`,
+  `compile_and_run`, `propose_definition`, `review_proposal`, `verify`, `manage_user`, …).
+  Roles are configurable (Settings → Roles): **Allowed** tools are the ceiling, **On by
+  default** what a new token gets. Each person has many named personal access tokens
+  (`cfg_pat_…`, shown once, stored as hashes) with optional expiry and their own tool list
+  (follow the role, or only these). MCP lists only the tools a token may use; the API and
+  CLI enforce the same tools. Agents never see tokens; admin agents may manage non-admin
+  users and roles.
 - **Join map and recipes** — joins are mined from trusted SQL (also through CTEs) and used to
   label new SQL; recipes save definitions + values + a final SELECT by reference.
 - **Audit** — cteforge logs its own calls (actor, definitions + versions, values, label, row
@@ -149,7 +162,9 @@ All commands act as `CTEFORGE_USER` against `CTEFORGE_DB_URL`. Run `cteforge COM
 | `search QUERY` · `run --use ALIAS=ID --vars JSON [--select SQL]` | Use the library |
 | `search-index rebuild [--force]` · `search-index download-model` | Meaning-search vectors and model (see Search) |
 | `db init` | Create the database |
-| `user add NAME [--role R] [--agent] [--bootstrap]` · `user list\|role\|token` | Users and tokens (token printed once) |
+| `user add NAME [--role R] [--agent] [--bootstrap]` · `user list\|role\|deactivate\|activate` | Users (first token printed once) |
+| `token create NAME [--user U] [--expires D] [--only T,…]` · `token list\|revoke` | Personal access tokens (printed once) |
+| `role list\|create\|edit\|delete` | Roles: allowed / on-by-default tools |
 | `settings show` · `settings mode strict\|open` | Team mode |
 | `proposals list [--status pending]` · `show` · `approve [--verify] [--comment]` · `reject --comment` | Review |
 | `verify ID VERSION` · `revalidate [IDS]` | Verify a version; drift check against the warehouse |
@@ -159,7 +174,8 @@ All commands act as `CTEFORGE_USER` against `CTEFORGE_DB_URL`. Run `cteforge COM
 Environment: `CTEFORGE_DB_URL` (default `sqlite:///cteforge.db`; Postgres via SQLAlchemy URL),
 `CTEFORGE_CONNECTIONS` (path to connections.yml), `CTEFORGE_DEFAULT_PROFILE`,
 `CTEFORGE_AUTH` (`on`; `off` makes every HTTP call the local admin and is refused unless bound
-to localhost), `CTEFORGE_USER` (stdio MCP and CLI), `CTEFORGE_SEARCH_EMBEDDINGS` (`on`; `off` =
+to localhost), `CTEFORGE_USER` (stdio MCP and CLI), `CTEFORGE_TOKEN` (stdio MCP acts as this
+token's user and tools), `CTEFORGE_SEARCH_EMBEDDINGS` (`on`; `off` =
 keyword search only), `CTEFORGE_EMBED_CACHE` (embedding model directory).
 
 ## Warehouse profiles

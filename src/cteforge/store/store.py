@@ -9,8 +9,10 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import secrets
 import struct
 import threading
+import uuid
 from collections.abc import Iterator
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 from typing import Any
@@ -25,14 +27,17 @@ from sqlalchemy import (
     delete,
     event,
     insert,
+    inspect,
     or_,
     select,
+    text,
     update,
 )
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import ArgumentError, IntegrityError, NoSuchModuleError, SQLAlchemyError
 from sqlalchemy.pool import StaticPool
 
+from cteforge.domain.access import BUILTIN_ROLES, Role, TokenInfo, Tool, ToolMode, sorted_tools
 from cteforge.domain.codec import definition_from_yaml, definition_to_yaml
 from cteforge.domain.errors import StaleVersionError, StoreError
 from cteforge.domain.models import (
@@ -45,7 +50,7 @@ from cteforge.domain.models import (
 )
 from cteforge.domain.proposals import Proposal, ProposalStatus, proposal_with_definition_renamed
 from cteforge.domain.search import SearchVector
-from cteforge.domain.users import ActorKind, User, UserRole
+from cteforge.domain.users import ActorKind, User
 from cteforge.store import tables as t
 
 
@@ -79,6 +84,49 @@ def _make_engine(url: str) -> Engine:
         raise StoreError(f"Cannot open database ({type(exc).__name__})") from exc
     event.listen(engine, "connect", _enable_sqlite_fks)
     return engine
+
+
+class _NewerSchema(StoreError):
+    """The database was written by a newer cteforge."""
+
+
+def _ensure_users_active(conn: Connection) -> None:
+    """Version-1 `users` tables lack `active`: add it (idempotent; static DDL)."""
+    columns = {c["name"] for c in inspect(conn).get_columns("users")}
+    if "active" not in columns:
+        conn.execute(text("ALTER TABLE users ADD COLUMN active BOOLEAN NOT NULL DEFAULT TRUE"))
+
+
+def _migrate_v1_tokens(conn: Connection, now: dt.datetime) -> None:
+    """ADR 0027: each user's single version-1 token hash becomes a token named
+    "default" (follow_role) when the user has no token rows yet, so it keeps working; the
+    legacy column then gets a random value nobody knows."""
+    has_tokens = select(t.tokens.c.id).where(t.tokens.c.user_name == t.users.c.name).exists()
+    rows = conn.execute(select(t.users.c.name, t.users.c.token_sha256).where(~has_tokens)).all()
+    for row in rows:
+        info = TokenInfo(
+            id=uuid.uuid4().hex,
+            user_name=row.name,
+            name="default",
+            prefix="",
+            created_at=now,
+            created_by=row.name,
+        )
+        conn.execute(insert(t.tokens).values(**_token_values(info), token_sha256=row.token_sha256))
+        # The legacy column no longer authenticates; leave nothing usable in it.
+        conn.execute(
+            update(t.users)
+            .where(t.users.c.name == row.name)
+            .values(token_sha256=secrets.token_hex(32))
+        )
+
+
+def _seed_builtin_roles(conn: Connection, now: dt.datetime) -> None:
+    """Insert each built-in role that is missing (edits to existing ones are kept)."""
+    existing = set(conn.execute(select(t.roles.c.name)).scalars())
+    for role in BUILTIN_ROLES.values():
+        if role.name not in existing:
+            conn.execute(insert(t.roles).values(**(_role_values(role) | {"updated_at": now})))
 
 
 class _UpsertRace(StoreError):
@@ -146,22 +194,42 @@ class Store:
             self._engine.dispose()
 
     def init_schema(self) -> None:
+        """Create missing tables, migrate a version-1 database (ADR 0027), seed the
+        built-in roles. Idempotent; a concurrent first open by another process is retried
+        once."""
+        try:
+            self._init_schema_once()
+        except _NewerSchema:
+            raise
+        except StoreError:
+            self._init_schema_once()
+
+    def _init_schema_once(self) -> None:
         with self._tx() as conn:
             t.metadata.create_all(conn)
             row = conn.execute(
                 select(t.schema_meta.c.value).where(t.schema_meta.c.key == "schema_version")
             ).first()
+            if row is not None and int(row.value) > t.STORE_SCHEMA_VERSION:
+                raise _NewerSchema(
+                    f"Database schema version {row.value} is newer than this cteforge "
+                    f"supports ({t.STORE_SCHEMA_VERSION}); upgrade cteforge"
+                )
+            _ensure_users_active(conn)
             if row is None:
                 conn.execute(
                     insert(t.schema_meta).values(
                         key="schema_version", value=str(t.STORE_SCHEMA_VERSION)
                     )
                 )
-            elif int(row.value) > t.STORE_SCHEMA_VERSION:
-                raise StoreError(
-                    f"Database schema version {row.value} is newer than this cteforge "
-                    f"supports ({t.STORE_SCHEMA_VERSION}); upgrade cteforge"
+            elif int(row.value) < 2:
+                _migrate_v1_tokens(conn, _now())
+                conn.execute(
+                    update(t.schema_meta)
+                    .where(t.schema_meta.c.key == "schema_version")
+                    .values(value=str(t.STORE_SCHEMA_VERSION))
                 )
+            _seed_builtin_roles(conn, _now())
 
     @staticmethod
     def _latest(conn: Connection, table: Table, id: str) -> int | None:
@@ -530,55 +598,225 @@ class Store:
 
     # --------------------------------------------------------------------- users
 
-    def add_user(self, user: User, token_sha256: str) -> User:
-        created = User.model_validate(
-            user.model_dump() | {"created_at": _utc(user.created_at or _now())}
+    def add_user(self, user: User) -> User:
+        """Store a new user (no token: tokens are added with `add_token`). The legacy
+        `users.token_sha256` column gets a random value nobody knows (ADR 0027)."""
+        created = User(
+            name=user.name,
+            role=user.role,
+            kind=user.kind,
+            active=user.active,
+            created_at=_utc(user.created_at or _now()),
         )
-        conflict = StoreError(f"User '{user.name}' or this token already exists")
+        conflict = StoreError(f"User '{user.name}' already exists")
         with self._tx(conflict=conflict) as conn:
             conn.execute(
                 insert(t.users).values(
                     name=created.name,
-                    role=created.role.value,
+                    role=created.role,
                     kind=created.kind.value,
-                    token_sha256=token_sha256,
+                    token_sha256=secrets.token_hex(32),  # never shown, never matched
                     created_at=created.created_at,
+                    active=created.active,
                 )
             )
         return created
 
-    def _one_user(self, *where: Any) -> User | None:
-        with self._read() as conn:
-            row = conn.execute(select(t.users).where(*where)).first()
-        return None if row is None else _user(row)
-
     def get_user(self, name: str) -> User | None:
-        return self._one_user(t.users.c.name == name)
-
-    def user_by_token(self, token_sha256: str) -> User | None:
-        return self._one_user(t.users.c.token_sha256 == token_sha256)
+        with self._read() as conn:
+            row = conn.execute(select(t.users).where(t.users.c.name == name)).first()
+        return None if row is None else _user(row)
 
     def list_users(self) -> list[User]:
         with self._read() as conn:
             rows = conn.execute(select(t.users).order_by(t.users.c.name)).all()
         return [_user(row) for row in rows]
 
-    def _update_user(self, name: str, conflict: StoreError | None = None, **values: Any) -> None:
-        with self._tx(conflict=conflict) as conn:
+    def _update_user(self, name: str, **values: Any) -> User:
+        with self._tx() as conn:
             result = conn.execute(update(t.users).where(t.users.c.name == name).values(**values))
             if result.rowcount != 1:
                 raise StoreError(f"User '{name}' does not exist")
+            row = conn.execute(select(t.users).where(t.users.c.name == name)).one()
+        return _user(row)
 
-    def set_user_role(self, name: str, role: UserRole) -> User:
-        self._update_user(name, role=role.value)
-        user = self.get_user(name)
-        if user is None:  # Deleted between the two calls.
-            raise StoreError(f"User '{name}' does not exist")
-        return user
+    def set_user_role(self, name: str, role: str) -> User:
+        return self._update_user(name, role=str(role))
 
-    def set_user_token(self, name: str, token_sha256: str) -> None:
-        conflict = StoreError("This token is already assigned to another user")
-        self._update_user(name, conflict=conflict, token_sha256=token_sha256)
+    def set_user_active(self, name: str, active: bool) -> User:
+        return self._update_user(name, active=active)
+
+    # --------------------------------------------------------------------- roles
+
+    def list_roles(self) -> list[Role]:
+        """Built-in roles first (viewer, contributor, approver, admin), then by name."""
+        with self._read() as conn:
+            rows = conn.execute(select(t.roles)).all()
+        order = list(BUILTIN_ROLES)
+        roles = [_role(row) for row in rows]
+        return sorted(
+            roles, key=lambda r: (order.index(r.name) if r.name in order else len(order), r.name)
+        )
+
+    def get_role(self, name: str) -> Role | None:
+        with self._read() as conn:
+            row = conn.execute(select(t.roles).where(t.roles.c.name == name)).first()
+        return None if row is None else _role(row)
+
+    def add_role(self, role: Role) -> Role:
+        conflict = StoreError(f"Role '{role.name}' already exists")
+        with self._tx(conflict=conflict) as conn:
+            conn.execute(insert(t.roles).values(**_role_values(role)))
+        return role
+
+    def update_role(self, role: Role) -> Role:
+        """Replace `role`'s description, allowed, defaults and review_all (its `builtin`
+        flag is kept as stored). Missing → StoreError."""
+        values = _role_values(role)
+        values.pop("builtin")
+        with self._tx() as conn:
+            result = conn.execute(
+                update(t.roles).where(t.roles.c.name == role.name).values(**values)
+            )
+            if result.rowcount != 1:
+                raise StoreError(f"Role '{role.name}' does not exist")
+            row = conn.execute(select(t.roles).where(t.roles.c.name == role.name)).one()
+        return _role(row)
+
+    def delete_role(self, name: str) -> None:
+        """Delete an unused role. Missing, or held by any user → StoreError (checked in
+        the same transaction)."""
+        with self._tx() as conn:
+            in_use = conn.execute(
+                select(t.users.c.name).where(t.users.c.role == name).limit(1)
+            ).first()
+            if in_use is not None:
+                raise StoreError(f"Role '{name}' is held by users; give them another role first")
+            result = conn.execute(delete(t.roles).where(t.roles.c.name == name))
+            if result.rowcount != 1:
+                raise StoreError(f"Role '{name}' does not exist")
+
+    # -------------------------------------------------------------------- tokens
+
+    def add_token(self, info: TokenInfo, token_sha256: str) -> TokenInfo:
+        """Store a token's metadata and hash (the store never sees a raw token). Unknown
+        user, duplicate id or hash → StoreError."""
+        conflict = StoreError("Token could not be stored (unknown user or duplicate token)")
+        with self._tx(conflict=conflict) as conn:
+            exists = conn.execute(
+                select(t.users.c.name).where(t.users.c.name == info.user_name)
+            ).first()
+            if exists is None:
+                raise StoreError(f"User '{info.user_name}' does not exist")
+            conn.execute(insert(t.tokens).values(**_token_values(info), token_sha256=token_sha256))
+        return self._token_or_error(info.id)
+
+    def get_token(self, id: str) -> TokenInfo | None:
+        with self._read() as conn:
+            row = conn.execute(select(*_TOKEN_COLUMNS).where(t.tokens.c.id == id)).first()
+        return None if row is None else _token(row)
+
+    def _token_or_error(self, id: str) -> TokenInfo:
+        found = self.get_token(id)
+        if found is None:
+            raise StoreError(f"Token '{id}' does not exist")
+        return found
+
+    def list_tokens(self, user_name: str | None = None) -> list[TokenInfo]:
+        """Tokens (revoked and expired included), oldest first; of one user when given."""
+        query = select(*_TOKEN_COLUMNS).order_by(t.tokens.c.created_at, t.tokens.c.id)
+        if user_name is not None:
+            query = query.where(t.tokens.c.user_name == user_name)
+        with self._read() as conn:
+            rows = conn.execute(query).all()
+        return [_token(row) for row in rows]
+
+    def revoke_token(self, id: str, at: dt.datetime) -> TokenInfo:
+        """Mark revoked at `at` (an already revoked token keeps its first time)."""
+        with self._tx() as conn:
+            found = conn.execute(select(t.tokens.c.id).where(t.tokens.c.id == id)).first()
+            if found is None:
+                raise StoreError(f"Token '{id}' does not exist")
+            conn.execute(
+                update(t.tokens)
+                .where(t.tokens.c.id == id, t.tokens.c.revoked_at.is_(None))
+                .values(revoked_at=_utc(at))
+            )
+        return self._token_or_error(id)
+
+    def set_token_tools(
+        self, id: str, mode: ToolMode, include: frozenset[Tool], exclude: frozenset[Tool]
+    ) -> TokenInfo:
+        with self._tx() as conn:
+            result = conn.execute(
+                update(t.tokens)
+                .where(t.tokens.c.id == id)
+                .values(
+                    tool_mode=ToolMode(mode).value,
+                    include_tools=_tools_json(include),
+                    exclude_tools=_tools_json(exclude),
+                )
+            )
+            if result.rowcount != 1:
+                raise StoreError(f"Token '{id}' does not exist")
+        return self._token_or_error(id)
+
+    def user_by_token_hash(
+        self, token_sha256: str, now: dt.datetime
+    ) -> tuple[User, TokenInfo] | None:
+        """The user and token for a token hash, or None when the hash is unknown, the
+        token is revoked or expired at `now`, or the user is deactivated."""
+        now = _utc(now)
+        tk, us = t.tokens, t.users
+        query = (
+            select(
+                *_TOKEN_COLUMNS,
+                us.c.role.label("u_role"),
+                us.c.kind.label("u_kind"),
+                us.c.active.label("u_active"),
+                us.c.created_at.label("u_created_at"),
+            )
+            .join(us, us.c.name == tk.c.user_name)
+            .where(
+                tk.c.token_sha256 == token_sha256,
+                tk.c.revoked_at.is_(None),
+                or_(tk.c.expires_at.is_(None), tk.c.expires_at > now),
+                us.c.active.is_(True),
+            )
+        )
+        with self._read() as conn:
+            row = conn.execute(query).first()
+        if row is None:
+            return None
+        token = _token(row)
+        if not token.usable_at(now) or not row.u_active:  # belt and braces
+            return None
+        user = User(
+            name=token.user_name,
+            role=row.u_role,
+            kind=ActorKind(row.u_kind),
+            active=bool(row.u_active),
+            created_at=_utc(row.u_created_at),
+        )
+        return user, token
+
+    def touch_token(
+        self, id: str, at: dt.datetime, *, min_interval: dt.timedelta = dt.timedelta(minutes=1)
+    ) -> bool:
+        """Set last_used_at = `at` unless it was set less than `min_interval` before (one
+        conditional UPDATE). True when written."""
+        at = _utc(at)
+        tk = t.tokens
+        with self._tx() as conn:
+            result = conn.execute(
+                update(tk)
+                .where(
+                    tk.c.id == id,
+                    or_(tk.c.last_used_at.is_(None), tk.c.last_used_at <= at - min_interval),
+                )
+                .values(last_used_at=at)
+            )
+        return result.rowcount == 1
 
     # ------------------------------------------------------------------ settings
 
@@ -686,7 +924,84 @@ def _former(row: Row[Any]) -> FormerId:
 def _user(row: Row[Any]) -> User:
     return User(
         name=row.name,
-        role=UserRole(row.role),
+        role=row.role,
         kind=ActorKind(row.kind),
+        active=bool(row.active),
         created_at=_utc(row.created_at),
+    )
+
+
+def _tools_json(tools: frozenset[Tool] | set[Tool]) -> str:
+    return json.dumps([tool.value for tool in sorted_tools(frozenset(tools))])
+
+
+def _tools_from(raw: str) -> frozenset[Tool]:
+    """Stored tool names → Tools; names this version does not know are dropped (a newer
+    or older catalog never grants an unknown tool)."""
+    known = {tool.value for tool in Tool}
+    return frozenset(Tool(name) for name in json.loads(raw) if name in known)
+
+
+def _role_values(role: Role) -> dict[str, Any]:
+    return {
+        "name": role.name,
+        "description": role.description,
+        "allowed": _tools_json(role.allowed),
+        "defaults": _tools_json(role.defaults),
+        "review_all": role.review_all,
+        "builtin": role.builtin,
+        "updated_at": _now(),
+    }
+
+
+def _role(row: Row[Any]) -> Role:
+    allowed = _tools_from(row.allowed)
+    return Role(
+        name=row.name,
+        description=row.description,
+        allowed=allowed,
+        defaults=_tools_from(row.defaults) & allowed,
+        review_all=bool(row.review_all),
+        builtin=bool(row.builtin),
+    )
+
+
+# Every tokens column except the hash: reads never return it.
+_TOKEN_COLUMNS = tuple(c for c in t.tokens.c if c.name != "token_sha256")
+
+
+def _token_values(info: TokenInfo) -> dict[str, Any]:
+    return {
+        "id": info.id,
+        "user_name": info.user_name,
+        "name": info.name,
+        "prefix": info.prefix,
+        "created_at": _utc(info.created_at),
+        "created_by": info.created_by,
+        "last_used_at": _utc(info.last_used_at) if info.last_used_at else None,
+        "expires_at": _utc(info.expires_at) if info.expires_at else None,
+        "revoked_at": _utc(info.revoked_at) if info.revoked_at else None,
+        "tool_mode": info.tool_mode.value,
+        "include_tools": _tools_json(info.include),
+        "exclude_tools": _tools_json(info.exclude),
+    }
+
+
+def _token(row: Row[Any]) -> TokenInfo:
+    def when(value: dt.datetime | None) -> dt.datetime | None:
+        return _utc(value) if value is not None else None
+
+    return TokenInfo(
+        id=row.id,
+        user_name=row.user_name,
+        name=row.name,
+        prefix=row.prefix,
+        created_at=_utc(row.created_at),
+        created_by=row.created_by,
+        last_used_at=when(row.last_used_at),
+        expires_at=when(row.expires_at),
+        revoked_at=when(row.revoked_at),
+        tool_mode=ToolMode(row.tool_mode),
+        include=_tools_from(row.include_tools),
+        exclude=_tools_from(row.exclude_tools),
     )

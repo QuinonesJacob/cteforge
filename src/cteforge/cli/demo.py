@@ -175,7 +175,7 @@ next steps:
   cteforge search realization
   cteforge run --use rr=realization_rate \\
       --vars '{{"rr": {{"period": {{"start": "2025-07-01", "end": "2025-10-01"}}}}}}'
-  cteforge verify realization_rate 1        # a person verifies (agents never do)
+  cteforge verify realization_rate 1        # a person verifies (agents only as admin)
   cteforge serve                            # GUI + API at http://127.0.0.1:8765, MCP at /mcp
 
 MCP (stdio) for Claude Code (.mcp.json), acting as the agent user:

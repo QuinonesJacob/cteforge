@@ -82,7 +82,7 @@ def _team(ctx: AppContext) -> tuple[User, User, User]:
         ctx, root, "claude-agent", UserRole.CONTRIBUTOR, ActorKind.AGENT
     )
     ana, _ = admin.create_user(ctx, root, "ana", UserRole.APPROVER, ActorKind.HUMAN)
-    assert root.role is UserRole.ADMIN and agent.kind is ActorKind.AGENT
+    assert root.role == UserRole.ADMIN and agent.kind is ActorKind.AGENT
     assert root_token != agent_token and len(agent_token) >= 40
     return root, agent, ana
 

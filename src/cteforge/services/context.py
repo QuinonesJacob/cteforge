@@ -18,7 +18,7 @@ from pathlib import Path
 from types import TracebackType
 from typing import cast
 
-from pydantic import BaseModel, ConfigDict, field_validator
+from pydantic import BaseModel, ConfigDict, SecretStr, field_validator
 
 from cteforge.audit.log import AuditLog
 from cteforge.domain.connections import WarehouseProfile
@@ -86,6 +86,9 @@ class AppConfig(BaseModel):
     user: str = DEFAULT_USER  # Acting user for stdio MCP, the CLI, and auth=off.
     search_embeddings: bool = True  # Meaning search (ADR 0023); off = keyword search only.
     embed_cache: Path | None = None  # Model cache directory; None = DEFAULT_EMBED_CACHE.
+    # stdio MCP acts as this token's user and tools when set (ADR 0027). Secret: never
+    # printed (SecretStr repr is masked).
+    token: SecretStr | None = None
 
     @field_validator("user")
     @classmethod
@@ -112,7 +115,8 @@ class AppConfig(BaseModel):
     def from_env(cls, env: Mapping[str, str] | None = None) -> AppConfig:
         """Read CTEFORGE_DB_URL, CTEFORGE_CONNECTIONS, CTEFORGE_DEFAULT_PROFILE,
         CTEFORGE_AUTH (on|off, default on), CTEFORGE_USER (default "local"),
-        CTEFORGE_SEARCH_EMBEDDINGS (on|off, default on) and CTEFORGE_EMBED_CACHE.
+        CTEFORGE_SEARCH_EMBEDDINGS (on|off, default on), CTEFORGE_EMBED_CACHE and
+        CTEFORGE_TOKEN (stdio MCP only; ADR 0027).
         Empty values count as unset. Raises PolicyError on an invalid CTEFORGE_AUTH or
         CTEFORGE_SEARCH_EMBEDDINGS."""
         source = os.environ if env is None else env
@@ -139,6 +143,7 @@ class AppConfig(BaseModel):
             user=get("CTEFORGE_USER") or DEFAULT_USER,
             search_embeddings=embeddings == "on",
             embed_cache=Path(cache).expanduser() if cache else None,
+            token=SecretStr(token) if (token := get("CTEFORGE_TOKEN")) else None,
         )
 
 

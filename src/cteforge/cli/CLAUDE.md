@@ -17,13 +17,22 @@ Typer CLI: the local admin tool. Thin adapter over services. Project root: ../..
   - `render DEFINITION [--vars JSON] [-d target] [-w] [--run] [--limit]` — issues go to
     stderr; `--vars` must be a JSON object (decimals parsed exactly).
 - `admin.py` — services.admin: `db init` (creates schemas; lists profiles) ·
-  `user add NAME --role R [--agent]` / `user add NAME --bootstrap [--agent]` (first admin,
-  no acting user) · `user list [--json]` · `user role NAME ROLE` · `user token NAME` ·
+  `user add NAME --role R [--agent]` (R: built-in or custom role; prints the "default"
+  token once) / `user add NAME --bootstrap [--agent]` (first admin, no acting user; prints
+  its "default" token once) · `user list [--json]` (role, kind, active, active-token count)
+  · `user role NAME ROLE` · `user deactivate NAME` / `user activate NAME` ·
   `settings show [--json]` (mode, default connection, effective default, warnings on
   stderr) · `settings mode strict|open` · `settings connection [NAME] [--clear]` (the team's
   default connection, ADR 0021; no argument shows it; NAME with --clear → exit 2; unknown
   profile → exit 1). Tokens: printed once on stdout,
   the warning on stderr; never written anywhere.
+- `access.py` — ADR 0027, services.admin: `token create NAME [--user U] [--expires
+  DATE|DATETIME (UTC)] [--only T,…] | [--include T,…] [--exclude T,…]` (prints the token
+  once; never for an agent) · `token list [--user U] [--json]` (never values) · `token
+  revoke ID [--user U]` · `role list [--json]` · `role create NAME --allow T,… [--default
+  T,…] [--review-all] [--description]` · `role edit NAME [--allow] [--default]
+  [--review-all/--no-review-all] [--description]` · `role delete NAME`. Tool names may be
+  repeated or comma-separated; an unknown tool → exit 2.
 - `review.py` — services.review / revalidate: `proposals list [--status] [--json]` ·
   `proposals show ID [--json]` (checks, impact, diff) · `proposals approve ID [--verify]
   [--comment]` · `proposals reject ID --comment` (required, exit 2 without) ·
@@ -47,7 +56,8 @@ Typer CLI: the local admin tool. Thin adapter over services. Project root: ../..
   [--examples DIR] [--force]`: seeds DIR/warehouse.duckdb by running
   examples/seed_warehouse.py by path (runpy), writes DIR/connections.yml (profile `demo`)
   and DIR/env.sh (CTEFORGE_* exports, shell-quoted, no tokens), bootstraps the admin,
-  creates the agent (contributor), proposes the example queries + annotation files through
+  creates the agent (contributor; the human admin's `create_user` returns its token),
+  proposes the example queries + annotation files through
   services.propose (auto-applied in open mode; `DEMO_JOIN_KEYS` adds join_keys such as
   month/region unless the annotation file declares its own, so composing two demo
   definitions keeps their trust label), prints both tokens once and next steps

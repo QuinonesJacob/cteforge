@@ -103,63 +103,54 @@ def test_update_missing_proposal_raises(store: Store) -> None:
 
 
 def test_add_user_sets_created_at_and_round_trips(store: Store) -> None:
-    added = store.add_user(User(name="jq", role=UserRole.ADMIN), "a" * 64)
+    added = store.add_user(User(name="jq", role=UserRole.ADMIN))
     assert added.created_at is not None
     assert added.created_at.utcoffset() == dt.timedelta(0)
+    assert added.active is True and added.tools is None
     assert store.get_user("jq") == added
     assert store.get_user("nobody") is None
 
 
-def test_add_user_keeps_given_created_at(store: Store) -> None:
-    user = User(name="bot", role=UserRole.CONTRIBUTOR, kind=ActorKind.AGENT, created_at=T0)
-    store.add_user(user, "b" * 64)
+def test_add_user_keeps_given_created_at_and_never_stores_tools(store: Store) -> None:
+    user = User(
+        name="bot",
+        role=UserRole.CONTRIBUTOR,
+        kind=ActorKind.AGENT,
+        created_at=T0,
+        tools=frozenset(),
+        review_all=True,
+    )
+    store.add_user(user)
     got = store.get_user("bot")
     assert (got.kind, got.role, got.created_at) == (ActorKind.AGENT, UserRole.CONTRIBUTOR, T0)
+    assert got.tools is None and got.review_all is None
 
 
-def test_duplicate_name_or_token_raises(store: Store) -> None:
-    store.add_user(User(name="jq", role=UserRole.ADMIN), "a" * 64)
+def test_duplicate_name_raises(store: Store) -> None:
+    store.add_user(User(name="jq", role=UserRole.ADMIN))
     with pytest.raises(StoreError):
-        store.add_user(User(name="jq", role=UserRole.VIEWER), "c" * 64)
-    with pytest.raises(StoreError):
-        store.add_user(User(name="other", role=UserRole.VIEWER), "a" * 64)
+        store.add_user(User(name="jq", role=UserRole.VIEWER))
     assert [u.name for u in store.list_users()] == ["jq"]
-    assert store.get_user("jq").role is UserRole.ADMIN
-
-
-def test_user_by_token(store: Store) -> None:
-    store.add_user(User(name="jq", role=UserRole.ADMIN), "a" * 64)
-    store.add_user(User(name="ann", role=UserRole.APPROVER), "b" * 64)
-    assert store.user_by_token("b" * 64).name == "ann"
-    assert store.user_by_token("a" * 64).name == "jq"
-    assert store.user_by_token("f" * 64) is None
+    assert store.get_user("jq").role == UserRole.ADMIN
 
 
 def test_list_users_sorted_by_name(store: Store) -> None:
-    for i, name in enumerate(["zed", "ann", "mo"]):
-        store.add_user(User(name=name, role=UserRole.VIEWER), str(i) * 64)
+    for name in ["zed", "ann", "mo"]:
+        store.add_user(User(name=name, role=UserRole.VIEWER))
     assert [u.name for u in store.list_users()] == ["ann", "mo", "zed"]
 
 
-def test_set_user_role(store: Store) -> None:
-    store.add_user(User(name="ann", role=UserRole.VIEWER), "a" * 64)
-    assert store.set_user_role("ann", UserRole.APPROVER).role is UserRole.APPROVER
-    assert store.get_user("ann").role is UserRole.APPROVER
+def test_set_user_role_and_active(store: Store) -> None:
+    store.add_user(User(name="ann", role=UserRole.VIEWER))
+    assert store.set_user_role("ann", UserRole.APPROVER).role == UserRole.APPROVER
+    assert store.get_user("ann").role == UserRole.APPROVER
+    assert store.set_user_role("ann", "custom_role").role == "custom_role"
+    assert store.set_user_active("ann", False).active is False
+    assert store.get_user("ann").active is False
     with pytest.raises(StoreError):
         store.set_user_role("nobody", UserRole.ADMIN)
-
-
-def test_set_user_token_rotates(store: Store) -> None:
-    store.add_user(User(name="ann", role=UserRole.VIEWER), "a" * 64)
-    store.add_user(User(name="jq", role=UserRole.ADMIN), "b" * 64)
-    store.set_user_token("ann", "c" * 64)
-    assert store.user_by_token("a" * 64) is None
-    assert store.user_by_token("c" * 64).name == "ann"
     with pytest.raises(StoreError):
-        store.set_user_token("ann", "b" * 64)  # belongs to jq
-    assert store.user_by_token("b" * 64).name == "jq"
-    with pytest.raises(StoreError):
-        store.set_user_token("nobody", "d" * 64)
+        store.set_user_active("nobody", True)
 
 
 # -------------------------------------------------------------------- settings

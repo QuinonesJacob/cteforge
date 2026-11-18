@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { NavLink, useLocation } from "react-router-dom";
-import { isAdmin } from "../lib/roles";
+import { can, canPropose } from "../lib/roles";
 import { useAuth } from "../state/AuthContext";
 import { usePendingCount } from "../state/usePendingCount";
 import { ThemeToggle } from "./ThemeToggle";
@@ -8,19 +8,20 @@ import { UserMenu } from "./UserMenu";
 
 export function TopNav() {
   const { user } = useAuth();
-  const pending = usePendingCount(Boolean(user));
+  const pending = usePendingCount(can(user, "list_proposals"));
   const [open, setOpen] = useState(false);
   const location = useLocation();
 
   useEffect(() => setOpen(false), [location.pathname]);
 
-  const links = [
+  // Links follow the signed-in token's tools (ADR 0027); Settings (My tokens) is for everyone.
+  const links: { to: string; label: string; end?: boolean; badge?: number | null }[] = [
     { to: "/", label: "Library", end: true },
     { to: "/explore", label: "Explore" },
-    { to: "/import", label: "Import" },
-    { to: "/review", label: "Review", badge: pending },
-    { to: "/audit", label: "Audit" },
-    ...(isAdmin(user) ? [{ to: "/settings", label: "Settings" }] : []),
+    ...(canPropose(user) ? [{ to: "/import", label: "Import" }] : []),
+    ...(can(user, "list_proposals") ? [{ to: "/review", label: "Review", badge: pending }] : []),
+    ...(can(user, "view_audit") ? [{ to: "/audit", label: "Audit" }] : []),
+    ...(user ? [{ to: "/settings", label: "Settings" }] : []),
   ];
 
   return (

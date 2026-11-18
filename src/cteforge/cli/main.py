@@ -1,9 +1,9 @@
 """cteforge CLI — thin adapter over services/. No logic beyond parsing args and printing.
 
 Commands live in sibling modules that register on the shared app (`_common.app`):
-admin (db/user/settings), review (proposals/verify/revalidate), library (search/run/
-export/import-library), server (serve/mcp), demo. This module keeps the M1 file-based
-commands (parse/import/render) and is the console-script entry point.
+admin (db/user/settings), access (token/role), review (proposals/verify/revalidate),
+library (search/run/export/import-library), server (serve/mcp), demo. This module keeps
+the M1 file-based commands (parse/import/render) and is the console-script entry point.
 """
 
 from __future__ import annotations
@@ -12,7 +12,7 @@ from typing import Annotated, Any
 
 import typer
 
-from cteforge.cli import admin, demo, library, review, server  # noqa: F401  (register commands)
+from cteforge.cli import access, admin, demo, library, review, server  # noqa: F401  (register)
 from cteforge.cli._common import (
     app,
     echo_issues,

@@ -55,6 +55,10 @@ Each has its own CLAUDE.md. Read it before adding files there.
 - Warehouse type string → VariableType / sqlglot DataType → `parsing/types.py`. Not in `warehouse/`.
 - Building SQL literals from values → `templating/literals.py` only. Never f-strings or string concatenation of values into SQL.
 - Dialect names → `domain/dialects.py` (`Dialect` enum). Don't pass raw dialect strings around.
+- Permissions are tools (ADR 0027): the catalog, roles and token metadata →
+  `domain/access.py`; policy (effective tools, who may do what) → `trust/approval.py`;
+  every use-case checks one tool with `services/auth.require`. Outside trust/'s
+  admin-role rules for agents, never check a role name for a permission.
 - Errors → subclasses of `CteforgeError` in `domain/errors.py`.
 - Warehouse connections → `warehouse/` only. Services receive a `Warehouse` protocol object.
 - Embedding model → `embedding/` only (the only importer of fastembed). Search document

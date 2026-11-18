@@ -57,6 +57,7 @@ class Proposal(BaseModel):
     status: ProposalStatus = ProposalStatus.PENDING
     auto_applied: bool = False
     decided_by: str | None = None
+    decided_by_kind: ActorKind | None = None  # ADR 0027: cards show agent decisions.
     decided_at: dt.datetime | None = None
     comment: str = ""
     resulting_version: int | None = None

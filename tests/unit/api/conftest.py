@@ -61,6 +61,12 @@ class Api:
     def put(self, path: str, user: str, body: Any = None) -> httpx.Response:
         return self.client.put(f"/api/v1{path}", headers=self.h(user), json=body)
 
+    def patch(self, path: str, user: str, body: Any = None) -> httpx.Response:
+        return self.client.patch(f"/api/v1{path}", headers=self.h(user), json=body)
+
+    def delete(self, path: str, user: str) -> httpx.Response:
+        return self.client.delete(f"/api/v1{path}", headers=self.h(user))
+
     def propose_rr(self, user: str = "alice", **meta: Any) -> httpx.Response:
         return self.post("/proposals/definitions", user, proposal_body(**meta))
 

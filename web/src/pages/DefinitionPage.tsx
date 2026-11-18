@@ -12,7 +12,7 @@ import { RunPanel } from "../components/RunPanel";
 import { StateBadge } from "../components/StateBadge";
 import { Tabs } from "../components/Tabs";
 import { formatDate } from "../lib/format";
-import { canPropose, canVerify, isOwnWork, versionAuthors } from "../lib/roles";
+import { canRevise, canVerify, isOwnWork, versionAuthors } from "../lib/roles";
 import { useAuth } from "../state/AuthContext";
 import { useToast } from "../state/ToastContext";
 import { useAsync } from "../state/useAsync";
@@ -47,7 +47,7 @@ export function DefinitionPage() {
   const versions = fullHistory.map((h) => h.version).sort((a, b) => b - a);
   const latest = versions[0] ?? d.version;
   // Revisions are proposed against the latest version only (stale_base_version otherwise).
-  const editable = canPropose(user) && d.version === latest;
+  const editable = canRevise(user) && d.version === latest;
   const activeTab: TabKey = tab === "edit" && !editable ? "overview" : tab;
   // Four-eyes: nobody but a human admin verifies a version they wrote any part of.
   const ownVersion = versionAuthors(fullHistory, d.version).some((a) => isOwnWork(user, a));
@@ -79,7 +79,8 @@ export function DefinitionPage() {
             )}
             {d.verified_by && (
               <span className="small">
-                verified by <strong>{d.verified_by}</strong> on {formatDate(d.verified_at)}
+                verified by <strong>{d.verified_by}</strong>
+                {d.verified_by_kind === "agent" && " (agent)"} on {formatDate(d.verified_at)}
               </span>
             )}
             {d.owner && <span className="small">owner {d.owner}</span>}

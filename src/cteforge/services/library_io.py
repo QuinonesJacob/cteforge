@@ -28,6 +28,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from cteforge.domain.access import Tool
 from cteforge.domain.audit import AuditKind
 from cteforge.domain.models import Definition, JoinEdge, Recipe
 from cteforge.domain.proposals import Proposal, ProposalKind
@@ -37,7 +38,6 @@ from cteforge.services import _apply, _audit, _library
 from cteforge.services.auth import require
 from cteforge.services.cards import ProposalOutcome
 from cteforge.services.context import AppContext
-from cteforge.trust.approval import Action
 
 _UNVERSIONED = {"version", "state", "verified_by", "verified_at"}
 _SUMMARY = "Imported from library files"
@@ -49,7 +49,7 @@ def export_library(
     """Write the library into `directory`. Returns the written file paths."""
     fields = {"extra": {"op": "export_library"}}
     with _audit.audit_failures(ctx, user, AuditKind.ADMIN, **fields):
-        require(user, Action.DESCRIBE)
+        require(user, Tool.GET_DEFINITION)
         written = write_library(
             directory,
             definitions=ctx.store.list_definitions(),
@@ -118,7 +118,7 @@ def import_library(
     fields = {"extra": {"op": "import_library"}}
     outcomes: list[ProposalOutcome] = []
     with _audit.audit_failures(ctx, user, AuditKind.PROPOSE, **fields):
-        require(user, Action.PROPOSE)
+        require(user, Tool.PROPOSE_DEFINITION)
         library = read_library(directory)
         # Phase 1: build every definition proposal (owner rule, profile, checks engine) and
         # normalize every join before anything is stored, so a bad file leaves the

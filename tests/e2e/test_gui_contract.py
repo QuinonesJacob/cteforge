@@ -25,6 +25,27 @@ from cteforge.services.context import AppConfig, open_context
 
 # ── Field sets from web/src/api/types.ts (required + optional fields the API always sends) ──
 USER = {"name", "role", "kind", "created_at"}
+# ADR 0027: GET /me (MeCard), users, roles, tokens, the tool catalog.
+ME = USER | {"active", "tools", "review_all", "role_allowed", "role_defaults"}
+TOOL_INFO = {"name", "group", "admin_only"}
+TOKEN_CARD = {
+    "id",
+    "user_name",
+    "name",
+    "prefix",
+    "created_at",
+    "created_by",
+    "last_used_at",
+    "expires_at",
+    "revoked_at",
+    "tool_mode",
+    "include",
+    "exclude",
+    "tools",
+    "state",
+}
+USER_VIEW = USER | {"active", "tokens"}
+ROLE_CARD = {"name", "description", "allowed", "defaults", "review_all", "builtin", "users"}
 TEAM_SETTINGS = {"mode", "default_connection", "effective_default_connection", "issues"}
 ISSUE = {"code", "severity", "message", "variable", "literal"}
 VARIABLE_CARD = {
@@ -78,6 +99,7 @@ DEFINITION_CARD = {
     "profile",
     "state",
     "verified_by",
+    "verified_by_kind",
     "verified_at",
     "owner",
     "grain",
@@ -183,6 +205,7 @@ PROPOSAL_VIEW = {
     "status",
     "auto_applied",
     "decided_by",
+    "decided_by_kind",
     "decided_at",
     "comment",
     "resulting_version",
@@ -335,8 +358,11 @@ def test_identity_profiles_and_sign_in(gui: Gui) -> None:
     # AuthContext: an anonymous /me tells "auth on" (401 + error body) from "auth off".
     error = gui.call("GET", "/me", None, status=401)
     fields(error["error"], {"type", "message", "issues"}, "ApiError body")
-    me = fields(gui.call("GET", "/me", "alice"), USER, "User")
+    me = fields(gui.call("GET", "/me", "alice"), ME, "User (MeCard)")
     assert (me["name"], me["role"], me["kind"]) == ("alice", "contributor", "human")
+    # lib/roles.ts reads `tools` (nav links, Import, Review, verify offers) and review_all.
+    assert {"parse_query", "propose_definition", "review_proposal"} <= set(me["tools"])
+    assert "verify" not in me["tools"] and me["review_all"] is False
     profiles = each(
         gui.call("GET", "/profiles", "alice"), {"name", "dialect", "default"}, "Profile"
     )
@@ -821,8 +847,14 @@ def test_review_queue_four_eyes_verify_and_audit(gui: Gui, example) -> None:
 
 
 def test_settings_users_and_tokens(gui: Gui) -> None:
-    users = each(gui.call("GET", "/users", "root"), USER, "User")
+    # SettingsPage: GET /tools for the checklists (lib/tools.ts groupCatalog).
+    catalog = each(gui.call("GET", "/tools", "alice"), TOOL_INFO, "ToolInfo")
+    assert [t["group"] for t in catalog][0] == "use" and len(catalog) == 20
+    users = each(gui.call("GET", "/users", "root"), USER_VIEW, "UserView")
     assert {u["name"] for u in users} == {"root", "alice", "ann"}
+    for u in users:
+        each(u["tokens"], TOKEN_CARD, "TokenCard")
+        assert all("token" not in t for t in u["tokens"])
 
     # CreateUserForm → POST /users {name, role, kind} → 201 {user, token} (toCreatedUser).
     created = gui.call(
@@ -833,24 +865,100 @@ def test_settings_users_and_tokens(gui: Gui) -> None:
         status=201,
     )
     fields(created["user"], USER, "User")
-    assert created["user"]["kind"] == "agent" and len(created["token"]) >= 40
+    assert created["user"]["kind"] == "agent" and created["token"].startswith("cfg_pat_")
     # The new token works for the GUI's sign-in check (GET /me with that token).
     gui.tokens["claude-agent"] = created["token"]
     assert gui.call("GET", "/me", "claude-agent")["name"] == "claude-agent"
 
-    # Rotate: POST /users/{name}/token → {name, token}; the old token stops working.
-    rotated = gui.call("POST", "/users/claude-agent/token", "root")
-    assert rotated["name"] == "claude-agent" and rotated["token"] != created["token"]
-    gui.call("GET", "/me", "claude-agent", status=401)
+    # UsersTable "Generate token for X" → POST /users/{name}/tokens (TokenForm body).
+    body = {
+        "name": "laptop",
+        "expires_at": "2099-01-31T23:59:59Z",
+        "tool_mode": "only",
+        "include": ["search"],
+        "exclude": [],
+    }
+    minted = gui.call("POST", "/users/claude-agent/tokens", "root", body=body, status=201)
+    info = fields(minted["info"], TOKEN_CARD, "TokenCard")
+    assert info["tools"] == ["search"] and info["prefix"] == minted["token"][:12]
+    gui.tokens["laptop"] = minted["token"]
+    assert gui.call("GET", "/me", "laptop")["tools"] == ["search"]
+    listed = each(gui.call("GET", "/users/claude-agent/tokens", "root"), TOKEN_CARD, "TokenCard")
+    assert {t["name"] for t in listed} == {"default", "laptop"}
+    # Revoke (UsersTable / TokenList) → DELETE /users/{name}/tokens/{id} → TokenCard.
+    revoked = gui.call("DELETE", f"/users/claude-agent/tokens/{info['id']}", "root")
+    assert revoked["state"] == "revoked"
+    gui.call("GET", "/me", "laptop", status=401)
 
-    # Role change: PUT /users/{name}/role {role} → User.
+    # Role / active change: PATCH /users/{name} {role} | {active} → UserView.
     changed = fields(
-        gui.call("PUT", "/users/alice/role", "root", body={"role": "approver"}), USER, "User"
+        gui.call("PATCH", "/users/alice", "root", body={"role": "approver"}), USER_VIEW, "UserView"
     )
     assert changed["role"] == "approver"
+    off = gui.call("PATCH", "/users/claude-agent", "root", body={"active": False})
+    assert off["active"] is False
+    gui.call("GET", "/me", "claude-agent", status=401)
+    gui.call("PATCH", "/users/claude-agent", "root", body={"active": True})
     # Non-admins get a structured 403 the Settings page can show.
     error = gui.call("GET", "/users", "ann", status=403)["error"]
     assert error["type"] == "PermissionDeniedError"
+
+    # My tokens (MyTokensCard): GET/POST /me/tokens, DELETE /me/tokens/{id}.
+    mine = gui.call(
+        "POST",
+        "/me/tokens",
+        "ann",
+        body={
+            "name": "Claude Code",
+            "expires_at": None,
+            "tool_mode": "follow_role",
+            "include": [],
+            "exclude": ["check_and_run"],
+        },
+        status=201,
+    )
+    assert set(mine) == {"token", "info"} and "check_and_run" not in mine["info"]["tools"]
+    # endpoints.ts setTokenTools → PUT /me/tokens/{id} {tool_mode, include, exclude}.
+    retooled = gui.call(
+        "PUT",
+        f"/me/tokens/{mine['info']['id']}",
+        "ann",
+        body={"tool_mode": "only", "include": ["search"], "exclude": []},
+    )
+    assert fields(retooled, TOKEN_CARD, "TokenCard")["tools"] == ["search"]
+    own = each(gui.call("GET", "/me/tokens", "ann"), TOKEN_CARD, "TokenCard")
+    assert {t["name"] for t in own} == {"default", "Claude Code"}
+    assert gui.call("DELETE", f"/me/tokens/{mine['info']['id']}", "ann")["state"] == "revoked"
+
+    # Roles (RolesCard / RoleEditor): GET /roles, POST, PUT, DELETE → 204.
+    roles = each(gui.call("GET", "/roles", "root"), ROLE_CARD, "RoleCard")
+    assert [r["name"] for r in roles] == ["viewer", "contributor", "approver", "admin"]
+    role = gui.call(
+        "POST",
+        "/roles",
+        "root",
+        body={
+            "name": "support_bot",
+            "description": "",
+            "allowed": ["search", "compile_and_run"],
+            "defaults": ["search"],
+            "review_all": False,
+        },
+        status=201,
+    )
+    fields(role, ROLE_CARD, "RoleCard")
+    # The admin role's editor sends no `allowed` / `review_all` (locked). (Its defaults also
+    # narrow root's own follow-role token, so keep manage_role on.)
+    fewer = [t["name"] for t in catalog if t["name"] != "check_and_run"]
+    edited = gui.call("PUT", "/roles/admin", "root", body={"description": "x", "defaults": fewer})
+    assert edited["defaults"] == fewer and len(edited["allowed"]) == 20
+    gui.call(
+        "PUT",
+        "/roles/support_bot",
+        "root",
+        body={"description": "", "allowed": ["search"], "defaults": ["search"], "review_all": True},
+    )
+    gui.call("DELETE", "/roles/support_bot", "root", status=204)
 
     # Settings page, "Default connection" select: PUT /settings {default_connection}.
     shown = fields(gui.call("GET", "/settings", "root"), TEAM_SETTINGS, "Settings")

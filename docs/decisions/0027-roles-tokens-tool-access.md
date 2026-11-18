@@ -1,6 +1,6 @@
 # 0027 — Configurable roles, personal access tokens, per-token tool access
 
-Status: accepted · 2026-11-17 · not yet implemented · amends ADR 0007, ADR 0018 (roles,
+Status: accepted · 2026-11-17 · implemented 2026-11-17 · amends ADR 0007, ADR 0018 (roles,
 tokens, agent verify), DESIGN §6, §9, §14, §18
 
 ## Context
@@ -143,3 +143,27 @@ deactivation, tokens); granting the admin role; editing the admin role.
   admin user, edit the admin role, see or mint tokens. The four-eyes rule applies to
   agent admins with no exemption. `verified_by` and proposal decisions record the actor
   kind; cards show it.
+
+## Addendum (2026-11-17): as built
+- Store schema version 2: `roles`, `tokens`, `users.active` (added to existing databases
+  by an explicit, idempotent `ALTER TABLE`). Opening a version-1 database migrates each
+  user's token hash to a token named `default` (follow_role) once, during the 1 → 2
+  upgrade; a version-1 cteforge refuses the upgraded database. New users get a random,
+  never-shown value in the legacy `users.token_sha256` column, which authenticates nothing.
+- Use-case → tool, beyond the addendum's examples: `count_proposals` and
+  `get_proposal` → `list_proposals`; `withdraw` → the build tool of the proposal's kind;
+  `revalidate(ids)` → `compile_and_run`, library-wide `revalidate()` → `review_proposal`
+  with `review_all` (as before: approvers and admins); `list_roles` → `list_users`;
+  rename → `revise_definition`; own tokens (list, mint, revoke, set tools) need no tool.
+  Recipe and join proposals are approved with `review_proposal` + `review_all` (they have
+  no owner). Built-in roles cannot be deleted (they can be edited).
+- No self-escalation: a token may not mint, or reconfigure, a token of its own user with
+  tools the calling token does not hold itself (a narrow token handed to an agent cannot be
+  turned into a broad one). A human with `manage_user` may mint for any user.
+- `create_user` by a human admin over the API/CLI still returns a `default` token once
+  (convenience); over MCP (`manage_user create`) and for agent callers it never does.
+- An MCP call to a hidden tool is refused before the tool runs and audited as an `admin`
+  event (`op=tool_refused`, outcome rejected). `review_proposal` is shown to tokens holding
+  `review_proposal` or `verify`.
+- `verified_by_kind` on the definition card is looked up from the users table (a user's
+  kind never changes); proposals store `decided_by_kind`.

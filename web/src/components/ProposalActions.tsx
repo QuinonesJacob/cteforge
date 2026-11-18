@@ -87,7 +87,7 @@ export function ProposalActions({ proposal, user, target = null, targetLoading =
               />
               <span>
                 Also verify the definition
-                {!canVerify(user) && <span className="muted small"> (people only; agents can never verify)</span>}
+                {!canVerify(user) && <span className="muted small"> (needs the verify tool; agents only as admin)</span>}
                 {canVerify(user) && incomplete && (
                   <span className="muted small"> (not fully checked: checks_incomplete; approve only)</span>
                 )}

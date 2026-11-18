@@ -27,6 +27,7 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, TypeAdapter, ValidationError
 
+from cteforge.domain.access import Tool
 from cteforge.domain.audit import AuditKind
 from cteforge.domain.dialects import Dialect
 from cteforge.domain.errors import CodecError, PolicyError
@@ -38,7 +39,6 @@ from cteforge.services import _apply, _audit, _library
 from cteforge.services.auth import require
 from cteforge.services.cards import ProposalOutcome
 from cteforge.services.context import AppContext
-from cteforge.trust.approval import Action
 
 _OP_NEW = "propose_definition"
 _OP_REVISE = "revise_definition"
@@ -99,7 +99,7 @@ def propose_definition(
     Raises StoreError (StaleVersionError) when the id exists — use revise_definition.
     """
     with _audit.audit_failures(ctx, user, AuditKind.PROPOSE, extra={"op": _OP_NEW}):
-        require(user, Action.PROPOSE)
+        require(user, Tool.PROPOSE_DEFINITION)
         meta = _metadata(metadata)
         if meta.id is None or not (meta.title or "").strip():
             raise CodecError("metadata needs at least 'id' and 'title'")
@@ -171,7 +171,7 @@ def revise_definition(
     with _audit.audit_failures(
         ctx, user, AuditKind.PROPOSE, definitions=[f"{id}@{base_version}"], extra={"op": _OP_REVISE}
     ):
-        require(user, Action.PROPOSE)
+        require(user, Tool.REVISE_DEFINITION)
         current = ctx.store.get_definition(id)
         if current is None:
             raise _library.definition_not_found(ctx, id, hint="; use propose_definition")
@@ -240,7 +240,7 @@ def rename_definition(
     definition), StaleVersionError."""
     fields = {"definitions": [id], "extra": {"op": _OP_RENAME, "new_id": new_id}}
     with _audit.audit_failures(ctx, user, AuditKind.PROPOSE, **fields):
-        require(user, Action.PROPOSE)
+        require(user, Tool.REVISE_DEFINITION)
         current = ctx.store.get_definition(id)
         if current is None:
             raise _library.definition_not_found(ctx, id)

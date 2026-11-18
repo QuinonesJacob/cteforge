@@ -1,9 +1,9 @@
 """Use-case: list audit events (DESIGN §11, ADR 0008).
 
-Who may read it: approvers and admins (the APPROVE role minimum, no target). The log holds
-every actor's questions and variable values, so viewers and contributors — agents included
-— cannot browse it. Events come newest first; `limit` is clamped to 1..1000 and `has_more`
-says whether older matching events exist.
+Who may read it: users holding the view_audit tool (built-in approver and admin; ADR
+0027). The log holds every actor's questions and variable values, so viewers and
+contributors — agents included — cannot browse it. Events come newest first; `limit` is
+clamped to 1..1000 and `has_more` says whether older matching events exist.
 
 The listing itself is recorded as an `admin` event with `extra.op = "list_audit"`
 (best-effort, `fail_closed=False`, after the read so a page never contains its own
@@ -14,14 +14,14 @@ from __future__ import annotations
 
 import datetime as dt
 
+from cteforge.domain.access import Tool
 from cteforge.domain.audit import AuditKind
-from cteforge.domain.errors import PermissionDeniedError, PolicyError
+from cteforge.domain.errors import PolicyError
 from cteforge.domain.users import User
 from cteforge.services import _audit
-from cteforge.services.auth import permitted
+from cteforge.services.auth import require
 from cteforge.services.cards import AuditPage
 from cteforge.services.context import AppContext
-from cteforge.trust.approval import Action
 
 MAX_LIMIT = 1000
 
@@ -40,10 +40,7 @@ def list_audit(
     event that used any version of it; `since` must be timezone-aware. An unknown `kind`
     or a naive `since` raises PolicyError (checked after the permission, and audited)."""
     with _audit.audit_failures(ctx, user, AuditKind.ADMIN, extra={"op": "list_audit"}):
-        if not permitted(user, Action.APPROVE):
-            raise PermissionDeniedError(
-                f"User '{user.name}' may not read the audit log (approver or admin only)"
-            )
+        require(user, Tool.VIEW_AUDIT)
         try:
             parsed_kind = AuditKind(kind) if kind is not None else None
         except ValueError:

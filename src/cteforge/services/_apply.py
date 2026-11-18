@@ -89,7 +89,7 @@ from cteforge.domain.models import (
     Recipe,
 )
 from cteforge.domain.proposals import Proposal, ProposalKind, ProposalStatus
-from cteforge.domain.users import User, UserRole, role_at_least
+from cteforge.domain.users import User
 from cteforge.parsing.analyze import parse
 from cteforge.services import _audit, _library, _meaning
 from cteforge.services.cards import (
@@ -102,7 +102,7 @@ from cteforge.services.cards import (
 from cteforge.services.context import AppContext, team_mode
 from cteforge.services.import_query import import_query
 from cteforge.templating.render import render
-from cteforge.trust.approval import can_auto_apply
+from cteforge.trust.approval import can_auto_apply, reviews_all
 from cteforge.warehouse.base import Warehouse
 
 _IDENT = TypeAdapter(Ident)
@@ -201,8 +201,9 @@ def validation_detail(exc: ValidationError) -> str:
 
 def check_owner(user: User, proposed: str | None, current: str | None) -> None:
     """`owner` may be set only to the proposer (or left empty), and only when nobody else
-    owns the definition; approvers and admins may set any owner (ADR 0018)."""
-    if proposed == current or role_at_least(user.role, UserRole.APPROVER):
+    owns the definition; reviewers of everything (review_all: built-in approvers and
+    admins) may set any owner (ADR 0018, 0027)."""
+    if proposed == current or reviews_all(user):
         return
     if proposed in (None, user.name) and current in (None, user.name):
         return
@@ -660,6 +661,7 @@ def _decide(
             "status": status,
             "auto_applied": auto,
             "decided_by": user.name,
+            "decided_by_kind": user.kind,
             "decided_at": ctx.now(),
             "comment": comment,
             "resulting_version": resulting_version,

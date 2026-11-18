@@ -314,7 +314,9 @@ async def test_mcp_over_streamable_http_with_the_agent_token(server: Server) -> 
         init = await session.initialize()
         assert init.serverInfo.name
         tools = (await session.list_tools()).tools
-        assert len(tools) == 12 and "compile_and_run" in {t.name for t in tools}
+        # A contributor agent (ADR 0027): use + build tools, list/review proposals.
+        assert len(tools) == 14 and "compile_and_run" in {t.name for t in tools}
+        assert not {"list_users", "manage_user", "manage_role"} & {t.name for t in tools}
         hits = _structured(await session.call_tool("search", {"query": "realization rate"}))
         assert hits["result"][0]["id"].startswith("realization_rate")
         run = _structured(
@@ -357,7 +359,7 @@ async def test_mcp_over_stdio_as_the_agent(demo: Demo) -> None:
     )
     async with stdio_client(params) as (read, write), ClientSession(read, write) as session:
         await session.initialize()
-        assert len((await session.list_tools()).tools) == 12
+        assert len((await session.list_tools()).tools) == 14  # the role's defaults
         hits = _structured(await session.call_tool("search", {"query": "booked collected"}))
         assert hits["result"][0]["id"] == "booked_vs_collected"
         refused = _structured(
@@ -365,3 +367,50 @@ async def test_mcp_over_stdio_as_the_agent(demo: Demo) -> None:
         )
         assert refused["ran"] is False and refused["usable"] is False
         assert "not_read_only" in {issue["code"] for issue in refused["issues"]}
+
+
+@pytest.mark.anyio
+async def test_a_narrow_token_sees_and_runs_only_its_tools(server: Server, demo: Demo) -> None:
+    """ADR 0027: a human admin mints a search-only token for the agent; MCP over HTTP and
+    stdio (CTEFORGE_TOKEN) show only `search`, and the HTTP API refuses the rest too."""
+    minted = server.api(
+        "POST",
+        "/users/claude-agent/tokens",
+        server.demo.admin_token,
+        {"name": "support", "tool_mode": "only", "include": ["search"]},
+    )
+    assert minted.status_code == 201, minted.text
+    narrow = minted.json()["token"]
+    assert narrow.startswith("cfg_pat_")
+    denied = server.api("POST", "/check", narrow, {"sql": "SELECT 1", "run": False})
+    assert denied.status_code == 403
+    headers = {"Authorization": f"Bearer {narrow}"}
+    http = httpx.AsyncClient(headers=headers, timeout=httpx.Timeout(30, read=300))
+    async with (
+        http,
+        streamable_http_client(f"{server.base}/mcp", http_client=http) as (read, write, _),
+        ClientSession(read, write) as session,
+    ):
+        await session.initialize()
+        assert [t.name for t in (await session.list_tools()).tools] == ["search"]
+        hidden = await session.call_tool("check_and_run", {"sql": "SELECT 1"})
+        assert hidden.isError and hidden.structuredContent["error"]["type"] == (
+            "PermissionDeniedError"
+        )
+    command, *args = _cli("mcp")
+    params = StdioServerParameters(
+        command=command,
+        args=args,
+        env=demo.env | {"CTEFORGE_USER": "admin", "CTEFORGE_TOKEN": narrow},
+        cwd=str(demo.directory),
+    )
+    async with stdio_client(params) as (read, write), ClientSession(read, write) as session:
+        await session.initialize()
+        assert [t.name for t in (await session.list_tools()).tools] == ["search"]
+    # Revoked: the next call fails with the generic 401.
+    server.api(
+        "DELETE",
+        f"/users/claude-agent/tokens/{minted.json()['info']['id']}",
+        server.demo.admin_token,
+    )
+    assert server.api("GET", "/me", narrow).status_code == 401

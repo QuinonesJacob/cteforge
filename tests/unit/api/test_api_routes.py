@@ -144,32 +144,39 @@ def test_verify_definition(rr, check_error) -> None:
 
 
 def test_parse(api, check_error) -> None:
-    response = api.post("/parse", "vic", {"sql": SQL, "dialect": "duckdb"})
+    response = api.post("/parse", "alice", {"sql": SQL, "dialect": "duckdb"})
     assert response.status_code == 200
     report = response.json()
     assert report["schema_found"] is True
     assert {"closed_deals.L1", "deals_in_region.L1"} <= {lit["id"] for lit in report["literals"]}
     check_error(
-        api.post("/parse", "vic", {"sql": "SELECT FROM WHERE (", "dialect": "duckdb"}),
+        api.post("/parse", "alice", {"sql": "SELECT FROM WHERE (", "dialect": "duckdb"}),
         422,
         "SqlParseError",
     )
     check_error(
-        api.post("/parse", "vic", {"sql": SQL, "dialect": "oracle"}),
+        api.post("/parse", "alice", {"sql": SQL, "dialect": "oracle"}),
         422,
         "RequestValidationError",
     )
     check_error(
-        api.post("/parse", "vic", {"sql": SQL, "dialect": "duckdb", "profile": "nope"}),
+        api.post("/parse", "alice", {"sql": SQL, "dialect": "duckdb", "profile": "nope"}),
         404,
         "NotFoundError",
     )
 
 
+def test_parse_is_a_build_tool(api, check_error) -> None:
+    """ADR 0027: parse_query belongs to the build tools; a viewer does not hold it."""
+    check_error(
+        api.post("/parse", "vic", {"sql": SQL, "dialect": "duckdb"}), 403, "PermissionDeniedError"
+    )
+
+
 def test_parse_without_dialect_uses_the_connections(api) -> None:
-    response = api.post("/parse", "vic", {"sql": SQL})
+    response = api.post("/parse", "alice", {"sql": SQL})
     assert response.status_code == 200 and response.json()["dialect"] == "duckdb"
-    explicit = api.post("/parse", "vic", {"sql": SQL, "dialect": "postgres"}).json()
+    explicit = api.post("/parse", "alice", {"sql": SQL, "dialect": "postgres"}).json()
     assert explicit["dialect"] == "postgres"
     assert "dialect_mismatch" in [i["code"] for i in explicit["issues"]]
 
@@ -395,9 +402,120 @@ def test_audit(rr, check_error) -> None:
 def test_users(api, check_error) -> None:
     response = api.get("/users", "root")
     assert response.status_code == 200
-    assert {u["name"] for u in response.json()} == {"root", "alice", "ann", "vic", "bot", "robo"}
-    assert all("token" not in u for u in response.json())
+    users = response.json()
+    assert {u["name"] for u in users} == {"root", "alice", "ann", "vic", "bot", "robo"}
+    for u in users:
+        assert "token" not in u and u["active"] is True
+        assert [t["name"] for t in u["tokens"]] == ["default"]
+        assert all(t["prefix"].startswith("cfg_pat_") for t in u["tokens"])
     check_error(api.get("/users", "ann"), 403, "PermissionDeniedError")
+
+
+def _no_token_values(api, response) -> None:
+    text = response.text
+    for token in api.tokens.values():
+        assert token not in text
+
+
+def test_token_values_appear_only_in_the_mint_response(api) -> None:
+    minted = api.post("/me/tokens", "alice", {"name": "Claude Code"})
+    assert minted.status_code == 201 and minted.headers["cache-control"] == "no-store"
+    token = minted.json()["token"]
+    api.tokens["alice-cc"] = token
+    assert minted.json()["info"]["prefix"] == token[:12]
+    for path, user in [
+        ("/users", "root"),
+        ("/me/tokens", "alice"),
+        ("/users/alice/tokens", "root"),
+        ("/roles", "root"),
+        ("/me", "alice"),
+        ("/audit?limit=1000", "root"),
+    ]:
+        response = api.get(path, user)
+        assert response.status_code == 200, path
+        _no_token_values(api, response)
+
+
+def test_me_includes_effective_tools(api) -> None:
+    me = api.get("/me", "vic").json()
+    assert me["name"] == "vic" and me["role"] == "viewer" and me["kind"] == "human"
+    assert "search" in me["tools"] and "propose_definition" not in me["tools"]
+    assert me["role_allowed"] == me["role_defaults"] == me["tools"]
+    robo = api.get("/me", "robo").json()
+    assert "verify" not in robo["tools"]  # an approver agent does not verify
+    assert api.get("/tools", "vic").json()[0] == {
+        "name": "search",
+        "group": "use",
+        "admin_only": False,
+    }
+
+
+def test_my_tokens(api, check_error) -> None:
+    made = api.post(
+        "/me/tokens",
+        "alice",
+        {"name": "ci", "tool_mode": "only", "include": ["search", "compile_and_run"]},
+    ).json()
+    narrow = made["token"]
+    headers = {"Authorization": f"Bearer {narrow}"}
+    me = api.client.get("/api/v1/me", headers=headers).json()
+    assert me["tools"] == ["search", "compile_and_run"]
+    # The narrow token can't reach other tools over HTTP either (enforced in services).
+    check_error(
+        api.client.post("/api/v1/parse", headers=headers, json={"sql": SQL, "dialect": "duckdb"}),
+        403,
+        "PermissionDeniedError",
+    )
+    listed = api.get("/me/tokens", "alice").json()
+    assert [t["name"] for t in listed] == ["default", "ci"]
+    changed = api.put(
+        f"/me/tokens/{made['info']['id']}", "alice", {"tool_mode": "only", "include": ["search"]}
+    )
+    assert changed.json()["tools"] == ["search"]
+    revoked = api.delete(f"/me/tokens/{made['info']['id']}", "alice")
+    assert revoked.status_code == 200 and revoked.json()["state"] == "revoked"
+    check_error(api.client.get("/api/v1/me", headers=headers), 401, "Unauthorized")
+    check_error(api.delete("/me/tokens/nope", "alice"), 404, "NotFoundError")
+    check_error(
+        api.post("/me/tokens", "vic", {"name": "x", "include": ["propose_definition"]}),
+        409,
+        "PolicyError",
+    )
+    check_error(api.post("/me/tokens", "vic", {"name": ""}), 422, "RequestValidationError")
+    check_error(
+        api.post("/me/tokens", "vic", {"name": "x", "expires_at": "2000-01-01T00:00:00Z"}),
+        409,
+        "PolicyError",
+    )
+
+
+def test_agents_never_receive_tokens_over_http(api, check_error) -> None:
+    check_error(api.post("/me/tokens", "bot", {"name": "x"}), 403, "PermissionDeniedError")
+    api.patch("/users/robo", "root", {"role": "admin"})  # robo: an agent admin now
+    check_error(api.post("/users/vic/tokens", "robo", {"name": "x"}), 403, "PermissionDeniedError")
+    created = api.post("/users", "robo", {"name": "zed", "role": "viewer", "kind": "human"})
+    assert created.status_code == 201 and created.json()["token"] is None
+    assert created.json()["user"]["name"] == "zed"
+
+
+def test_admin_mints_and_revokes_for_users(api, check_error) -> None:
+    made = api.post("/users/vic/tokens", "root", {"name": "laptop"})
+    assert made.status_code == 201 and made.json()["info"]["created_by"] == "root"
+    token = made.json()["token"]
+    me = api.client.get("/api/v1/me", headers={"Authorization": f"Bearer {token}"})
+    assert me.json()["name"] == "vic"
+    tokens = api.get("/users/vic/tokens", "root").json()
+    assert {t["name"] for t in tokens} == {"default", "laptop"}
+    check_error(api.get("/users/vic/tokens", "ann"), 403, "PermissionDeniedError")
+    check_error(api.post("/users/vic/tokens", "ann", {"name": "x"}), 403, "PermissionDeniedError")
+    check_error(api.post("/users/nobody/tokens", "root", {"name": "x"}), 404, "NotFoundError")
+    revoked = api.delete(f"/users/vic/tokens/{made.json()['info']['id']}", "root")
+    assert revoked.json()["state"] == "revoked"
+    check_error(
+        api.client.get("/api/v1/me", headers={"Authorization": f"Bearer {token}"}),
+        401,
+        "Unauthorized",
+    )
 
 
 def test_create_user_returns_token_once(api, check_error) -> None:
@@ -405,12 +523,11 @@ def test_create_user_returns_token_once(api, check_error) -> None:
     assert response.status_code == 201
     body = response.json()
     assert body["user"]["name"] == "zoe" and body["user"]["kind"] == "agent"
+    assert "tools" not in body["user"]
     me = api.client.get("/api/v1/me", headers={"Authorization": f"Bearer {body['token']}"})
     assert me.json()["name"] == "zoe"
     check_error(api.post("/users", "root", {"name": "zoe", "role": "viewer"}), 409, "StoreError")
-    check_error(
-        api.post("/users", "root", {"name": "x", "role": "boss"}), 422, "RequestValidationError"
-    )
+    check_error(api.post("/users", "root", {"name": "x", "role": "boss"}), 409, "PolicyError")
     check_error(
         api.post("/users", "root", {"name": "bad name!", "role": "viewer"}), 409, "PolicyError"
     )
@@ -419,19 +536,47 @@ def test_create_user_returns_token_once(api, check_error) -> None:
     )
 
 
-def test_rotate_token(api, check_error) -> None:
-    response = api.post("/users/alice/token", "root")
-    assert response.status_code == 200 and response.json()["name"] == "alice"
-    check_error(api.post("/users/nobody/token", "root"), 404, "NotFoundError")
-    check_error(api.post("/users/root/token", "vic"), 403, "PermissionDeniedError")
-
-
-def test_set_role(api, check_error) -> None:
-    response = api.put("/users/vic/role", "root", {"role": "contributor"})
+def test_update_user(api, check_error) -> None:
+    response = api.patch("/users/vic", "root", {"role": "contributor"})
     assert response.status_code == 200 and response.json()["role"] == "contributor"
     assert api.get("/me", "vic").json()["role"] == "contributor"
-    check_error(api.put("/users/root/role", "root", {"role": "viewer"}), 409, "PolicyError")
-    check_error(api.put("/users/nobody/role", "root", {"role": "viewer"}), 404, "NotFoundError")
+    check_error(api.patch("/users/root", "root", {"role": "viewer"}), 409, "PolicyError")
+    check_error(api.patch("/users/nobody", "root", {"role": "viewer"}), 404, "NotFoundError")
+    check_error(api.patch("/users/vic", "root", {}), 422, "RequestValidationError")
+    off = api.patch("/users/vic", "root", {"active": False})
+    assert off.json()["active"] is False
+    check_error(api.get("/me", "vic"), 401, "Unauthorized")
+    api.patch("/users/vic", "root", {"active": True})
+    assert api.get("/me", "vic").status_code == 200
+    check_error(api.patch("/users/vic", "ann", {"active": False}), 403, "PermissionDeniedError")
+
+
+def test_roles(api, check_error) -> None:
+    roles = api.get("/roles", "root").json()
+    assert [r["name"] for r in roles] == ["viewer", "contributor", "approver", "admin"]
+    assert roles[3]["allowed"] == [t["name"] for t in api.get("/tools", "root").json()]
+    made = api.post(
+        "/roles",
+        "root",
+        {"name": "support_bot", "allowed": ["search", "compile_and_run"], "defaults": ["search"]},
+    )
+    assert made.status_code == 201 and made.json()["defaults"] == ["search"]
+    edited = api.put("/roles/support_bot", "root", {"defaults": ["search", "compile_and_run"]})
+    assert edited.json()["defaults"] == ["search", "compile_and_run"]
+    check_error(api.put("/roles/admin", "root", {"allowed": ["search"]}), 409, "PolicyError")
+    check_error(
+        api.post("/roles", "root", {"name": "x", "allowed": ["manage_user"]}), 409, "PolicyError"
+    )
+    check_error(
+        api.post("/roles", "root", {"name": "x", "allowed": ["teleport"]}),
+        422,
+        "RequestValidationError",
+    )
+    check_error(api.get("/roles", "ann"), 403, "PermissionDeniedError")
+    check_error(api.delete("/roles/viewer", "root"), 409, "PolicyError")
+    gone = api.delete("/roles/support_bot", "root")
+    assert gone.status_code == 204
+    check_error(api.delete("/roles/support_bot", "root"), 404, "NotFoundError")
 
 
 def test_settings(api, check_error) -> None:

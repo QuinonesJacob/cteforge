@@ -16,6 +16,7 @@ from __future__ import annotations
 import threading
 from pathlib import Path
 
+from cteforge.domain.access import Tool
 from cteforge.domain.audit import AuditKind
 from cteforge.domain.errors import PolicyError
 from cteforge.domain.users import User
@@ -24,7 +25,6 @@ from cteforge.services import _audit, _meaning
 from cteforge.services.auth import require
 from cteforge.services.cards import SearchIndexReport
 from cteforge.services.context import AppConfig, AppContext
-from cteforge.trust.approval import Action
 
 OFF_MESSAGE = "Meaning search is off (CTEFORGE_SEARCH_EMBEDDINGS=off); nothing to index"
 
@@ -34,7 +34,7 @@ def rebuild_search_index(ctx: AppContext, user: User, *, force: bool = False) ->
     when the model cannot be loaded."""
     fields = {"extra": {"op": "rebuild_search_index", "force": force}}
     with _audit.audit_failures(ctx, user, AuditKind.ADMIN, **fields):
-        require(user, Action.MANAGE_SETTINGS)
+        require(user, Tool.MANAGE_SETTINGS)
         embedder = ctx.embedder
         if embedder is None:
             raise PolicyError(OFF_MESSAGE)

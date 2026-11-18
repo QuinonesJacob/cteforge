@@ -1,4 +1,5 @@
-"""`db`, `user` and `settings` command groups: thin calls into services.admin."""
+"""`db`, `user` and `settings` command groups: thin calls into services.admin.
+(Tokens and roles: cli/access.py.)"""
 
 from __future__ import annotations
 
@@ -22,7 +23,7 @@ from cteforge.services import admin
 from cteforge.services.cards import TeamSettings
 
 db_app = typer.Typer(no_args_is_help=True, help="The cteforge database (CTEFORGE_DB_URL).")
-user_app = typer.Typer(no_args_is_help=True, help="Users, roles and tokens (admin).")
+user_app = typer.Typer(no_args_is_help=True, help="Users (admin).")
 settings_app = typer.Typer(no_args_is_help=True, help="Team settings (admin).")
 app.add_typer(db_app, name="db")
 app.add_typer(user_app, name="user")
@@ -43,14 +44,17 @@ def db_init() -> None:
 def user_add(
     name: str,
     role: Annotated[
-        UserRole | None, typer.Option("--role", "-r", help="viewer|contributor|approver|admin")
+        str | None,
+        typer.Option("--role", "-r", help="viewer|contributor|approver|admin or a custom role"),
     ] = None,
-    agent: Annotated[bool, typer.Option("--agent", help="An agent user (never verifies)")] = False,
+    agent: Annotated[
+        bool, typer.Option("--agent", help="An agent user (verifies only as admin)")
+    ] = False,
     bootstrap: Annotated[
         bool, typer.Option("--bootstrap", help="Create the first admin (only while no users)")
     ] = False,
 ) -> None:
-    """Create a user and print its token once."""
+    """Create a user and print its "default" token once."""
     kind = ActorKind.AGENT if agent else ActorKind.HUMAN
     if bootstrap:
         if role not in (None, UserRole.ADMIN):
@@ -63,38 +67,48 @@ def user_add(
         with session() as (ctx, acting):
             created, token = admin.create_user(ctx, acting, name, role, kind)
     typer.echo(f"created {created.kind} user '{created.name}' with role {created.role}")
-    echo_token(created.name, token)
+    if token is not None:
+        echo_token(created.name, token)
 
 
 @user_app.command("list")
 def user_list(as_json: JsonOpt = False) -> None:
-    """List users with their role and kind."""
+    """List users with their role, kind, active flag and active tokens."""
     with session() as (ctx, acting):
         users = admin.list_users(ctx, acting)
     if as_json:
         echo_json(users)
         return
-    rows = [["NAME", "ROLE", "KIND", "CREATED"]]
+    rows = [["NAME", "ROLE", "KIND", "ACTIVE", "TOKENS", "CREATED"]]
     for u in users:
         created = u.created_at.isoformat(timespec="seconds") if u.created_at else ""
-        rows.append([u.name, str(u.role), str(u.kind), created])
+        live = sum(1 for tk in u.tokens if tk.state == "active")
+        rows.append([u.name, u.role, str(u.kind), "yes" if u.active else "no", str(live), created])
     table(rows)
 
 
 @user_app.command("role")
-def user_role(name: str, role: UserRole) -> None:
-    """Change a user's role."""
+def user_role(name: str, role: str) -> None:
+    """Change a user's role (a built-in or custom role name)."""
     with session() as (ctx, acting):
         updated = admin.set_role(ctx, acting, name, role)
     typer.echo(f"'{updated.name}' is now {updated.role}")
 
 
-@user_app.command("token")
-def user_token(name: str) -> None:
-    """Issue a new token for NAME (the old one stops working); printed once."""
+@user_app.command("deactivate")
+def user_deactivate(name: str) -> None:
+    """Deactivate a user: none of their tokens work until they are activated again."""
     with session() as (ctx, acting):
-        token = admin.rotate_token(ctx, acting, name)
-    echo_token(name, token)
+        admin.set_active(ctx, acting, name, False)
+    typer.echo(f"'{name}' is deactivated")
+
+
+@user_app.command("activate")
+def user_activate(name: str) -> None:
+    """Activate a deactivated user (their unrevoked, unexpired tokens work again)."""
+    with session() as (ctx, acting):
+        admin.set_active(ctx, acting, name, True)
+    typer.echo(f"'{name}' is active")
 
 
 @settings_app.command("show")

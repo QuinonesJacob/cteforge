@@ -139,21 +139,22 @@ def test_auth_off_with_unknown_local_user_is_403(new_context, tmp_path, check_er
             check_error(client.get("/api/v1/me"), 403, "PermissionDeniedError")
 
 
-def test_rotated_token_replaces_old_one(api, check_error) -> None:
+def test_new_token_works_and_revoking_the_old_one_stops_it(api, check_error) -> None:
     old = api.tokens["vic"]
-    response = api.post("/users/vic/token", "vic")
-    assert response.status_code == 200
+    response = api.post("/me/tokens", "vic", {"name": "new laptop"})
+    assert response.status_code == 201
     new = response.json()["token"]
-    assert response.json()["name"] == "vic" and new != old
-    assert (
-        api.client.get("/api/v1/me", headers={"Authorization": f"Bearer {new}"}).json()["name"]
-        == "vic"
-    )
+    assert new != old and new.startswith("cfg_pat_")
+    headers = {"Authorization": f"Bearer {new}"}
+    assert api.client.get("/api/v1/me", headers=headers).json()["name"] == "vic"
+    [default] = [t for t in api.get("/me/tokens", "vic").json() if t["name"] == "default"]
+    api.client.delete(f"/api/v1/me/tokens/{default['id']}", headers=headers)
     check_error(
         api.client.get("/api/v1/me", headers={"Authorization": f"Bearer {old}"}),
         401,
         "Unauthorized",
     )
+    assert api.client.get("/api/v1/me", headers=headers).status_code == 200
 
 
 def test_factory_without_ctx_opens_and_closes_context(
