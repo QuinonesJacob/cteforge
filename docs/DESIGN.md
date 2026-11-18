@@ -5,8 +5,8 @@
 > decision, update this file and the relevant ADR in the same commit.
 
 Status: pre-alpha. M1–M5 built and wired end to end (`cteforge demo` → `cteforge serve`: GUI, HTTP API, MCP over
-stdio and streamable HTTP); M6 connectors built; DuckDB and ClickHouse are verified against real engines (ClickHouse
-locally, not yet in CI); the others are unverified against real warehouses (see §16).
+stdio and streamable HTTP); M6 connectors built; DuckDB, Postgres and ClickHouse are verified against real engines in
+CI; the cloud warehouses (Redshift, Snowflake, BigQuery, Databricks) are not (see §16).
 
 ---
 
@@ -280,8 +280,8 @@ Revising a definition keeps its source dialect.
   connector (DuckDB interrupt, Postgres and Redshift transaction-local `statement_timeout`,
   Snowflake
   `STATEMENT_TIMEOUT_IN_SECONDS`, BigQuery job timeout + cancel, Databricks
-  `STATEMENT_TIMEOUT`, ClickHouse `max_execution_time` per request; DuckDB's is checked against a real engine
-  in CI, ClickHouse's locally by the live tests). There is no cancel on client disconnect yet, and a wide
+  `STATEMENT_TIMEOUT`, ClickHouse `max_execution_time` per request; DuckDB's, Postgres's and ClickHouse's are
+  checked against real engines in CI). There is no cancel on client disconnect yet, and a wide
   result is still fetched in full by the connector (ClickHouse streams and stops after the
   row limit).
 - ClickHouse (ADR 0025): a query may raise its own limits in a `SETTINGS` clause
@@ -324,7 +324,7 @@ Revising a definition keeps its source dialect.
 | M3 | Store (SQLite/Postgres), proposals (§18), versions, permissions (incl. four-eyes), audit | done (Postgres untested in CI; SQLite tested) |
 | M4 | MCP server (§6) | done (stdio + streamable HTTP at `/mcp`; e2e-tested) |
 | M5 | HTTP API + GUI (import flow, library, revise, explore: recipes/compose/join map/tables/SQL, review queue) | done; GUI↔API contract e2e-tested |
-| M6 | Snowflake/BigQuery/Postgres/Databricks connectors, EXPLAIN/dry-run, statement timeouts, drift check | built; DuckDB verified against a real engine in CI, ClickHouse locally (22 live tests, ClickHouse 26.10, 2026-11-17). The other connectors (incl. their timeouts and read-only setup) are unit-tested against fake drivers only and unverified against real warehouses |
+| M6 | Snowflake/BigQuery/Postgres/Databricks connectors, EXPLAIN/dry-run, statement timeouts, drift check | built; verified against real engines in CI (`.github/workflows/ci.yml`): DuckDB, Postgres 16 and ClickHouse 25.8 (service containers); ClickHouse 26.10 also locally. Redshift, Snowflake, BigQuery and Databricks (incl. their timeouts and read-only setup) are unit-tested against fake drivers only and unverified against real warehouses |
 
 ## 17. Composition (M2)
 

@@ -6,12 +6,17 @@ pytest suite. Project root: ../CLAUDE.md
 - `unit/<module>/test_*.py` — mirrors src/cteforge/<module>/; pure, no warehouse.
 - `integration/` — tests using a DuckDB warehouse (built in a tmp dir by fixtures), and
   `test_clickhouse_live.py`: the ClickHouse connector against a real server, skipped unless
-  `CTEFORGE_TEST_CLICKHOUSE_URL` is set (how to run: its docstring; ADR 0025). Tests never
-  start or download a warehouse server.
+  `CTEFORGE_TEST_CLICKHOUSE_URL` is set (how to run: its docstring; ADR 0025), and
+  `test_postgres_live.py` (the Postgres connector plus the example definition end to end
+  through the services; skipped unless `CTEFORGE_TEST_POSTGRES_URL` is set). Tests never
+  start or download a warehouse server; CI (`.github/workflows/ci.yml`, job
+  `live-databases`) runs them against service containers and fails if any is skipped.
 - `fixtures/clickhouse/` — the trace-shaped ClickHouse definition (`trace_tool_errors.sql`
   + `.annotations.yml`: traces → turns → tool_calls) shared by unit and live tests, and
   `live_setup.py`, run by hand as an admin to create the read-only user, settings profile
   and synthetic dataset on a test server.
+- `fixtures/postgres/live_setup.py` — run as an admin to copy the example warehouse into a
+  `cteforge_test` database and create the SELECT-only role `cteforge_ro`.
 - `e2e/` — the product wired together: `test_gui_contract.py` (every API call the GUI in
   `web/src/api/endpoints.ts` makes, with the GUI's body shapes, asserting the fields the GUI
   reads) and `test_server_e2e.py` (marked `e2e`: real `cteforge demo` + `cteforge serve`
