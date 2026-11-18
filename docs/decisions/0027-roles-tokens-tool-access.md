@@ -90,3 +90,56 @@ deactivation, tokens); granting the admin role; editing the admin role.
 - "Verified" can now mean an admin agent verified it; the label shows which, and four-eyes
   still blocks self-verification.
 - Admin agents can lock out non-admin users; admins and tokens stay under human control.
+
+## Addendum (2026-11-17): implementation model
+- **The permission unit is the tool.** `domain` defines a `Tool` catalog (one name per
+  operation; MCP tools use the same names): use — `search`, `get_definition`,
+  `compile_and_run`, `check_and_run`, `describe_tables`, `list_joins`, `list_recipes`
+  (until ADR 0026 removes it); build — `parse_query`, `propose_definition`,
+  `revise_definition`, `propose_join`, `propose_recipe` (until 0026); review —
+  `list_proposals`, `review_proposal` (approve / reject), `verify`; admin — `view_audit`,
+  `list_users`, `manage_user`, `manage_role`, `manage_settings`. Every use-case requires
+  exactly one tool (`services/auth.require(user, Tool.X, target?)`); HTTP endpoints map to
+  the tool of the use-case they call (e.g. `GET /proposals` → `list_proposals`, export →
+  `get_definition`, import → `propose_definition`, search-index rebuild →
+  `manage_settings`, library-wide revalidate → `review_proposal`). The old `Action` /
+  `ROLE_MINIMUM` table is replaced.
+- **Role** (store table `roles`): `name` (Ident), `description`, `allowed` (tools),
+  `defaults` (tools, ⊆ allowed), `review_all` (bool), `builtin`. Built-ins are seeded with
+  today's behaviour: viewer (use tools + `list_proposals`), contributor (+ build tools +
+  `review_proposal` with `review_all = false`: owners approve changes to definitions they
+  own, as today), approver (+ `review_proposal` with `review_all = true`, `verify`,
+  `view_audit`), admin (every tool, always; its `allowed` cannot be edited; its
+  `defaults` only by a human admin). Admin tools (`list_users`, `manage_user`,
+  `manage_role`, `manage_settings`) can only be allowed in the admin role. A role in use
+  cannot be deleted.
+- **Token** (store table `tokens`): `id` (uuid), `user_name`, `name`, `prefix` (first 12
+  chars, shown in lists), `token_sha256` (unique), `created_at`, `created_by`,
+  `last_used_at` (updated at most once a minute), `expires_at?`, `revoked_at?`,
+  `tool_mode` (`follow_role` | `only`), `include` / `exclude` (tool lists). Format
+  `cfg_pat_` + 43 URL-safe chars. Effective tools = role.allowed ∩
+  (follow_role: (role.defaults ∪ include) − exclude; only: include), then minus `verify`
+  for an agent user whose role is not admin. Authentication fails (same generic 401) for
+  an unknown, revoked or expired token or an inactive user.
+- **Users** gain `active` (deactivated users cannot authenticate); `role` becomes a role
+  name (the built-in names keep their values). The legacy `users.token_sha256` column is
+  no longer used to authenticate: on first open, each user's existing hash becomes a
+  token named `default` (follow_role), so existing tokens keep working.
+- **The acting user carries its effective tools** (resolved in services/auth at
+  authentication); policy in trust/ stays pure and checks membership. A `User` built
+  without tools (tests, the CLI before a store lookup) falls back to its built-in role's
+  defaults.
+- **Surfaces**: HTTP/MCP over HTTP → the bearer token's tools. stdio MCP → `CTEFORGE_TOKEN`
+  when set (that token's user and tools), else `CTEFORGE_USER` with its role's defaults.
+  CLI and auth-off HTTP (a person at the machine) → the role's allowed tools.
+  MCP `tools/list` shows only the effective tools; calling another is refused and audited.
+- **Who may mint a token**: never an agent-kind caller, on any surface (the endpoint
+  refuses; no MCP tool exists). A human mints their own; a human admin mints for any user.
+  Revoke: own tokens; a human admin any; an agent admin only for non-admin users.
+- **Agent admins** (agent kind + admin role): may create users (human or agent; no token is
+  returned), change role / tools / active of non-admin users, revoke non-admin users'
+  tokens, create and edit roles other than admin, approve / reject (including changes to
+  verified definitions) and verify. They may not: give anyone the admin role, touch an
+  admin user, edit the admin role, see or mint tokens. The four-eyes rule applies to
+  agent admins with no exemption. `verified_by` and proposal decisions record the actor
+  kind; cards show it.
