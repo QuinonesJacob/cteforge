@@ -1,0 +1,39 @@
+# Annotations for trace_tool_errors.sql (ClickHouse, ADR 0025). Literal and grain IDs come
+# from: cteforge parse (QueryAnalysis.literals / .grains) with dialect clickhouse.
+id: tool_call_error_rate
+title: Tool-call error rate by tool
+meaning: >-
+  Share of an AI agent's tool calls that failed, per tool and period, for traces of the
+  chosen models that carry a tag.
+keywords: [agent, traces, tool calls, tool errors, error rate, failures, llm, observability]
+use_when: Questions about which agent tools fail most, for which models, over a period.
+dont_use_when: Latency or cost questions; failures of the model itself (not tool calls).
+grain: one row per period (see time_grain) per tool
+variables:
+  - name: failed_status
+    type: text
+    role: fixed
+    literals: [main.L1, main.L2]
+    description: Tool-call status counted as a failure. Business logic — do not change.
+  - name: period
+    type: date_range
+    role: changeable
+    literals: [main.L3, main.L4]
+    description: Trace start time range (UTC; end exclusive).
+  - name: models
+    type: text_list
+    role: changeable
+    literals: [main.L5, main.L6]
+    description: Models whose traces are counted.
+  - name: required_tag
+    type: text
+    role: changeable
+    literals: [main.L7]
+    description: Only traces carrying this tag (has(t.tags, ...)).
+  - name: time_grain
+    type: grain
+    role: changeable
+    literals: [main.G1]
+    description: >-
+      Period each row covers: tool calls bucketed by their call time. ClickHouse weeks
+      start on Monday (toMonday).

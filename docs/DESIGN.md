@@ -5,8 +5,8 @@
 > decision, update this file and the relevant ADR in the same commit.
 
 Status: pre-alpha. M1–M5 built and wired end to end (`cteforge demo` → `cteforge serve`: GUI, HTTP API, MCP over
-stdio and streamable HTTP); M6 connectors built, but those other than DuckDB are unverified against real
-warehouses (see §16).
+stdio and streamable HTTP); M6 connectors built; DuckDB and ClickHouse are verified against real engines (ClickHouse
+locally, not yet in CI); the others are unverified against real warehouses (see §16).
 
 ---
 
@@ -39,6 +39,11 @@ relationships, changeable variables ≈ dimensions/filters, recipes ≈ saved qu
 Export to WrenAI/dbt formats is a possible later feature, not a goal. See ADR 0001, 0002.
 
 ## 3. Core concepts
+
+> **Planned (ADR 0026, accepted, not built):** recipes become **composed definitions** (a
+> definition whose body is parts + a final select, parts referenced live); the join map
+> stays mined from definitions, and `propose_join` gains `annotate` / `add` (agent-added
+> edges never auto-apply). Library and Review become one GUI page.
 
 - **Definition** — one trusted CTE plus: title, plain-language meaning, keywords/synonyms,
   "use when", "don't use when", source dialect, tables read, output columns, **grain**
@@ -102,11 +107,17 @@ Rules:
 
 ## 6. MCP tools (M4)
 
+> **Planned (ADR 0026, 0027, accepted, not built):** `propose_recipe` / `list_recipes` /
+> `recipe_id` go; `propose_definition` takes `sql` or `composition`; `propose_join` takes
+> `action: add | annotate`. Review (`list_proposals`, `review_proposal`) and admin
+> (`list_users`, `manage_user`, `manage_role`) tools are added, and `tools/list` is
+> filtered per token. Admin agents may verify (four-eyes still applies).
+
 | Use the library | Build the library |
 |---|---|
-| `search(query)` — ranked definitions + their variables | `parse_query(sql, dialect)` — literals with IDs, columns + types, structural facts, range/grain suggestions, joins |
-| `get_definition(id)` — full card: meaning, variables with input formats, outputs, grain | `propose_definition(sql, dialect, metadata, annotations)` |
-| `compile_and_run(uses, values, select?)` or `(recipe_id, values)` | `revise_definition(id, base_version, sql?, metadata?, annotations?)` |
+| `search(query)` — ranked definitions + their variables | `parse_query(sql, dialect?)` — literals with IDs, columns + types, structural facts, range/grain suggestions, joins |
+| `get_definition(id)` — full card: meaning, variables with input formats, outputs, grain | `propose_definition(sql, dialect?, metadata, annotations)` (an omitted `dialect`: §12) |
+| `compile_and_run(uses, values, select?)` or `(recipe_id, values)` | `revise_definition(id, base_version, sql?, metadata?, annotations?)`; with `new_id` alone it proposes a rename (ADR 0024) |
 | `check_and_run(sql)` — exploratory, labeled; SQL that is a definition's original query gets a `matches_definition` hint to use `compile_and_run` instead | `propose_join(...)` · `propose_recipe(...)` (`version`, `state`, `schema_version` are set by cteforge, never by the caller) |
 | `list_recipes(query?)` · `list_joins(table?)` · `describe_tables(tables?)` — discovery: saved recipes, join-map keys, columns + types (+ units the library declares) | |
 
@@ -152,16 +163,41 @@ always require human approval**. See ADR 0007.
 
 ## 9. Server architecture (M3+)
 
+> **Planned (ADR 0027, accepted, not built):** configurable roles (Allowed = ceiling, On by
+> default), many named show-once personal access tokens per user with per-token tool
+> lists enforced in services; agents never see tokens; admin agents manage non-admin
+> users and roles. Sign-in roadmap: tokens now → optional OIDC GUI sign-in → optional
+> MCP OAuth with cteforge as its own authorization server.
+
 - Self-hosted server: Postgres (SQLite for local single-user), web GUI, MCP endpoint.
 - Every change is a proposal; roles: viewer/agent-read, contributor/agent-propose,
   definition owner (approves changes to what they own), admin.
 - Full version history per definition with diffs; **impact preview** ("affects 14 recipes").
 - Git is an optional export/import, not the source of truth. See ADR 0003.
+- Users and settings: team settings (strict/open mode, **default connection**) and
+  users/roles/tokens are admin-only. The default connection decides the default dialect:
+  the dialect follows the connection (ADR 0021). Resolution: the admin's setting →
+  `CTEFORGE_DEFAULT_PROFILE` → the only profile → none.
 
 ## 10. Warehouses
 
-Targets (free, permissive drivers): Postgres/Redshift, Snowflake, BigQuery, Databricks, DuckDB.
+Targets (free, permissive drivers): Postgres, Redshift (its own dialect, ADR 0022), Snowflake,
+BigQuery, Databricks, ClickHouse (ADR 0025), DuckDB. A team may connect several; each definition maps to one
+connection, and definitions on different connections are never combined in one query.
 DuckDB first (M1); the rest in M6.
+
+Redshift uses AWS's `redshift_connector` (password auth only for now) and reads column types
+from `SVV_COLUMNS`, so late-binding views and Spectrum external tables are covered.
+
+ClickHouse uses ClickHouse Inc.'s `clickhouse-connect` over HTTP(S) (password auth, a named
+read-only user). Every request carries `readonly = 2` (reads only; the query cannot lift
+it), `max_execution_time` and optional scan guards (`max_rows_to_read`, `max_bytes_to_read`);
+the server runs one statement per request. Column types come from `system.columns`; names
+are `database.table`. Common ClickHouse filter shapes on trace-like data are variables:
+`has(arr, 'x')`, `hasAny` / `hasAll` element lists, lambdas (`arrayExists(x -> x = 'a',
+arr)`), `ARRAY JOIN` names, `map['k']`, `JSONExtractString(...)`, `match(s, 're')`.
+Trusted SQL must not contain ClickHouse query parameters (`{x:String}`): cteforge runs
+SQL as written and uses that syntax for its own template placeholders (ADR 0025).
 
 Used for: column types, compile checks (EXPLAIN / BigQuery dry run), running queries,
 and **nightly re-validation** of every definition to detect schema drift. Credentials stay
@@ -189,6 +225,14 @@ transpilation can subtly change semantics. See ADR 0013. Where it happens:
   SQL transpiled to the profile's dialect, with a `dialect_mismatch` warning; the
   definition keeps its source dialect.
 
+Which dialect pasted SQL is in: callers of `parse_query` / `propose_definition` (MCP, API,
+GUI) may omit `dialect`. It then resolves, in order, to: the **explicit** argument → the
+**connection's** dialect (the profile passed, else the default connection, §9) → otherwise
+a PolicyError saying how to fix it (ADR 0021). The GUI's Import page starts with the
+default connection and its dialect; picking another connection switches the dialect, and
+the dropdown stays so one import can use another dialect (`dialect_mismatch` above).
+Revising a definition keeps its source dialect.
+
 ## 13. Time & NULL semantics
 
 - Typed literals take the **column's real type**: e.g. BigQuery `TIMESTAMP` (zone-aware) vs
@@ -198,6 +242,7 @@ transpilation can subtly change semantics. See ADR 0013. Where it happens:
   dialect's native week truncation:
   - DuckDB `DATE_TRUNC('WEEK', x)`: Monday (ISO). Verified on DuckDB.
   - Postgres `DATE_TRUNC('WEEK', x)`: Monday (ISO), per the Postgres docs.
+  - Redshift `DATE_TRUNC('week', x)`: Monday, per the Redshift docs (returns TIMESTAMP).
   - Snowflake `DATE_TRUNC('WEEK', x)`: depends on the session/account `WEEK_START`
     parameter. The default 0 (legacy, ISO-like) starts weeks on Monday, per the Snowflake
     docs; an account that sets `WEEK_START` gets its own start day.
@@ -206,6 +251,16 @@ transpilation can subtly change semantics. See ADR 0013. Where it happens:
     a truncation written that way can't be a grain variable.
   - Databricks `DATE_TRUNC('WEEK', x)` / `TRUNC(d, 'WEEK')`: Monday, per the Databricks/Spark
     docs. `TRUNC(date, fmt)` has no day format, so grain `day` is refused there.
+  - ClickHouse: `toMonday(x)`, `date_trunc('week', x)` and `toStartOfInterval(x, INTERVAL 1
+    WEEK)`: Monday (the native week; the docs state it for toStartOfInterval and toMonday;
+    date_trunc's Monday is from third-party guides — the opt-in live test checks all three).
+    `toStartOfWeek(x[, mode])` follows the toWeek mode table: the default mode 0 and every
+    even mode start on **Sunday** (unit `week(sunday)`, not a grain value), odd modes on
+    Monday (`week`). A grain change is written in the SQL's own family:
+    toStartOfDay / toMonday / toStartOfMonth / toStartOfQuarter / toStartOfYear,
+    `toStartOfInterval(x, INTERVAL 1 <unit>)`, or `date_trunc('<unit>', x)`; the result
+    type follows ClickHouse (toStartOfDay → DateTime; Monday..Year → Date;
+    toStartOfInterval keeps its input type).
   Only the DuckDB start is checked against a warehouse here; the others come from vendor docs.
   Transpiling does not translate week starts, except that sqlglot rewrites BigQuery's
   Sunday week for DuckDB. Transpiled renders are labeled (ADR 0013).
@@ -222,10 +277,19 @@ transpilation can subtly change semantics. See ADR 0013. Where it happens:
   (8 MiB of JSON per call, `row_limit_reached`). One query at a time per profile; other
   callers wait at most 30 s, then get a "busy" error. Every statement has a per-profile
   timeout (`statement_timeout_s`, default 60 s; ADR 0020 addendum), enforced by the
-  connector (DuckDB interrupt, Postgres transaction-local `statement_timeout`, Snowflake
+  connector (DuckDB interrupt, Postgres and Redshift transaction-local `statement_timeout`,
+  Snowflake
   `STATEMENT_TIMEOUT_IN_SECONDS`, BigQuery job timeout + cancel, Databricks
-  `STATEMENT_TIMEOUT`; only DuckDB's is checked against a real engine). There is no cancel
-  on client disconnect yet, and a wide result is still fetched in full by the connector.
+  `STATEMENT_TIMEOUT`, ClickHouse `max_execution_time` per request; DuckDB's is checked against a real engine
+  in CI, ClickHouse's locally by the live tests). There is no cancel on client disconnect yet, and a wide
+  result is still fetched in full by the connector (ClickHouse streams and stops after the
+  row limit).
+- ClickHouse (ADR 0025): a query may raise its own limits in a `SETTINGS` clause
+  (`readonly = 2` allows changing settings other than `readonly`). Only the read-only
+  user's settings profile can cap them (constraints such as `max_execution_time = 60 MAX
+  300`, `readonly = 2 CONST`); the README gives the recommended profile. Table functions
+  that read outside the warehouse (`url`, `s3`, `remote`, ...) are governed by grants, not
+  by readonly: grant the user SELECT on its databases only.
 - Proposal check runs never return the warehouse's runtime error text (it can quote data
   values, and proposals are readable by every viewer, also in strict mode); only its class.
 - `CTEFORGE_AUTH=off` accepts only connections whose socket is loopback (peer and local
@@ -237,7 +301,13 @@ transpilation can subtly change semantics. See ADR 0013. Where it happens:
 
 ## 15. Identity & versioning
 
-- A definition has a stable `id` (slug) and an integer `version`.
+- A definition has an `id` (slug, filled in from the title and locked on import) and an
+  integer `version`. The ID can be renamed deliberately: the person sees everything that
+  uses it and types the new ID to confirm; it is a proposal like any change; references
+  inside cteforge are updated; former IDs stay searchable and a former ID's not-found
+  error names the new one; no silent alias (ADR 0024). A rename creates no version: version
+  numbers, state and verification are kept, and stored versions are rewritten to the new
+  ID (the audit log is not). A former ID is never given to another definition.
 - A new version is created by any change to SQL, variables, grain, outputs, or join keys.
   Metadata-only edits (keywords, notes) also bump the version but are flagged as non-logic.
 - Recipes either **pin** a version or **float** on the latest approved version (default).
@@ -254,7 +324,7 @@ transpilation can subtly change semantics. See ADR 0013. Where it happens:
 | M3 | Store (SQLite/Postgres), proposals (§18), versions, permissions (incl. four-eyes), audit | done (Postgres untested in CI; SQLite tested) |
 | M4 | MCP server (§6) | done (stdio + streamable HTTP at `/mcp`; e2e-tested) |
 | M5 | HTTP API + GUI (import flow, library, revise, explore: recipes/compose/join map/tables/SQL, review queue) | done; GUI↔API contract e2e-tested |
-| M6 | Snowflake/BigQuery/Postgres/Databricks connectors, EXPLAIN/dry-run, statement timeouts, drift check | built; only DuckDB verified against a real engine. The other connectors (incl. their timeouts and read-only setup) are unit-tested against fake drivers only and unverified against real warehouses |
+| M6 | Snowflake/BigQuery/Postgres/Databricks connectors, EXPLAIN/dry-run, statement timeouts, drift check | built; DuckDB verified against a real engine in CI, ClickHouse locally (22 live tests, ClickHouse 26.10, 2026-11-17). The other connectors (incl. their timeouts and read-only setup) are unit-tested against fake drivers only and unverified against real warehouses |
 
 ## 17. Composition (M2)
 
@@ -271,7 +341,10 @@ and optionally a final SELECT written by the agent over those aliases.
 
 ## 18. Proposal & review flow (M3)
 
-- Every change is a proposal: `new_definition`, `revise_definition`, `new_recipe`, `new_join`.
+- Every change is a proposal: `new_definition`, `revise_definition`, `new_recipe`, `new_join`,
+  `rename_definition` (ADR 0024: from/to + the references seen when proposed; no checks to
+  run; never "approve with verify"; another rename of the same definition that was
+  overtaken is refused as stale).
   Checks (§7) run at proposal time and are stored with it; the GUI shows them with a diff and
   an impact preview (recipes using the definition).
 - Auto-apply: in **open** mode, a proposal whose checks all pass and that targets a new or
@@ -299,12 +372,28 @@ and optionally a final SELECT written by the agent over those aliases.
 
 ## 19. Search (M4)
 
-Lexical, BM25-style over title, keywords, meaning, use/don't-use notes, variable names and
-descriptions, outputs and tables. Verified ranks above llm_annotated at equal relevance;
-drafts hidden by default. A hit whose only matches are in "don't use when" ranks after
-every other hit. Hits carry use/don't-use notes, grain and the matched terms/fields;
-scores have no fixed scale (compare within one search). Embeddings are a later plug-in
-(ADR 0017).
+Hybrid (ADR 0023): **keyword** (ADR 0017) and **meaning** results, merged by reciprocal rank
+fusion into one `search` call.
+- Keyword: BM25-style over title, keywords, meaning, use/don't-use notes, variable names
+  and descriptions, outputs, tables and former IDs (ADR 0024). Exact names (tables,
+  acronyms, IDs) win here.
+- Meaning: each definition version has a generated Markdown **search document** (title,
+  id and former ids, meaning, use/don't-use notes, keywords, variables with descriptions, outputs, grain,
+  tables, joins). The server embeds it with `bge-small-en-v1.5` (fastembed, CPU, in
+  process) and stores the vector in its own database, tagged with the model. A query is
+  embedded the same way and compared to every visible definition's vector.
+- Merge: reciprocal rank fusion, Σ 1/(60 + rank) over the two rankings. Only definitions
+  with similarity ≥ 0.58 and within 0.08 of the best count as meaning matches (calibrated
+  on the demo library; ADR 0023 implementation notes).
+- Verified ranks above llm_annotated at equal relevance; drafts hidden by default; a hit
+  whose only keyword matches are in "don't use when" ranks last. Hits carry use/don't-use
+  notes, grain, the matched terms/fields and `match` (keyword, meaning or both); scores
+  have no fixed scale.
+- Vectors are derived data: written on apply when the model is loaded, filled in by
+  searches, backfilled by servers in the background (`search-index rebuild` by hand).
+- If the model can't load, search is keyword-only and says so (a `note` on each hit);
+  `CTEFORGE_SEARCH_EMBEDDINGS=off` turns meaning search off. Past questions in the
+  search document: later, opt-in.
 
 ## Out of scope
 
@@ -316,5 +405,5 @@ scores have no fixed scale (compare within one search). Embeddings are a later p
 
 - Grain detection: how much can be inferred automatically vs confirmed by a person?
 - Join map mining: how to identify "known traps" (fan-out, many-to-many) automatically?
-- Resolved: search is lexical first (ADR 0017); MCP is stdio + streamable HTTP with bearer
+- Resolved: search is lexical first (ADR 0017), then hybrid with meaning (ADR 0023); MCP is stdio + streamable HTTP with bearer
   tokens (ADR 0018).

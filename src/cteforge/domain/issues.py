@@ -52,6 +52,9 @@ class IssueCode(StrEnum):
     NOT_FOUND = "not_found"
     DRIFT = "drift"
     RECIPE_INVALID = "recipe_invalid"  # A proposed recipe can't be rendered or composed.
+    # Settings
+    # The admin's default connection names a profile that is no longer configured.
+    DEFAULT_CONNECTION_MISSING = "default_connection_missing"
 
 
 class Issue(BaseModel):

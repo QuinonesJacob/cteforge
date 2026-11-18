@@ -147,3 +147,31 @@ def test_parse_errors(sql):
 )
 def test_compatible_variable_types(type_str, expected):
     assert compatible_variable_types(type_str, D) == expected
+
+
+@pytest.mark.parametrize(
+    ("type_str", "expected"),
+    [
+        # Spellings Redshift's catalogs (SVV_COLUMNS) report, incl. Spectrum external tables.
+        ("timestamp without time zone", {VariableType.DATE, VariableType.DATE_RANGE}),
+        ("timestamp with time zone", {VariableType.DATE, VariableType.DATE_RANGE}),
+        ("TIMESTAMPTZ", {VariableType.DATE, VariableType.DATE_RANGE}),
+        ("date", {VariableType.DATE, VariableType.DATE_RANGE}),
+        ("character varying(256)", {VariableType.TEXT, VariableType.TEXT_LIST}),
+        ("VARCHAR(MAX)", {VariableType.TEXT, VariableType.TEXT_LIST}),
+        ("character(10)", {VariableType.TEXT, VariableType.TEXT_LIST}),
+        ("bpchar", {VariableType.TEXT, VariableType.TEXT_LIST}),
+        ("string", {VariableType.TEXT, VariableType.TEXT_LIST}),
+        ("numeric(18,2)", {VariableType.NUMBER}),
+        ("double precision", {VariableType.NUMBER}),
+        ("int8", {VariableType.NUMBER}),
+        ("boolean", {VariableType.BOOLEAN}),
+        # Not filterable by a typed variable: semi-structured, binary, spatial, sketches.
+        ("super", set()),
+        ("varbyte", set()),
+        ("geometry", set()),
+        ("hllsketch", set()),
+    ],
+)
+def test_compatible_variable_types_redshift(type_str, expected):
+    assert compatible_variable_types(type_str, Dialect.REDSHIFT) == expected

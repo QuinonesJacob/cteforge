@@ -11,8 +11,9 @@ from cteforge.templating.literals import cast_type
 from cteforge.templating.render import render
 from cteforge.templating.template import apply_annotations
 
-PG, SF, BQ, DB, DUCK = (
+PG, RS, SF, BQ, DB, DUCK = (
     Dialect.POSTGRES,
+    Dialect.REDSHIFT,
     Dialect.SNOWFLAKE,
     Dialect.BIGQUERY,
     Dialect.DATABRICKS,
@@ -46,6 +47,14 @@ def _definition(sql: str, dialect: Dialect) -> Definition:
         (BQ, "TIMESTAMP '2026-01-01'", SF, "CAST('2026-01-01' AS TIMESTAMPTZ)"),
         (DUCK, "TIMESTAMPTZ '2026-01-01'", BQ, "CAST('2026-01-01' AS TIMESTAMP)"),
         (SF, "'2026-01-01'::TIMESTAMP_TZ", PG, "CAST('2026-01-01' AS TIMESTAMPTZ)"),
+        # Redshift: TIMESTAMP is naive, TIMESTAMPTZ zone-aware, both ways (ADR 0022)
+        (RS, "TIMESTAMP '2026-01-01'", SF, "CAST('2026-01-01' AS TIMESTAMPNTZ)"),
+        (RS, "TIMESTAMP '2026-01-01'", BQ, "CAST('2026-01-01' AS DATETIME)"),
+        (RS, "'2026-01-01'::TIMESTAMPTZ", BQ, "CAST('2026-01-01' AS TIMESTAMP)"),
+        (RS, "'2026-01-01'::TIMESTAMPTZ", SF, "CAST('2026-01-01' AS TIMESTAMPTZ)"),
+        (BQ, "DATETIME '2026-01-01'", RS, "CAST('2026-01-01' AS TIMESTAMP)"),
+        (BQ, "TIMESTAMP '2026-01-01'", RS, "CAST('2026-01-01' AS TIMESTAMP WITH TIME ZONE)"),
+        (SF, "'2026-01-01'::TIMESTAMP_NTZ", RS, "CAST('2026-01-01' AS TIMESTAMP)"),
     ],
 )
 def test_transpiled_casts_keep_time_zone_semantics(source, literal, target, expected):

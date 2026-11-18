@@ -38,9 +38,9 @@ from cteforge.domain.audit import AuditKind
 from cteforge.domain.errors import NotFoundError, PermissionDeniedError, PolicyError
 from cteforge.domain.issues import has_errors
 from cteforge.domain.models import Definition, DefinitionState, DefinitionVersionInfo
-from cteforge.domain.proposals import Proposal, ProposalKind, ProposalStatus
+from cteforge.domain.proposals import DEFINITION_KINDS, Proposal, ProposalKind, ProposalStatus
 from cteforge.domain.users import ActorKind, User
-from cteforge.services import _apply, _audit
+from cteforge.services import _apply, _audit, _library
 from cteforge.services.auth import require
 from cteforge.services.cards import (
     DefinitionCard,
@@ -51,7 +51,9 @@ from cteforge.services.cards import (
 from cteforge.services.context import AppContext
 from cteforge.trust.approval import Action, can_approve, can_verify
 
-_DEFINITION_KINDS = (ProposalKind.NEW_DEFINITION, ProposalKind.REVISE_DEFINITION)
+# Kinds whose target is a definition (renames included: approving one needs what
+# approving any change to that definition needs; ADR 0024).
+_DEFINITION_KINDS = DEFINITION_KINDS
 
 
 class _Target(BaseModel):
@@ -251,7 +253,7 @@ def verify_definition(ctx: AppContext, user: User, id: str, version: int) -> Def
         current = ctx.store.get_definition(id)
         require(user, Action.VERIFY, current)
         if current is None:
-            raise NotFoundError(f"Definition '{id}' does not exist")
+            raise _library.definition_not_found(ctx, id)
         if current.version != version:
             raise _apply.stale_error("Definition", id, current.version, version)
         history = ctx.store.definition_history(id)

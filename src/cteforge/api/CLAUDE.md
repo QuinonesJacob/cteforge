@@ -12,7 +12,8 @@ Project root: ../../../CLAUDE.md
   security headers (CSP `default-src 'self'`, nosniff, no-referrer, DENY; /api no-store),
   no CORS. No ctx → `AppConfig.from_env()` at creation, context opened/closed by the
   lifespan. `host` defaults to `CTEFORGE_BIND_HOST` (set by `cteforge serve`) else
-  127.0.0.1. Auth off → only a loopback connection (ASGI `client` and `server`, not
+  127.0.0.1. An owned context starts meaning search in the background
+  (`search_index.start_background`: requests never wait for the model). Auth off → only a loopback connection (ASGI `client` and `server`, not
   headers; else 403) with a loopback Host/Origin (421/403) is accepted.
 - `auth.py` — bearer-token dependency → User via services.auth; `CTEFORGE_AUTH=off` only
   when bound to localhost (`check_bind`, raised by create_app); `CURRENT_USER` contextvar
@@ -24,21 +25,28 @@ If something does not clearly fit one of the above, it does not belong here.
 "Not forbidden" is not the same as "allowed."
 
 ## Routes (all under /api/v1, JSON)
-GET /me · GET /profiles (name + dialect only) ·
+GET /me · GET /profiles (name, dialect, `default` = the effective default connection; only these) ·
 GET /definitions?q=&include_drafts=&limit= · GET /definitions/{id}?version=&include_source= (adds `source_sql` + `annotations`, for revising) ·
-GET /definitions/{id}/history · POST /definitions/{id}/verify {version} ·
-POST /parse {sql, dialect, profile?} ·
+GET /definitions/{id}/history · GET /definitions/{id}/references → DefinitionReferences
+(recipes, pending proposals, former_ids, outside_warning; ADR 0024) ·
+GET /definitions/{id}/search-document?version= →
+SearchDocument {id, version, markdown} (ADR 0023) · POST /definitions/{id}/verify {version} ·
+POST /parse {sql, dialect?, profile?} (dialect omitted → the profile's, else the default connection's; ADR 0021) ·
 POST /run {uses? | recipe_id?, values, select?, dialect?, profile?, run, limit, question?} ·
 POST /check {sql, profile?, run, limit, question?} · POST /revalidate {ids?} ·
-POST /proposals/definitions {sql, dialect, metadata, annotations, profile?, summary} ·
+POST /proposals/definitions {sql, dialect?, metadata, annotations, profile?, summary} ·
 POST /proposals/definitions/{id}/revise {base_version, sql?, metadata?, annotations?, summary} ·
+POST /proposals/definitions/{id}/rename {new_id, base_version?, summary} (ADR 0024) ·
 POST /proposals/joins · POST /proposals/recipes ·
 GET /proposals?status= · GET /proposals/count?status= (cheap, not audited; for the nav badge) · GET /proposals/{id} · POST /proposals/{id}/approve {verify, comment} ·
 POST /proposals/{id}/reject {comment} · POST /proposals/{id}/withdraw ·
 GET /recipes?q=&include_drafts= · GET /joins?table=&include_drafts= ·
 GET /tables?name=&name=&profile= · GET /audit?actor=&kind=&definition_id=&limit= ·
 GET /users · POST /users {name, role, kind} (returns token once) · POST /users/{name}/token ·
-PUT /users/{name}/role · GET /settings · PUT /settings {mode}.
+PUT /users/{name}/role · GET /settings → TeamSettings {mode, default_connection,
+effective_default_connection, issues} · PUT /settings {mode?, default_connection?: str | null}
+(admin; only the fields given change, at least one; `default_connection` first — an unknown
+profile → 404 — then `mode`, each its own audited service call).
 POST /users → 201 {user, token}; POST /users/{name}/token → {name, token}; /proposals/count
 → {count}. GET /recipes, /joins and /tables call services/catalog.py.
 Errors: `{"error": {"type": <ErrorClass>, "message": str, "issues": [Issue]}}` with

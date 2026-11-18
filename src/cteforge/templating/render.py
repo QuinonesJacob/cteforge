@@ -19,7 +19,7 @@ from cteforge.domain.variables import (
     to_plain,
     validate_value,
 )
-from cteforge.parsing.analyze import find_grains, parse
+from cteforge.parsing.analyze import find_grains, generate, parse
 from cteforge.templating.literals import Replacement, build_replacements, build_truncation
 
 
@@ -88,8 +88,9 @@ def template_slots(tree: exp.Expression) -> list[tuple[exp.Expression, str]]:
     """Named placeholders in a parsed template, as (node, name).
 
     Each dialect writes named placeholders its own way when the template is stored
-    (`$x` DuckDB, `:x` Snowflake/Databricks, `%(x)s` Postgres, `@x` BigQuery). Most parse
-    back as exp.Placeholder; BigQuery's `@x` parses back as exp.Parameter. ADR 0011.
+    (`$x` DuckDB, `:x` Snowflake/Databricks, `%(x)s` Postgres, `@x` BigQuery,
+    `{x: String}` ClickHouse). Most parse back as exp.Placeholder; BigQuery's `@x` parses
+    back as exp.Parameter. ADR 0011, 0025.
     """
     slots: list[tuple[exp.Expression, str]] = []
     for node in tree.find_all(exp.Placeholder, exp.Parameter):
@@ -209,7 +210,7 @@ def render(
             )
         )
     return RenderResult(
-        sql=tree.sql(dialect=str(target), pretty=True),
+        sql=generate(tree, target),
         dialect=target,
         values=plain,
         issues=issues,

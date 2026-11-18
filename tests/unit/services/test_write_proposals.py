@@ -120,6 +120,28 @@ def test_sql_in_another_dialect_is_checked_transpiled_and_runs_labeled(ctx: AppC
     assert IssueCode.TRANSPILED in {i.code for i in run.issues}
 
 
+def test_omitted_dialect_is_the_connections(ctx: AppContext) -> None:
+    out = propose_definition(ctx, ALICE, sql=SQL, metadata=_meta(), annotations=_annotations())
+    assert IssueCode.DIALECT_MISMATCH not in {i.code for i in out.issues}
+    assert ctx.store.get_definition("realization_rate").source_dialect is Dialect.DUCKDB
+    out = propose_definition(
+        ctx,
+        ALICE,
+        sql=SQL,
+        dialect="postgres",
+        metadata=_meta(id="rr_pg"),
+        annotations=_annotations(),
+    )
+    assert IssueCode.DIALECT_MISMATCH in {i.code for i in out.issues}
+    assert ctx.store.get_definition("rr_pg").source_dialect is Dialect.POSTGRES
+
+
+def test_omitted_dialect_without_a_connection_is_refused() -> None:
+    with _open(None) as c:
+        with pytest.raises(PolicyError, match="ask an admin to set a default connection"):
+            propose_definition(c, ALICE, sql=SQL, metadata=_meta(), annotations=_annotations())
+
+
 def test_strict_mode_keeps_it_pending(ctx: AppContext) -> None:
     _strict(ctx)
     out = _propose(ctx)

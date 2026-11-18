@@ -12,6 +12,11 @@ export function SearchHitCard({ hit }: { hit: SearchHit }) {
         </h2>
         <div className="hit-meta">
           <StateBadge state={hit.state} />
+          {hit.match === "meaning" && (
+            <span className="badge tone-meaning" title="None of your words appear in it: it matched what your search means.">
+              matched by meaning
+            </span>
+          )}
           <span className="muted small mono">
             {hit.id} · v{hit.version}
           </span>

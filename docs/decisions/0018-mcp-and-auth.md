@@ -42,3 +42,21 @@ attributed for permissions and audit.
 - The four-eyes exemption above applies only to admins with `actor_kind=human`. An agent
   with the `admin` role never approves its own proposal (whatever the target's state) and,
   as before, never verifies anything (ADR 0007).
+
+## Addendum (2026-11-17): per-user default SQL dialect — superseded by ADR 0021 (never released)
+- A user's dialect is a property of their account ("what my database is"), not something
+  to pick on every import. `User.default_dialect` (optional) is stored in a separate
+  `user_preferences` table (`metadata.create_all` adds it to existing databases; no
+  migration, no schema-version bump).
+- Any authenticated user — every role, humans and agents — may set or clear **their own**
+  default (`PUT /api/v1/me/preferences`); setting another user's needs `manage_users`
+  (admin; CLI `cteforge user dialect`). Audited as `admin` (`op=set_default_dialect`).
+- When `parse_query` / `propose_definition` get no dialect: explicit → the user's default →
+  the profile's dialect → PolicyError. Behaviour for a dialect that differs from the
+  profile is unchanged (ADR 0013 addendum: `dialect_mismatch`, transpiled checks).
+- `GET /profiles` also says which profile is the default (`default: true`), so the GUI
+  can show the same fallback before parsing.
+
+## Amendment (2026-11-17): roles, tokens, admin agents — see ADR 0027
+Accepted, not built: configurable roles, many named personal access tokens per user with
+per-token tool lists, admin agents managing non-admin users and verifying.

@@ -15,7 +15,8 @@ React 18 + TypeScript (strict) + Vite GUI (ADR 0019). Talks only to the HTTP API
   variable form values ↔ JSON, import variable-building rules (type suggestion, ADR 0015
   description rule), revise helpers (`revise.ts`: card → drafts/metadata, changed keys
   only), composition/recipe run requests (`variableForm.ts`), diff line classification,
-  trust/state badge mapping, display-only SQL tokenizer, formatting helpers, role checks.
+  trust/state badge mapping, display-only SQL tokenizer, formatting helpers, role checks,
+  rename-form rules (`rename.ts`, ADR 0024).
 - `src/state/` — React context providers and hooks (auth, toasts, theme, async loading).
 - `src/pages/` — one file per route: SignIn, Library, Definition (Overview, Run, History,
   Edit), Import (also revise mode: `/import?revise=<id>`), Explore (Recipes, Compose, Join
@@ -56,6 +57,11 @@ If something does not clearly fit one of the above, it does not belong here.
   Nothing else without a reason in this file.
 
 ## Contract notes (from services/cards.py)
+- Search (ADR 0023): `SearchHit.match` is keyword | meaning | both (null for an empty
+  query); `SearchHitCard` shows a "matched by meaning" badge for meaning-only hits; the
+  Library shows a hit's `note` (meaning search unavailable → keyword-only results) once.
+  The Playwright setup runs the server with `CTEFORGE_SEARCH_EMBEDDINGS=off` (tests never
+  download the model).
 - `DefinitionCard.history` may be null; `GET /audit` returns `AuditPage {events, limit, has_more}`;
   approve returns `ProposalOutcome`, reject/withdraw return `ProposalView` (the GUI reloads after
   any decision). `POST /users` / `POST /users/{name}/token` shapes are normalized in
@@ -69,6 +75,26 @@ If something does not clearly fit one of the above, it does not belong here.
   tab sends `POST /proposals/definitions/{id}/revise {base_version, metadata: <changed keys
   only>, summary}`; revise mode in Import sends `{base_version, sql, dialect, metadata
   (changed keys, + profile if changed), annotations, summary}`.
+- IDs (ADR 0024): on Import the ID follows the title and is read-only until "Edit ID"
+  (`MetadataForm`; "Use title" locks it again); revise mode and the Edit tab keep it
+  read-only. Renames: the Edit tab's "Rename ID" (`RenameIdPanel`) loads
+  `GET /definitions/{id}/references` (`DefinitionReferences`: recipes, pending proposals,
+  former_ids, outside_warning; shown by `ReferencesList`), and enables submit only when the
+  new ID is valid, different and typed again exactly (`lib/rename.ts` `checkRename`); it
+  sends `POST /proposals/definitions/{id}/rename {new_id, base_version, summary}`. Applied
+  at once → toast + navigate to the new ID; else "Rename proposal submitted". The Review
+  page shows `rename_definition` proposals as from → to plus `payload.references` (no diff,
+  no "also verify"). `DefinitionCard.former_ids` shows as "formerly …" in the header.
+- Default connection (ADR 0021): Settings (admin only; nav link and page; the admin
+  sections are mounted only for admins, so others never call GET /settings, /users or
+  /profiles there) has a "Default connection" select (`None` + GET /profiles `name
+  (dialect)`) that sends `PUT /settings {default_connection: name | null}` and shows
+  TeamSettings `issues` (e.g. `default_connection_missing`). `PUT /settings {mode}` for
+  the team mode. Import starts on the effective default connection (`default: true` from
+  GET /profiles, `lib/importBuilder.ts` `importConnection`); the dialect follows the
+  selected profile (`defaultImportDialect`) until the person picks one; the hint
+  (`connectionDialectHint`) says "From connection X." or that a different dialect is
+  checked translated, lower trust. Revise mode keeps the card's source_dialect and profile.
 - Explore: `GET /recipes?q=&include_drafts=`, `GET /joins?table=&include_drafts=`,
   `GET /tables?name=&name=&profile=` (array query values repeat the key), `POST /check
   {sql, profile?, run, limit}`, `POST /run {recipe_id, values: {}, run, limit, profile?}`,
@@ -106,9 +132,11 @@ If something does not clearly fit one of the above, it does not belong here.
   env.sh values and `CTEFORGE_AUTH=on`, waits for `GET /api/v1/me` → 401, and creates the
   human approver `ben`; teardown stops the server (SIGINT) and deletes the temp dir
   (`E2E_KEEP_TMP=1` keeps it, with `serve.log`). Specs: sign-in, library search, run form
-  (+ validation), import → auto-apply → run, strict mode + review + four-eyes, audit
+  (+ validation), import → auto-apply → run, admin sets the default connection → Import starts on it, strict mode + review + four-eyes, audit
   filters, theme toggle and 375px layout, Edit-tab and SQL revisions, Explore (compose →
-  save recipe → run recipe, join map, tables, exploratory SQL). Screenshots of each page land in
+  save recipe → run recipe, join map, tables, exploratory SQL), rename ID (references →
+  typed confirmation → applied → old ID's "renamed to" error; recipe still runs; a pending
+  rename on the Review page). Screenshots of each page land in
   `e2e/screenshots/`. One spec: `npx playwright test 04`; debug: `--headed` or
   `npx playwright show-trace test-results/<test>/trace.zip` (kept on failure).
 

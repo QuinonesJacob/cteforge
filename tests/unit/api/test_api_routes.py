@@ -23,7 +23,7 @@ def rr(api):
 
 
 def _strict(api) -> None:
-    assert api.put("/settings", "root", {"mode": "strict"}).json() == {"mode": "strict"}
+    assert api.put("/settings", "root", {"mode": "strict"}).json()["mode"] == "strict"
 
 
 def _pending_revision(api, user: str = "alice", **meta: Any) -> str:
@@ -39,12 +39,12 @@ def _pending_revision(api, user: str = "alice", **meta: Any) -> str:
 # ── identity, profiles ───────────────────────────────────────────────────────────────
 
 
-def test_profiles_name_and_dialect_only(api, check_error) -> None:
+def test_profiles_name_dialect_and_default_only(api, check_error) -> None:
     response = api.get("/profiles", "vic")
     assert response.status_code == 200
     assert response.json() == [
-        {"name": "demo", "dialect": "duckdb"},
-        {"name": "broken", "dialect": "duckdb"},
+        {"name": "demo", "dialect": "duckdb", "default": True},
+        {"name": "broken", "dialect": "duckdb", "default": False},
     ]
     check_error(api.client.get("/api/v1/profiles"), 401, "Unauthorized")
 
@@ -79,6 +79,45 @@ def test_get_definition_and_history(rr, check_error) -> None:
         "NotFoundError",
     )
     check_error(rr.get("/definitions/nope/history", "vic"), 404, "NotFoundError")
+
+
+def test_search_document(rr, check_error) -> None:
+    doc = rr.get("/definitions/realization_rate/search-document", "vic")
+    assert doc.status_code == 200
+    body = doc.json()
+    assert (body["id"], body["version"]) == ("realization_rate", 1)
+    assert body["markdown"].startswith("# Realization Rate") and "## Tables" in body["markdown"]
+    same = rr.get("/definitions/realization_rate/search-document", "vic", params={"version": 1})
+    assert same.json() == body
+    check_error(rr.get("/definitions/nope/search-document", "vic"), 404, "NotFoundError")
+    hits = rr.get("/definitions", "vic", params={"q": "realization"}).json()
+    assert hits[0]["match"] == "keyword" and hits[0]["note"] is None
+
+
+def test_references_and_rename(rr, check_error) -> None:
+    # ADR 0024: what uses the id, then a rename proposal (auto-applied in open mode).
+    refs = rr.get("/definitions/realization_rate/references", "vic")
+    assert refs.status_code == 200
+    body = refs.json()
+    assert (body["id"], body["recipes"], body["proposals"]) == ("realization_rate", [], [])
+    assert body["outside_warning"]
+    check_error(rr.get("/definitions/nope/references", "vic"), 404, "NotFoundError")
+    path = "/proposals/definitions/realization_rate/rename"
+    check_error(rr.post(path, "vic", {"new_id": "rr_monthly"}), 403, "PermissionDeniedError")
+    check_error(rr.post(path, "alice", {"new_id": "Bad Id"}), 422, "CodecError")
+    check_error(
+        rr.post(path, "alice", {"new_id": "x", "base_version": 9}), 409, "StaleVersionError"
+    )
+    renamed = rr.post(path, "alice", {"new_id": "rr_monthly", "summary": "clearer"})
+    assert renamed.status_code == 200, renamed.text
+    outcome = renamed.json()
+    assert outcome["auto_applied"] is True and outcome["definition"]["id"] == "rr_monthly"
+    assert outcome["proposal"]["kind"] == "rename_definition"
+    assert outcome["proposal"]["payload"]["from_id"] == "realization_rate"
+    error = check_error(rr.get("/definitions/realization_rate", "vic"), 404, "NotFoundError")
+    assert "was renamed to 'rr_monthly'" in error["message"]
+    card = rr.get("/definitions/rr_monthly", "vic").json()
+    assert card["former_ids"] == ["realization_rate"]
 
 
 def test_verify_definition(rr, check_error) -> None:
@@ -125,6 +164,14 @@ def test_parse(api, check_error) -> None:
         404,
         "NotFoundError",
     )
+
+
+def test_parse_without_dialect_uses_the_connections(api) -> None:
+    response = api.post("/parse", "vic", {"sql": SQL})
+    assert response.status_code == 200 and response.json()["dialect"] == "duckdb"
+    explicit = api.post("/parse", "vic", {"sql": SQL, "dialect": "postgres"}).json()
+    assert explicit["dialect"] == "postgres"
+    assert "dialect_mismatch" in [i["code"] for i in explicit["issues"]]
 
 
 # ── run / check / revalidate ─────────────────────────────────────────────────────────
@@ -388,11 +435,39 @@ def test_set_role(api, check_error) -> None:
 
 
 def test_settings(api, check_error) -> None:
-    assert api.get("/settings", "root").json() == {"mode": "open"}
-    assert api.put("/settings", "root", {"mode": "strict"}).json() == {"mode": "strict"}
-    assert api.get("/settings", "root").json() == {"mode": "strict"}
+    unset = {
+        "mode": "open",
+        "default_connection": None,
+        "effective_default_connection": "demo",  # CTEFORGE_DEFAULT_PROFILE
+        "issues": [],
+    }
+    assert api.get("/settings", "root").json() == unset
+    strict = unset | {"mode": "strict"}
+    assert api.put("/settings", "root", {"mode": "strict"}).json() == strict
+    assert api.get("/settings", "root").json() == strict
     check_error(api.get("/settings", "ann"), 403, "PermissionDeniedError")
     check_error(api.put("/settings", "root", {"mode": "chaos"}), 422, "RequestValidationError")
+    check_error(api.put("/settings", "root", {}), 422, "RequestValidationError")
+    check_error(api.put("/settings", "root", {"mode": None}), 422, "RequestValidationError")
+
+
+def test_settings_default_connection(api, check_error) -> None:
+    """Admin sets the default connection; /profiles and parse follow it (ADR 0021)."""
+    saved = api.put("/settings", "root", {"default_connection": "broken"}).json()
+    assert saved["default_connection"] == saved["effective_default_connection"] == "broken"
+    assert saved["mode"] == "open"  # untouched
+    defaults = {p["name"]: p["default"] for p in api.get("/profiles", "vic").json()}
+    assert defaults == {"demo": False, "broken": True}
+    both = api.put("/settings", "root", {"mode": "strict", "default_connection": "demo"}).json()
+    assert (both["mode"], both["default_connection"]) == ("strict", "demo")
+    check_error(api.put("/settings", "root", {"default_connection": "nope"}), 404, "NotFoundError")
+    assert api.get("/settings", "root").json()["default_connection"] == "demo"
+    check_error(
+        api.put("/settings", "ann", {"default_connection": "broken"}), 403, "PermissionDeniedError"
+    )
+    cleared = api.put("/settings", "root", {"default_connection": None}).json()
+    assert cleared["default_connection"] is None
+    assert cleared["effective_default_connection"] == "demo"
 
 
 def test_unknown_api_path_is_json_404(api, check_error) -> None:

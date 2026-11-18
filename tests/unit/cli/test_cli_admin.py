@@ -100,5 +100,28 @@ def test_settings_show_and_mode(cli: Invoke):
     changed = cli("settings", "mode", "strict")
     assert changed.exit_code == 0 and "mode: strict" in changed.output
     as_json = cli("settings", "show", "--json")
-    assert json.loads(as_json.stdout) == {"mode": "strict"}
+    assert json.loads(as_json.stdout) == {
+        "mode": "strict",
+        "default_connection": None,
+        "effective_default_connection": None,  # no profiles configured
+        "issues": [],
+    }
     assert cli("settings", "mode", "lenient").exit_code == 2
+
+
+def test_settings_connection_set_show_and_clear(fresh_demo: Invoke):
+    cli = fresh_demo
+    shown = cli("settings", "connection")
+    assert shown.exit_code == 0, shown.output
+    assert "default connection: (not set)" in shown.output
+    assert "effective default connection: demo" in shown.output  # CTEFORGE_DEFAULT_PROFILE
+    set_ = cli("settings", "connection", "demo")
+    assert set_.exit_code == 0 and "default connection: demo" in set_.output
+    as_json = json.loads(cli("settings", "show", "--json").stdout)
+    assert as_json["default_connection"] == "demo"
+    missing = cli("settings", "connection", "nope")
+    assert missing.exit_code == 1 and "'nope' is not configured" in missing.output
+    assert cli("settings", "connection", "demo", "--clear").exit_code == 2
+    cleared = cli("settings", "connection", "--clear")
+    assert cleared.exit_code == 0 and "default connection: (not set)" in cleared.output
+    assert cli("settings", "connection", "demo", user="vic").exit_code == 1  # unknown user

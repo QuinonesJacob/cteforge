@@ -29,6 +29,11 @@ from cteforge.domain.variables import (
     number_from_text,
     write_date,
 )
+from cteforge.parsing.analyze import (
+    CLICKHOUSE_INTERVAL_FUNC,
+    CLICKHOUSE_NAME_KEY,
+    CLICKHOUSE_WEEK_FUNC,
+)
 
 Replacement = exp.Expression | list[exp.Expression]
 
@@ -37,6 +42,24 @@ _NUMBER_TEXT = re.compile(r"^\d+(\.\d*)?([eE][+-]?\d+)?$")
 # every target writes a naive type (Snowflake TIMESTAMP_NTZ, BigQuery DATETIME, Databricks
 # TIMESTAMP_NTZ) instead of a generic TIMESTAMP that some targets read as zone-aware.
 _NAIVE_TIMESTAMPS = {exp.DataType.Type.TIMESTAMP, exp.DataType.Type.DATETIME}
+# ClickHouse DateTime / DateTime64 carry a precision and an optional time zone as type
+# parameters, which other dialects cannot read (sqlglot would write `DATETIME64(3, 'UTC')`
+# for DuckDB). Transpiled: with a time zone → zone-aware TIMESTAMPTZ, without → naive.
+_CLICKHOUSE_DATETIMES = {exp.DataType.Type.DATETIME, exp.DataType.Type.DATETIME64}
+
+
+def _clickhouse_portable(dtype: exp.DataType) -> exp.DataType:
+    if dtype.this is exp.DataType.Type.LOWCARDINALITY and dtype.expressions:
+        inner = dtype.expressions[0]
+        dtype = inner if isinstance(inner, exp.DataType) else dtype
+    if dtype.this not in _CLICKHOUSE_DATETIMES:
+        return dtype
+    zoned = any(
+        isinstance(p, exp.DataTypeParam) and isinstance(p.this, exp.Literal) and p.this.is_string
+        for p in dtype.expressions
+    )
+    kind = exp.DataType.Type.TIMESTAMPTZ if zoned else exp.DataType.Type.TIMESTAMPNTZ
+    return exp.DataType(this=kind)
 
 
 def _number(value: Decimal, original_text: str | None) -> exp.Expression:
@@ -68,6 +91,8 @@ def cast_type(
             dtype = exp.DataType.build(candidate, dialect=str(source))
         except (ParseError, ValueError):
             continue
+        if target is not None and target is not source and source is Dialect.CLICKHOUSE:
+            return _clickhouse_portable(dtype)
         if target is not None and target is not source and dtype.this in _NAIVE_TIMESTAMPS:
             dtype = dtype.copy()
             dtype.set("this", exp.DataType.Type.TIMESTAMPNTZ)
@@ -109,6 +134,40 @@ def _unit_node(grain: Grain, source: Dialect) -> exp.Expression:
     return exp.Var(this=grain.value.upper())
 
 
+# ClickHouse's own function per grain; week is toMonday (Monday, the native week shared
+# with date_trunc('week') and toStartOfInterval WEEK; DESIGN §13).
+_CLICKHOUSE_TRUNC_FUNCS = {
+    Grain.DAY: "toStartOfDay",
+    Grain.WEEK: "toMonday",
+    Grain.MONTH: "toStartOfMonth",
+    Grain.QUARTER: "toStartOfQuarter",
+    Grain.YEAR: "toStartOfYear",
+}
+
+
+def _clickhouse_truncation(node: exp.Expression, grain: Grain) -> exp.Expression | None:
+    """A ClickHouse truncation rebuilt in the SQL's own family, as ClickHouse's parser
+    builds it: toStartOfInterval stays toStartOfInterval (same result type as its input);
+    toStartOf<Unit> / toMonday / toStartOfWeek become the grain's toStartOf<Unit> /
+    toMonday (a TimestampTrunc named in meta, written by name by `generate`). None for
+    date_trunc / dateTrunc, which the generic rebuild handles."""
+    if isinstance(node, exp.Anonymous) and node.name == CLICKHOUSE_INTERVAL_FUNC:
+        value, interval, *rest = node.expressions
+        assert isinstance(interval, exp.Interval)
+        rebuilt = exp.Interval(this=interval.this, unit=exp.Var(this=grain.value.upper()))
+        return exp.Anonymous(this=CLICKHOUSE_INTERVAL_FUNC, expressions=[value, rebuilt, *rest])
+    if isinstance(node, exp.Anonymous) and node.name == CLICKHOUSE_WEEK_FUNC:
+        args = node.expressions
+        this, zone = args[0], (args[2] if len(args) > 2 else None)
+    elif isinstance(node, exp.TimestampTrunc) and node.meta.get(CLICKHOUSE_NAME_KEY):
+        this, zone = node.this, node.args.get("zone")
+    else:
+        return None
+    rebuilt = exp.TimestampTrunc(this=this, unit=exp.Var(this=grain.value.upper()), zone=zone)
+    rebuilt.meta[CLICKHOUSE_NAME_KEY] = _CLICKHOUSE_TRUNC_FUNCS[grain]
+    return rebuilt
+
+
 def build_truncation(
     node: exp.Expression, grain: Grain, source: Dialect, target: Dialect | None = None
 ) -> exp.Expression:
@@ -124,8 +183,15 @@ def build_truncation(
                 "Databricks TRUNC(date, fmt) has no 'day' format; write DATE_TRUNC in the "
                 "trusted SQL to allow grain 'day'"
             )
+    if source is Dialect.CLICKHOUSE:
+        rebuilt = _clickhouse_truncation(node, grain)
+        if rebuilt is not None:
+            return rebuilt
     args = {k: v for k, v in node.args.items() if k != "unit"}
-    return type(node)(**args, unit=_unit_node(grain, source))
+    rebuilt = type(node)(**args, unit=_unit_node(grain, source))
+    if CLICKHOUSE_NAME_KEY in node.meta:  # date_trunc stays date_trunc (parsing.generate)
+        rebuilt.meta[CLICKHOUSE_NAME_KEY] = node.meta[CLICKHOUSE_NAME_KEY]
+    return rebuilt
 
 
 def build_replacements(

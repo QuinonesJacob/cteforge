@@ -38,7 +38,8 @@ export function versionAuthors(history: Pick<DefinitionVersionInfo, "version" | 
   return authors;
 }
 
-const DEFINITION_KINDS: ProposalKind[] = ["new_definition", "revise_definition"];
+/** Kinds whose target is a definition (services/review.py; a rename too, ADR 0024). */
+export const DEFINITION_KINDS: ProposalKind[] = ["new_definition", "revise_definition", "rename_definition"];
 
 /** The target definition as the GUI knows it (null when it does not exist or is unknown). */
 export interface DecideTarget {

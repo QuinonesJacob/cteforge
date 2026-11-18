@@ -6,7 +6,10 @@ Pure. Project root: ../../../CLAUDE.md
 ## What belongs here (authoritative)
 - `template.py` — apply_annotations(sql, dialect, analysis, annotations) → AnnotatedTemplate
   (template, variables, issues): replace annotated literals with named placeholders written
-  in the source dialect's syntax (e.g. `$x` in DuckDB, ADR 0011) and report Issues. Grain
+  in the source dialect's syntax (e.g. `$x` in DuckDB, `{x: String}` in ClickHouse — typed,
+  since an untyped one does not parse back; ADR 0011, 0025) and report Issues. Trusted
+  ClickHouse SQL with its own query parameters is refused (`reject_query_parameters`).
+  All SQL text is written with `parsing.analyze.generate`. Grain
   variables name truncation nodes instead (no placeholder; see Grain below).
 - `literals.py` — the ONLY place values become SQL: typed literal nodes + casts per slot,
   and `build_truncation` (a grain value → a rebuilt truncation node).
@@ -60,7 +63,11 @@ If something does not clearly fit one of the above, it does not belong here.
   (falling back to the variable's `column_type`), so naive/zone-aware semantics carry over.
   When transpiling, sqlglot's zone-naive TIMESTAMP/DATETIME is spelled TIMESTAMPNTZ, so
   Snowflake gets TIMESTAMP_NTZ, BigQuery DATETIME and Databricks TIMESTAMP_NTZ (generic
-  TIMESTAMP means LTZ in Databricks). Only variable slots are adjusted; the analyst's other
+  TIMESTAMP means LTZ in Databricks); Redshift TIMESTAMP is naive and TIMESTAMPTZ is
+  written `TIMESTAMP WITH TIME ZONE`. From ClickHouse, DateTime / DateTime64 with a time zone
+  transpile as TIMESTAMPTZ and without one as a naive timestamp (their parameters are
+  ClickHouse-only). Text values are escaped by sqlglot's generator for the target
+  (Redshift and ClickHouse double backslashes, since they read `\'` as an escape). Only variable slots are adjusted; the analyst's other
   casts transpile as sqlglot does.
 - **Grain** (M1.5, ADR 0011). An annotation of type grain lists grain IDs
   (`<scope>.G<n>`), one place each. Every unit must be one of day/week/month/quarter/year
@@ -73,7 +80,11 @@ If something does not clearly fit one of the above, it does not belong here.
   the original unit it keeps the node as is, so same-query-back is exact. For another unit,
   `literals.build_truncation` rebuilds the node: same class, same arguments (moved, so
   nested truncations stay addressable), new unit built as the source parser builds it
-  (`Var`, DateTrunc normalizes it to a string; BigQuery week = `WeekStart(SUNDAY)`). Week =
+  (`Var`, DateTrunc normalizes it to a string; BigQuery week = `WeekStart(SUNDAY)`).
+  ClickHouse rebuilds in the SQL's own family (`literals._clickhouse_truncation`):
+  toStartOf* / toMonday / toStartOfWeek → the grain's toStartOfDay / toMonday /
+  toStartOfMonth / toStartOfQuarter / toStartOfYear (a TimestampTrunc named in meta, time
+  zone kept), toStartOfInterval → toStartOfInterval with the new unit, date_trunc generic. Week =
   the dialect's native week (DESIGN §13). Databricks `TRUNC(date, fmt)` has no day format, so
   grain `day` raises RenderError there. A changeable grain whose truncations carry
   `or_branch` / `case_condition` / `negated` / `outer_join_on` needs a description. There is
@@ -94,8 +105,12 @@ If something does not clearly fit one of the above, it does not belong here.
   has no ROUND(double precision, integer), so the query fails.
 - BigQuery: DuckDB `DATE_TRUNC('MONTH', ts)` on a naive timestamp becomes
   `TIMESTAMP_TRUNC(ts, MONTH)`; the column is DATETIME in BigQuery (needs DATETIME_TRUNC).
-- BigQuery / Postgres: DuckDB `strptime(...)` (naive) becomes `PARSE_TIMESTAMP` /
+- BigQuery / Postgres / Redshift: DuckDB `strptime(...)` (naive) becomes `PARSE_TIMESTAMP` /
   `TO_TIMESTAMP`, which return zone-aware values compared with naive columns.
+- ClickHouse (from DuckDB): `strptime(...)` becomes `STR_TO_TIME(...)`, not a ClickHouse
+  function; naive casts become `Nullable(DateTime)` (sqlglot's ClickHouse casts are Nullable).
+- Redshift renders like Postgres (`tests/golden/*.redshift.sql` equal the Postgres ones);
+  Redshift's ROUND accepts FLOAT8, so the Postgres ROUND defect does not apply there.
 - Snowflake `TRUNC(ts, 'MONTH')` (DateTrunc) is written back as `DATE_TRUNC('MONTH', ts)`, which
   parses as TimestampTrunc, so same-query-back reports a difference for that spelling. This
   happens with or without a grain variable; `DATE_TRUNC` round-trips.

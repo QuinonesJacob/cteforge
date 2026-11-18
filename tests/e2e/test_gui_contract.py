@@ -25,6 +25,7 @@ from cteforge.services.context import AppConfig, open_context
 
 # ── Field sets from web/src/api/types.ts (required + optional fields the API always sends) ──
 USER = {"name", "role", "kind", "created_at"}
+TEAM_SETTINGS = {"mode", "default_connection", "effective_default_connection", "issues"}
 ISSUE = {"code", "severity", "message", "variable", "literal"}
 VARIABLE_CARD = {
     "name",
@@ -41,7 +42,19 @@ VARIABLE_CARD = {
     "original_value",
     "places",
 }
-SEARCH_HIT = {"id", "version", "title", "meaning", "state", "score", "keywords", "variables"}
+SEARCH_HIT = {
+    "id",
+    "version",
+    "title",
+    "meaning",
+    "state",
+    "score",
+    "match",
+    "note",
+    "keywords",
+    "variables",
+}
+SEARCH_MATCHES = {"keyword", "meaning", "both"}
 VERSION_INFO = {
     "id",
     "version",
@@ -75,6 +88,19 @@ DEFINITION_CARD = {
     "template",
     "history",
 }
+# Renames (ADR 0024): GET /definitions/{id}/references, DefinitionCard.former_ids.
+REFERENCES = {"id", "version", "state", "recipes", "proposals", "former_ids", "outside_warning"}
+RECIPE_REF = {"recipe_id", "recipe_version", "title", "state", "alias", "pinned_version"}
+PROPOSAL_REF = {
+    "proposal_id",
+    "kind",
+    "target_id",
+    "summary",
+    "author",
+    "created_at",
+    "relation",
+}
+FORMER_ID = {"former_id", "definition_id", "renamed_to", "renamed_by", "renamed_at"}
 # Only with ?include_source=true (the revise flow): DefinitionCard.source_sql / annotations.
 SOURCE = {"source_sql", "annotations"}
 ANNOTATION = {"name", "type", "role", "literals", "column", "description", "allowed", "format"}
@@ -311,8 +337,10 @@ def test_identity_profiles_and_sign_in(gui: Gui) -> None:
     fields(error["error"], {"type", "message", "issues"}, "ApiError body")
     me = fields(gui.call("GET", "/me", "alice"), USER, "User")
     assert (me["name"], me["role"], me["kind"]) == ("alice", "contributor", "human")
-    profiles = each(gui.call("GET", "/profiles", "alice"), {"name", "dialect"}, "Profile")
-    assert profiles == [{"name": "demo", "dialect": "duckdb"}]
+    profiles = each(
+        gui.call("GET", "/profiles", "alice"), {"name", "dialect", "default"}, "Profile"
+    )
+    assert profiles == [{"name": "demo", "dialect": "duckdb", "default": True}]
 
 
 def test_import_library_definition_and_run(gui: Gui, example) -> None:
@@ -362,9 +390,11 @@ def test_import_library_definition_and_run(gui: Gui, example) -> None:
         "SearchHit",
     )
     assert [h["id"] for h in hits] == ["realization_rate"] and hits[0]["state"] in STATES
+    assert hits[0]["match"] in SEARCH_MATCHES and hits[0]["note"] is None
     each(hits[0]["variables"], VARIABLE_CARD, "VariableCard")
-    # An empty search (the Library's initial view) lists the library too.
-    assert gui.call("GET", "/definitions", "alice", query={"q": "", "limit": 100})
+    # An empty search (the Library's initial view) lists the library too; match is null.
+    listed = gui.call("GET", "/definitions", "alice", query={"q": "", "limit": 100})
+    assert listed and all(h["match"] is None for h in listed)
 
     # Definition page: card (+ ?version=), history.
     card = fields(
@@ -484,6 +514,84 @@ def test_revise_from_the_definition_page(gui: Gui, example) -> None:
         status=409,
     )
     assert stale["error"]["issues"][0]["code"] == "stale_base_version"
+
+
+def test_rename_from_the_definition_page(gui: Gui, example) -> None:
+    sql, ann = example("realization_rate")
+    gui.call(
+        "POST", "/proposals/definitions", "alice", body=gui_proposal(sql, ann, "alice", "demo")
+    )
+    recipe = {
+        "id": "rr_apac",
+        "title": "RR APAC",
+        "description": "",
+        "uses": {"rr": {"id": "realization_rate"}},
+        "values": {"rr": Q3_APAC},
+        "dialect": "duckdb",
+    }
+    gui.call("POST", "/proposals/recipes", "alice", body={"recipe": recipe, "summary": "r"})
+    gui.call("PUT", "/settings", "root", body={"mode": "strict"})
+    pending = gui.call(
+        "POST",
+        "/proposals/definitions/realization_rate/revise",
+        "alice",
+        body={"base_version": 1, "metadata": {"grain": "g"}, "summary": "grain"},
+    )
+
+    # RenameIdPanel: GET /definitions/{id}/references (ReferencesList) …
+    refs = fields(
+        gui.call("GET", "/definitions/realization_rate/references", "alice"),
+        REFERENCES,
+        "DefinitionReferences",
+    )
+    (used,) = each(refs["recipes"], RECIPE_REF, "RecipeReference")
+    assert (used["recipe_id"], used["alias"], used["pinned_version"]) == ("rr_apac", "rr", None)
+    (proposal,) = each(refs["proposals"], PROPOSAL_REF, "ProposalReference")
+    assert proposal["proposal_id"] == pending["proposal"]["id"]
+    assert proposal["relation"] == "target" and refs["outside_warning"]
+    # … then POST /proposals/definitions/{id}/rename {new_id, base_version, summary}.
+    outcome = fields(
+        gui.call(
+            "POST",
+            "/proposals/definitions/realization_rate/rename",
+            "alice",
+            body={"new_id": "rr_monthly", "base_version": 1, "summary": ""},
+        ),
+        PROPOSAL_OUTCOME,
+        "ProposalOutcome",
+    )
+    assert outcome["auto_applied"] is False and outcome["proposal"]["status"] == "pending"
+    # Review page (ProposalPage): kind rename_definition, payload from/to + references.
+    view = fields(
+        gui.call("GET", f"/proposals/{outcome['proposal']['id']}", "ann"),
+        PROPOSAL_VIEW,
+        "ProposalView",
+    )
+    assert view["kind"] == "rename_definition" and view["diff"] == ""
+    assert (view["payload"]["from_id"], view["payload"]["to_id"]) == (
+        "realization_rate",
+        "rr_monthly",
+    )
+    fields(view["payload"]["references"], REFERENCES, "DefinitionReferences (payload)")
+    approved = gui.call(
+        "POST",
+        f"/proposals/{view['id']}/approve",
+        "ann",
+        body={"verify": False, "comment": ""},
+    )
+    assert approved["definition"]["id"] == "rr_monthly"
+    # DefinitionPage: the old id is a 404 naming the new one; the card lists former ids.
+    gone = gui.call("GET", "/definitions/realization_rate", "alice", status=404)
+    assert "was renamed to 'rr_monthly'" in gone["error"]["message"]
+    card = fields(
+        gui.call("GET", "/definitions/rr_monthly", "alice"),
+        DEFINITION_CARD | {"former_ids"},
+        "DefinitionCard",
+    )
+    assert card["former_ids"] == ["realization_rate"]
+    after = gui.call("GET", "/definitions/rr_monthly/references", "alice")
+    each(after["former_ids"], FORMER_ID, "FormerId")
+    assert after["proposals"][0]["target_id"] == "rr_monthly"
 
 
 def test_explore_recipes_compose_joins_tables_and_check(gui: Gui, example) -> None:
@@ -607,9 +715,11 @@ def test_explore_recipes_compose_joins_tables_and_check(gui: Gui, example) -> No
 def test_review_queue_four_eyes_verify_and_audit(gui: Gui, example) -> None:
     sql, ann = example("realization_rate")
     # Settings page: strict mode, so proposals wait for review.
-    settings = gui.call("PUT", "/settings", "root", body={"mode": "strict"})
-    assert settings == {"mode": "strict"}
-    assert gui.call("GET", "/settings", "root") == {"mode": "strict"}
+    settings = fields(
+        gui.call("PUT", "/settings", "root", body={"mode": "strict"}), TEAM_SETTINGS, "Settings"
+    )
+    assert settings["mode"] == "strict"
+    assert gui.call("GET", "/settings", "root")["mode"] == "strict"
 
     created = gui.call(
         "POST", "/proposals/definitions", "alice", body=gui_proposal(sql, ann, "alice", "demo")
@@ -741,3 +851,20 @@ def test_settings_users_and_tokens(gui: Gui) -> None:
     # Non-admins get a structured 403 the Settings page can show.
     error = gui.call("GET", "/users", "ann", status=403)["error"]
     assert error["type"] == "PermissionDeniedError"
+
+    # Settings page, "Default connection" select: PUT /settings {default_connection}.
+    shown = fields(gui.call("GET", "/settings", "root"), TEAM_SETTINGS, "Settings")
+    assert (shown["default_connection"], shown["effective_default_connection"]) == (None, "demo")
+    saved = gui.call("PUT", "/settings", "root", body={"default_connection": "demo"})
+    assert saved["default_connection"] == "demo" and saved["issues"] == []
+    assert saved["mode"] == shown["mode"]  # only the field given changes
+    gui.call("PUT", "/settings", "root", body={"default_connection": "nope"}, status=404)
+    gui.call("PUT", "/settings", "ann", body={"default_connection": None}, status=403)
+    # Import page: GET /profiles marks it `default`; a parse without a dialect uses its.
+    assert gui.call("GET", "/profiles", "ann") == [
+        {"name": "demo", "dialect": "duckdb", "default": True}
+    ]
+    sql = "SELECT 1 AS x FROM deals WHERE status = 'won'"
+    assert gui.call("POST", "/parse", "ann", body={"sql": sql})["dialect"] == "duckdb"
+    cleared = gui.call("PUT", "/settings", "root", body={"default_connection": None})
+    assert cleared["default_connection"] is None

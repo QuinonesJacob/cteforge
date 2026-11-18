@@ -249,3 +249,59 @@ def test_template_roundtrips_in_every_source_dialect(dialect):
         d, {"regions": ["APAC"], "period": {"start": "2026-07-01", "end": "2026-10-01"}}
     )
     assert "'APAC'" in rendered.sql and "'2026-07-01'" in rendered.sql
+
+
+def test_redshift_native_literals_render_and_round_trip():
+    """Redshift (ADR 0022): typed TIMESTAMPTZ / DATE casts, booleans, exact numbers, and text
+    whose quote and backslash Redshift would otherwise read as an escape."""
+    rs = Dialect.REDSHIFT
+    sql = (
+        "SELECT * FROM t WHERE ts >= '2026-01-01'::TIMESTAMPTZ "
+        "AND d < DATE '2026-04-01' AND active = TRUE AND amount > 1000.50 AND name = 'x'"
+    )
+    schema = {
+        "t": {
+            "ts": "timestamp with time zone",
+            "d": "date",
+            "active": "boolean",
+            "amount": "numeric(12,2)",
+            "name": "character varying(64)",
+        }
+    }
+    annotations = [
+        Annotation(name="since", type=VariableType.DATE, literals=["main.L1"]),
+        Annotation(name="until", type=VariableType.DATE, literals=["main.L2"]),
+        Annotation(name="active", type=VariableType.BOOLEAN, literals=["main.L3"]),
+        Annotation(name="min_amount", type=VariableType.NUMBER, literals=["main.L4"]),
+        Annotation(name="who", type=VariableType.TEXT, literals=["main.L5"]),
+    ]
+    annotated = apply_annotations(sql, rs, analyze(sql, rs, schema), annotations)
+    assert [i for i in annotated.issues if i.severity is Severity.ERROR] == []
+    from cteforge.domain.models import Definition
+
+    d = Definition(
+        id="x",
+        title="x",
+        source_dialect=rs,
+        template=annotated.template,
+        variables=annotated.variables,
+    )
+    assert roundtrip_check(sql, d).identical
+    assert "1000.50" in render(d, {}).sql  # unchanged number keeps its exact text
+    values = {
+        "since": "2026-02-01",
+        "until": "2026-03-01",
+        "active": False,
+        "min_amount": -5,
+        "who": "o\\'; DROP TABLE t; --",
+    }
+    out = render(d, values)
+    assert not out.transpiled
+    assert "ts >= CAST('2026-02-01' AS TIMESTAMP WITH TIME ZONE)" in out.sql
+    assert "d < CAST('2026-03-01' AS DATE)" in out.sql
+    assert "active = FALSE" in out.sql
+    assert "amount > -5" in out.sql
+    # Backslash doubled and quote escaped: the value stays one string literal.
+    assert "name = 'o\\\\\\'; DROP TABLE t; --'" in out.sql
+    reparsed = analyze(out.sql, rs)
+    assert [lit.value for lit in reparsed.literals][-1] == "o\\'; DROP TABLE t; --"

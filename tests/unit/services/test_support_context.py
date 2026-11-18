@@ -13,6 +13,8 @@ from cteforge.domain.dialects import Dialect
 from cteforge.domain.errors import CodecError, NotFoundError, PolicyError
 from cteforge.domain.models import TeamMode
 from cteforge.domain.users import ActorKind
+from cteforge.embedding.base import ModelStatus
+from cteforge.embedding.fastembed_model import FastEmbedEmbedder
 from cteforge.services.context import (
     MODE_SETTING,
     AppConfig,
@@ -22,6 +24,7 @@ from cteforge.services.context import (
     set_team_mode,
     team_mode,
 )
+from cteforge.services.context import default_embedder as REAL_DEFAULT_EMBEDDER
 
 FIXED = dt.datetime(2026, 11, 16, 12, 0, tzinfo=dt.UTC)
 
@@ -62,6 +65,26 @@ def test_from_env_reads_process_environment(monkeypatch: pytest.MonkeyPatch) -> 
     monkeypatch.setenv("CTEFORGE_AUTH", "off")
     config = AppConfig.from_env()
     assert config.user == "from-env" and config.auth is AuthMode.OFF
+
+
+def test_meaning_search_settings(tmp_path: Path) -> None:
+    default = AppConfig.from_env({})
+    assert default.search_embeddings is True and default.embed_cache is None
+    assert default.embed_cache_dir == Path("~/.cache/cteforge/models").expanduser()
+    config = AppConfig.from_env(
+        {"CTEFORGE_SEARCH_EMBEDDINGS": "OFF", "CTEFORGE_EMBED_CACHE": str(tmp_path / "m")}
+    )
+    assert config.search_embeddings is False and config.embed_cache_dir == tmp_path / "m"
+    with pytest.raises(PolicyError, match="CTEFORGE_SEARCH_EMBEDDINGS"):
+        AppConfig.from_env({"CTEFORGE_SEARCH_EMBEDDINGS": "maybe"})
+
+
+def test_default_embedder_is_lazy_and_follows_config(tmp_path: Path) -> None:
+    # Imported at collection, before the conftest guard swaps it for `lambda config: None`.
+    assert REAL_DEFAULT_EMBEDDER(AppConfig(search_embeddings=False)) is None
+    embedder = REAL_DEFAULT_EMBEDDER(AppConfig(embed_cache=tmp_path / "m"))
+    assert isinstance(embedder, FastEmbedEmbedder) and embedder.cache_dir == tmp_path / "m"
+    assert embedder.status() is ModelStatus.NOT_LOADED and not (tmp_path / "m").exists()
 
 
 def test_invalid_auth_value_is_refused() -> None:

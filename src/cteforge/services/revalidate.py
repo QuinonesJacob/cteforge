@@ -130,10 +130,7 @@ def revalidate(ctx: AppContext, user: User, ids: list[str] | None = None) -> lis
         else:
             definitions = []
             for id in dict.fromkeys(ids):
-                found = ctx.store.get_definition(id)
-                if found is None:
-                    raise NotFoundError(f"Definition '{id}' does not exist")
-                definitions.append(found)
+                definitions.append(_library.get_definition(ctx, id))
     report = [_check(ctx, d) for d in definitions]
     _audit.record(
         ctx,

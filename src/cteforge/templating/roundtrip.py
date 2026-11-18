@@ -13,7 +13,7 @@ import difflib
 from pydantic import BaseModel, ConfigDict
 
 from cteforge.domain.models import Definition
-from cteforge.parsing.analyze import parse
+from cteforge.parsing.analyze import generate, parse
 from cteforge.templating.render import render_tree
 
 
@@ -25,15 +25,15 @@ class RoundTripReport(BaseModel):
 
 
 def roundtrip_check(original_sql: str, definition: Definition) -> RoundTripReport:
-    dialect = str(definition.source_dialect)
+    dialect = definition.source_dialect
     original = parse(original_sql, definition.source_dialect)
     rendered, _, _ = render_tree(definition, {})  # target = source: no transpile
     if rendered == original:
         return RoundTripReport(identical=True)
     diff = "\n".join(
         difflib.unified_diff(
-            original.sql(dialect=dialect, pretty=True).splitlines(),
-            rendered.sql(dialect=dialect, pretty=True).splitlines(),
+            generate(original, dialect).splitlines(),
+            generate(rendered, dialect).splitlines(),
             fromfile="original",
             tofile="rendered_with_original_values",
             lineterm="",

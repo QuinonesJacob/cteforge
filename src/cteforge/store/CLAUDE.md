@@ -8,7 +8,12 @@ Project root: ../../../CLAUDE.md
   pointer + indexed columns), `definition_versions` (codec YAML text per version + author,
   created_at, change_note, logic_changed, state, verified_by/at), `recipes`/`recipe_versions`
   (JSON), `join_edges` (JSON + indexed tables), `proposals` (JSON + indexed status/target),
-  `users` (name, role, kind, token_sha256 unique), `settings` (key/value).
+  `users` (name, role, kind, token_sha256 unique), `settings` (key/value),
+  `search_vectors` (PK definition_id + version + model; dim, doc_sha256, vector as
+  little-endian float32 bytes, created_at — derived data for meaning search, ADR 0023;
+  created by `create_all`, no schema version bump), `former_ids` (ADR 0024: seq PK,
+  former_id unique, definition_id = the CURRENT id, renamed_to, renamed_by, renamed_at,
+  proposal_id; `create_all`, no migration).
 - `store.py` — the `Store` class (public API below). Nothing else is imported by services.
 
 If something does not clearly fit one of the above, it does not belong here.
@@ -30,6 +35,16 @@ class Store:
     def definition_history(self, id: str) -> list[DefinitionVersionInfo]   # oldest first
     def set_definition_state(self, id: str, version: int, state: DefinitionState, *,
                              verified_by: str | None = None, verified_at: date | None = None) -> Definition
+    # renaming (ADR 0024) — one transaction: definitions row, every version (+ id in its
+    # YAML), every recipe version using it, every proposal naming it
+    # (domain.proposals.proposal_with_definition_renamed), search vectors deleted, former id
+    # recorded (earlier former ids re-pointed; taking back an own former id removes it)
+    def rename_definition(self, old: str, new: str, *, renamed_by: str,
+                          renamed_at: datetime | None = None,
+                          proposal_id: str | None = None) -> Definition   # latest version
+        # StoreError: old missing, new exists, new is another definition's former id
+    def former_id(self, id: str) -> FormerId | None
+    def former_ids(self, definition_id: str | None = None) -> list[FormerId]  # oldest first
     # recipes
     def add_recipe_version(self, r: Recipe, *, author: str) -> Recipe     # same version rule
     def get_recipe(self, id: str, version: int | None = None) -> Recipe | None
@@ -58,6 +73,12 @@ class Store:
     # settings
     def get_setting(self, key: str) -> str | None
     def set_setting(self, key: str, value: str) -> None
+    def delete_setting(self, key: str) -> None                            # absent → no-op
+    # search vectors (derived data; ADR 0023)
+    def put_search_vector(self, v: SearchVector) -> None                  # upsert by (id, version, model)
+    def search_vectors(self, model: str) -> list[SearchVector]            # by id, version
+    def search_vector_models(self) -> list[str]
+    def delete_search_vectors(self, model: str | None = None) -> int      # None = every model
 ```
 Errors: `StoreError`, `StaleVersionError` from domain/errors.py. Missing rows return None
 (getters) or raise StoreError (mutators).
@@ -66,7 +87,7 @@ Concurrency: a Store is safe to share across threads. In-memory SQLite ("sqlite:
 one shared connection, so every call is serialized by a lock. Across processes on one
 database, `update_proposal(..., expected_status=...)` is the compare-and-swap services use
 to decide a proposal at most once. Upserts (`upsert_join`,
-`set_setting`) retry once in a fresh transaction when a concurrent first-time INSERT of
+`set_setting`, `put_search_vector`) retry once in a fresh transaction when a concurrent first-time INSERT of
 the same key wins (READ COMMITTED on Postgres).
 
 ## Common misplacements

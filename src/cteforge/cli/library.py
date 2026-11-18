@@ -1,5 +1,7 @@
-"""`search`, `run`, `export` and `import-library`: thin calls into services.search,
-services.run and services.library_io, acting as the local user (CTEFORGE_USER)."""
+"""`search`, `search-index`, `run`, `references`, `rename`, `export` and `import-library`:
+thin calls into services.search / search_index, services.run, services.describe /
+services.propose (ADR 0024) and services.library_io, acting as the local user
+(CTEFORGE_USER)."""
 
 from __future__ import annotations
 
@@ -12,13 +14,17 @@ from cteforge.cli._common import (
     echo_json,
     echo_proposal_outcome,
     echo_run_outcome,
+    errors,
     has_error,
     parse_json_object,
     session,
     table,
     usage,
+    warn,
 )
 from cteforge.domain.dialects import Dialect
+from cteforge.services import describe, propose, search_index
+from cteforge.services.context import AppConfig
 from cteforge.services.library_io import export_library, import_library
 from cteforge.services.run import compile_and_run
 from cteforge.services.search import search as search_library
@@ -33,20 +39,59 @@ def search(
     drafts: Annotated[bool, typer.Option("--drafts", help="Include drafts")] = False,
     as_json: JsonOpt = False,
 ) -> None:
-    """Search the library (title, keywords, meaning, variables, outputs, tables)."""
+    """Search the library by words and by meaning (title, keywords, meaning, variables,
+    outputs, tables). The first search may download the embedding model (~65 MB, once)."""
     with session() as (ctx, user):
         hits = search_library(ctx, user, query, limit=limit, include_drafts=drafts)
     if as_json:
         echo_json(hits)
         return
+    notes = dict.fromkeys(h.note for h in hits if h.note)
+    for note in notes:
+        warn(f"note: {note}")
     if not hits:
         typer.echo("no matches")
         return
-    rows = [["ID", "VERSION", "STATE", "SCORE", "TITLE", "VARIABLES"]]
+    rows = [["ID", "VERSION", "STATE", "MATCH", "SCORE", "TITLE", "VARIABLES"]]
     for h in hits:
         variables = ", ".join(f"{v.name}:{v.type}" for v in h.variables)
-        rows.append([h.id, f"v{h.version}", h.state, f"{h.score:.3f}", h.title, variables])
+        match = h.match or "-"
+        rows.append([h.id, f"v{h.version}", h.state, match, f"{h.score:.3f}", h.title, variables])
     table(rows)
+
+
+search_index_app = typer.Typer(
+    no_args_is_help=True, help="The meaning-search index (embedding model and vectors)."
+)
+app.add_typer(search_index_app, name="search-index")
+
+
+@search_index_app.command("rebuild")
+def search_index_rebuild(
+    force: Annotated[
+        bool, typer.Option("--force", help="Delete every stored vector and embed all again")
+    ] = False,
+    as_json: JsonOpt = False,
+) -> None:
+    """Embed every searchable definition whose vector is missing or out of date (admin)."""
+    with session() as (ctx, user):
+        report = search_index.rebuild_search_index(ctx, user, force=force)
+    if as_json:
+        echo_json(report)
+        return
+    typer.echo(
+        f"{report.model}: {report.definitions} versions; {report.embedded} embedded, "
+        f"{report.unchanged} unchanged, {report.removed} old vectors removed"
+    )
+
+
+@search_index_app.command("download-model")
+def search_index_download_model() -> None:
+    """Download the embedding model into CTEFORGE_EMBED_CACHE (for offline servers)."""
+    with errors():
+        config = AppConfig.from_env()
+        path = search_index.download_model(config)
+    typer.echo(f"embedding model ready in {path}")
 
 
 def _parse_use(raw: str) -> tuple[str, dict[str, Any]]:
@@ -149,3 +194,58 @@ def import_library_(
         typer.echo("nothing changed")
     for outcome in outcomes:
         echo_proposal_outcome(outcome)
+
+
+@app.command()
+def references(id: str, as_json: JsonOpt = False) -> None:
+    """What inside cteforge uses definition ID (recipes, pending proposals, former IDs):
+    what a rename would update (ADR 0024)."""
+    with session() as (ctx, user):
+        refs = describe.definition_references(ctx, user, id)
+    if as_json:
+        echo_json(refs)
+        return
+    typer.echo(f"{refs.id} v{refs.version} ({refs.state})")
+    if refs.recipes:
+        rows = [["RECIPE", "VERSION", "ALIAS", "USES"]]
+        for r in refs.recipes:
+            uses = f"v{r.pinned_version} (pinned)" if r.pinned_version else "latest"
+            rows.append([r.recipe_id, f"v{r.recipe_version}", r.alias, uses])
+        typer.echo("")
+        table(rows)
+    else:
+        typer.echo("no recipes use it")
+    if refs.proposals:
+        rows = [["PROPOSAL", "KIND", "RELATION", "AUTHOR", "SUMMARY"]]
+        for p in refs.proposals:
+            rows.append([p.proposal_id, str(p.kind), p.relation, p.author, p.summary])
+        typer.echo("")
+        table(rows)
+    else:
+        typer.echo("no pending proposals name it")
+    for f in refs.former_ids:
+        when = f.renamed_at.date().isoformat()
+        typer.echo(
+            f"formerly {f.former_id} (renamed to {f.renamed_to} by {f.renamed_by} on {when})"
+        )
+    typer.echo(f"\nnote: {refs.outside_warning}")
+
+
+@app.command()
+def rename(
+    old: str,
+    new: str,
+    summary: Annotated[str, typer.Option("--summary", "-m", help="Why (for reviewers)")] = "",
+    as_json: JsonOpt = False,
+) -> None:
+    """Propose renaming definition OLD to NEW (ADR 0024). Applied at once in open mode when
+    OLD is not verified; otherwise it waits for approval. Run `cteforge references OLD`
+    first: references outside cteforge stop working."""
+    with session() as (ctx, user):
+        outcome = propose.rename_definition(ctx, user, id=old, new_id=new, summary=summary)
+    if as_json:
+        echo_json(outcome)
+    else:
+        echo_proposal_outcome(outcome)
+        if not outcome.auto_applied:
+            typer.echo("  waits for approval: cteforge proposals approve " + outcome.proposal.id)

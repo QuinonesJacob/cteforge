@@ -19,16 +19,24 @@ Typer CLI: the local admin tool. Thin adapter over services. Project root: ../..
 - `admin.py` — services.admin: `db init` (creates schemas; lists profiles) ·
   `user add NAME --role R [--agent]` / `user add NAME --bootstrap [--agent]` (first admin,
   no acting user) · `user list [--json]` · `user role NAME ROLE` · `user token NAME` ·
-  `settings show [--json]` · `settings mode strict|open`. Tokens: printed once on stdout,
+  `settings show [--json]` (mode, default connection, effective default, warnings on
+  stderr) · `settings mode strict|open` · `settings connection [NAME] [--clear]` (the team's
+  default connection, ADR 0021; no argument shows it; NAME with --clear → exit 2; unknown
+  profile → exit 1). Tokens: printed once on stdout,
   the warning on stderr; never written anywhere.
 - `review.py` — services.review / revalidate: `proposals list [--status] [--json]` ·
   `proposals show ID [--json]` (checks, impact, diff) · `proposals approve ID [--verify]
   [--comment]` · `proposals reject ID --comment` (required, exit 2 without) ·
   `verify ID VERSION` · `revalidate [IDS...] [--json]` (exit 1 when anything drifted).
-- `library.py` — services.search / run / library_io: `search QUERY [-n] [--drafts]
-  [--json]` · `run --use alias=id[@v] ... [--vars JSON] [--select SQL] [--profile]
+- `library.py` — services.search / search_index / run / describe / propose / library_io: `search QUERY [-n]
+  [--drafts] [--json]` (MATCH column: keyword | meaning | both; a hit `note` is printed
+  once on stderr as `note: …`) · `search-index rebuild [--force] [--json]` (admin) ·
+  `search-index download-model` (into CTEFORGE_EMBED_CACHE; no store, no user) · `run --use alias=id[@v] ... [--vars JSON] [--select SQL] [--profile]
   [--dialect] [--limit] [--compile-only] [--sql] [--question] [--json]` (`--vars` is
-  alias → variable → value; exit 1 when refused or any error issue) · `export DIR
+  alias → variable → value; exit 1 when refused or any error issue) · `references ID
+  [--json]` (recipes, pending proposals, former ids + the outside-cteforge warning; ADR
+  0024) · `rename OLD NEW [--summary] [--json]` (proposes the rename; same policy as any
+  change: applied at once only in open mode on a non-verified definition) · `export DIR
   [--prune]` · `import-library DIR [--profile] [--json]`.
 - `server.py` — `serve [--host 127.0.0.1] [--port 8765] [--reload]`: uvicorn with the
   factory string "cteforge.api.app:create_app" (factory=True); refuses (exit 2) a

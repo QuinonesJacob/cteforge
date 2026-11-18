@@ -1,8 +1,10 @@
-"""Use-case: the full card of one definition, and its version history (DESIGN §6, §15).
+"""Use-case: the full card of one definition, its version history, its search document and
+what references it (DESIGN §6, §15, §19; ADR 0024).
 
 Needs Action.DESCRIBE (viewer). Any state can be described, drafts included: describing
 is how a person or agent learns why something is not usable. Audit is best-effort here
-(`fail_closed=False`): a lookup returns no warehouse data.
+(`fail_closed=False`): a lookup returns no warehouse data. A former id (renamed) fails
+with a NotFoundError naming the current id (`_library.definition_not_found`).
 """
 
 from __future__ import annotations
@@ -10,12 +12,16 @@ from __future__ import annotations
 from typing import NoReturn
 
 from cteforge.domain.audit import AuditKind
-from cteforge.domain.errors import NotFoundError
 from cteforge.domain.models import DefinitionVersionInfo
 from cteforge.domain.users import User
-from cteforge.services import _audit, _library
+from cteforge.services import _audit, _library, _meaning
 from cteforge.services.auth import require
-from cteforge.services.cards import DefinitionCard, card_from_definition
+from cteforge.services.cards import (
+    DefinitionCard,
+    DefinitionReferences,
+    SearchDocument,
+    card_from_definition,
+)
 from cteforge.services.context import AppContext
 from cteforge.trust.approval import Action
 
@@ -34,8 +40,7 @@ def _not_found(ctx: AppContext, user: User, id: str, version: int | None, what: 
         error="NotFoundError",
         extra={"op": what, "id": id, "version": version},
     )
-    suffix = f" version {version}" if version is not None else ""
-    raise NotFoundError(f"Definition '{id}'{suffix} does not exist")
+    raise _library.definition_not_found(ctx, id, version)
 
 
 def get_definition(
@@ -45,17 +50,21 @@ def get_definition(
     version: int | None = None,
     *,
     include_source: bool = False,
+    include_search_document: bool = False,
 ) -> DefinitionCard:
     """The definition card (latest version unless `version`), with its full history.
     `include_source` adds `source_sql` (the trusted query rebuilt from the template with
     its original values) and `annotations` (its variables, with literal IDs addressing
-    that SQL), for editing it in a revision. Raises NotFoundError for an unknown id or
-    version."""
+    that SQL), for editing it in a revision. `include_search_document` adds the generated
+    Markdown text meaning search embeds (ADR 0023). Raises NotFoundError for an unknown
+    id or version."""
     _require(ctx, user, "get_definition")
     definition = ctx.store.get_definition(id, version)
     if definition is None:
         _not_found(ctx, user, id, version, "get_definition")
+    formers = [f.former_id for f in ctx.store.former_ids(id)]
     card = card_from_definition(definition, ctx.store.definition_history(id))
+    card = card.model_copy(update={"former_ids": formers})
     if include_source:
         card = card.model_copy(
             update={
@@ -63,6 +72,9 @@ def get_definition(
                 "annotations": _library.annotations_of(definition),
             }
         )
+    if include_search_document:
+        document = _meaning.document_for(definition, formers)
+        card = card.model_copy(update={"search_document": document})
     _audit.record(
         ctx,
         user,
@@ -89,3 +101,50 @@ def definition_history(ctx: AppContext, user: User, id: str) -> list[DefinitionV
         extra={"op": "definition_history"},
     )
     return history
+
+
+def search_document(
+    ctx: AppContext, user: User, id: str, version: int | None = None
+) -> SearchDocument:
+    """The generated Markdown search document of `id` (latest version unless `version`):
+    the text meaning search embeds (ADR 0023). Raises NotFoundError."""
+    _require(ctx, user, "search_document")
+    definition = ctx.store.get_definition(id, version)
+    if definition is None:
+        _not_found(ctx, user, id, version, "search_document")
+    formers = [f.former_id for f in ctx.store.former_ids(id)]
+    document = SearchDocument(
+        id=definition.id,
+        version=definition.version,
+        markdown=_meaning.document_for(definition, formers),
+    )
+    _audit.record(
+        ctx,
+        user,
+        AuditKind.GET_DEFINITION,
+        fail_closed=False,
+        definitions=[f"{definition.id}@{definition.version}"],
+        extra={"op": "search_document"},
+    )
+    return document
+
+
+def definition_references(ctx: AppContext, user: User, id: str) -> DefinitionReferences:
+    """Everything inside cteforge that uses definition `id` (ADR 0024): recipes (which
+    alias, pinned or floating), pending proposals targeting or using it, and its former
+    ids — what a rename updates — plus a warning about references cteforge can't see.
+    Raises NotFoundError (a former id names the current one)."""
+    _require(ctx, user, "definition_references")
+    definition = ctx.store.get_definition(id)
+    if definition is None:
+        _not_found(ctx, user, id, None, "definition_references")
+    references = _library.definition_references(ctx, definition)
+    _audit.record(
+        ctx,
+        user,
+        AuditKind.GET_DEFINITION,
+        fail_closed=False,
+        definitions=[f"{definition.id}@{definition.version}"],
+        extra={"op": "definition_references"},
+    )
+    return references

@@ -16,6 +16,13 @@ transpiled renders carry a `transpiled` issue and lower trust, ADR 0013):
   naive timestamp column (session time zone applies).
 - realization_rate_grain.*.sql: grain `quarter` rebuilds the month truncation (M1.5); the
   transpiled ones inherit realization_rate's defects above.
+- booked_vs_collected.clickhouse.sql: DuckDB `strptime(...)` becomes `STR_TO_TIME(...)`,
+  which is not a ClickHouse function; the query fails there (ADR 0025).
+- *.clickhouse.sql: a naive TIMESTAMP cast becomes `CAST(... AS Nullable(DateTime))`
+  (sqlglot writes ClickHouse casts as Nullable; DateTime has second precision and reads the
+  text in the server's time zone).
+ClickHouse-sourced goldens (trace_tool_errors*.clickhouse.sql) are in
+test_clickhouse_templates.py.
 """
 
 import os

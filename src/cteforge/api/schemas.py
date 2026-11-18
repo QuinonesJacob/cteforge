@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from cteforge.domain.dialects import Dialect
 from cteforge.domain.models import TeamMode
@@ -20,10 +20,12 @@ _REQUEST = ConfigDict(extra="forbid")
 
 
 class ParseRequest(BaseModel):
+    """`dialect` omitted → the connection's: the profile's, else the default connection's."""
+
     model_config = _REQUEST
 
     sql: str
-    dialect: Dialect
+    dialect: Dialect | None = None
     profile: str | None = None
 
 
@@ -60,10 +62,12 @@ class RevalidateRequest(BaseModel):
 
 
 class ProposeDefinitionRequest(BaseModel):
+    """`dialect` omitted → the connection's: the profile's, else the default connection's."""
+
     model_config = _REQUEST
 
     sql: str
-    dialect: Dialect
+    dialect: Dialect | None = None
     metadata: dict[str, Any]
     annotations: list[dict[str, Any]]
     profile: str | None = None
@@ -78,6 +82,17 @@ class ReviseDefinitionRequest(BaseModel):
     dialect: Dialect | None = None
     metadata: dict[str, Any] | None = None
     annotations: list[dict[str, Any]] | None = None
+    summary: str = ""
+
+
+class RenameDefinitionRequest(BaseModel):
+    """Propose a new ID for a definition (ADR 0024). `base_version`, when given, must be its
+    current version."""
+
+    model_config = _REQUEST
+
+    new_id: str
+    base_version: int | None = None
     summary: str = ""
 
 
@@ -136,6 +151,18 @@ class SetRoleRequest(BaseModel):
 
 
 class SettingsRequest(BaseModel):
+    """Changes only the fields given: `mode`, and/or `default_connection` (a profile name;
+    null clears it). At least one is required."""
+
     model_config = _REQUEST
 
-    mode: TeamMode
+    mode: TeamMode | None = None
+    default_connection: str | None = None
+
+    @model_validator(mode="after")
+    def _something_to_change(self) -> SettingsRequest:
+        if not self.model_fields_set:
+            raise ValueError("give `mode` and/or `default_connection`")
+        if "mode" in self.model_fields_set and self.mode is None:
+            raise ValueError("`mode` cannot be null")
+        return self

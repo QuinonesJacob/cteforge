@@ -277,3 +277,20 @@ def test_agent_cannot_approve_or_verify(fresh_demo: Invoke):
     assert verify.exit_code == 1 and "may not" in verify.output
     users = fresh_demo("user", "list", user="claude-agent")
     assert users.exit_code == 1
+
+
+def test_references_and_rename(fresh_demo: Invoke):
+    # ADR 0024: list what uses an id, rename it (open mode, not verified: applied at once),
+    # and the old id then fails naming the new one.
+    refs = fresh_demo("references", "realization_rate")
+    assert refs.exit_code == 0, refs.output
+    assert "realization_rate v1" in refs.stdout and "outside cteforge" in refs.stdout
+    as_json = json.loads(fresh_demo("references", "realization_rate", "--json").stdout)
+    assert as_json["id"] == "realization_rate" and as_json["former_ids"] == []
+    renamed = fresh_demo("rename", "realization_rate", "rr_monthly", "--summary", "clearer")
+    assert renamed.exit_code == 0, renamed.output
+    assert "rename_definition" in renamed.stdout and "auto-applied" in renamed.stdout
+    missing = fresh_demo("run", "--use", "x=realization_rate")
+    assert missing.exit_code == 1 and "was renamed to 'rr_monthly'" in missing.output
+    assert "formerly realization_rate" in fresh_demo("references", "rr_monthly").stdout
+    assert fresh_demo("rename", "rr_monthly", "Bad Name").exit_code == 1

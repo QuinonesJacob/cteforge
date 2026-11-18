@@ -303,13 +303,8 @@ def _ref(alias: str, spec: Any) -> DefinitionRef:
 
 def _load(ctx: AppContext, ref: DefinitionRef, mode: TeamMode) -> Definition:
     if ref.version is not None:
-        pinned = ctx.store.get_definition(ref.id, ref.version)
-        if pinned is None:
-            raise NotFoundError(f"Definition '{ref.id}' version {ref.version} does not exist")
-        return pinned
-    latest = ctx.store.get_definition(ref.id)
-    if latest is None:
-        raise NotFoundError(f"Definition '{ref.id}' does not exist")
+        return _library.get_definition(ctx, ref.id, ref.version)
+    latest = _library.get_definition(ctx, ref.id)
     found = _library.newest_in_states(ctx, latest, _library.usable_states(mode))
     return latest if found is None else found
 

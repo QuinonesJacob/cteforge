@@ -1,6 +1,6 @@
 # 0017 — Search: lexical ranking first
 
-Status: accepted · 2026-11-16
+Status: accepted · 2026-11-16 · amended by ADR 0023 (hybrid meaning search)
 
 ## Context
 Agents call `search` at the start of a turn. Embeddings need a model/API key and add an

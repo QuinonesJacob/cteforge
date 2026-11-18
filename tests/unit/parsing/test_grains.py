@@ -11,9 +11,11 @@ SCHEMA = {"orders": {"id": "INTEGER", "created_at": "TIMESTAMP", "day": "DATE"}}
 MONTHLY = {
     Dialect.DUCKDB: "SELECT DATE_TRUNC('month', o.created_at) AS m FROM orders AS o",
     Dialect.POSTGRES: "SELECT date_trunc('month', o.created_at) AS m FROM orders AS o",
+    Dialect.REDSHIFT: "SELECT date_trunc('month', o.created_at) AS m FROM orders AS o",
     Dialect.SNOWFLAKE: "SELECT DATE_TRUNC(month, o.created_at) AS m FROM orders AS o",
     Dialect.BIGQUERY: "SELECT DATETIME_TRUNC(o.created_at, MONTH) AS m FROM orders AS o",
     Dialect.DATABRICKS: "SELECT DATE_TRUNC('MONTH', o.created_at) AS m FROM orders AS o",
+    Dialect.CLICKHOUSE: "SELECT toStartOfMonth(o.created_at) AS m FROM orders AS o",
 }
 
 
@@ -135,6 +137,7 @@ def test_no_truncation_means_no_grains(sample_sql, sample_schema):
         (Dialect.DUCKDB, "SELECT DATE_TRUNC(month, o.created_at) FROM orders AS o, cfg", "month"),
         (Dialect.DUCKDB, 'SELECT DATE_TRUNC("q", o.created_at) FROM orders AS o, cfg', "q"),
         (Dialect.POSTGRES, "SELECT date_trunc(grain, o.created_at) FROM orders AS o, cfg", "grain"),
+        (Dialect.REDSHIFT, "SELECT date_trunc(grain, o.created_at) FROM orders AS o, cfg", "grain"),
         (Dialect.DATABRICKS, "SELECT DATE_TRUNC(month, o.created_at) FROM orders AS o", "month"),
         (Dialect.DATABRICKS, "SELECT TRUNC(o.day, fmt) FROM orders AS o", "fmt"),
     ],

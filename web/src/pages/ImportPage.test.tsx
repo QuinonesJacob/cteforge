@@ -81,7 +81,18 @@ describe("ImportPage", () => {
 
     // Step 3: metadata.
     await user.type(screen.getByLabelText(/^Title/), "Closed deals");
-    expect(screen.getByLabelText(/^ID/)).toHaveValue("closed_deals");
+    // ADR 0024: the ID follows the title and is locked until "Edit ID".
+    const idInput = screen.getByLabelText(/^ID/) as HTMLInputElement;
+    expect(idInput).toHaveValue("closed_deals");
+    expect(idInput.readOnly).toBe(true);
+    expect(screen.getByText("Filled in from the title. Agents and recipes use this name.")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Edit ID" }));
+    expect(idInput.readOnly).toBe(false);
+    await user.type(idInput, "_x");
+    expect(idInput).toHaveValue("closed_deals_x");
+    await user.click(screen.getByRole("button", { name: "Use title" }));
+    expect(idInput).toHaveValue("closed_deals");
+    expect(idInput.readOnly).toBe(true);
     await user.type(screen.getByLabelText(/^Meaning/), "One row per closed deal");
     await user.type(screen.getByLabelText(/^Keywords/), "bookings, won");
     await user.click(screen.getByRole("button", { name: "Continue" }));
@@ -207,6 +218,62 @@ describe("ImportPage", () => {
     expect(await screen.findByText("Variables (0)")).toBeInTheDocument();
     expect(screen.getByText(/Removed 1 variable after re-parsing/)).toBeInTheDocument();
     expect(api.calls.filter((c) => c.path === "/parse")).toHaveLength(2);
+  });
+
+  it("starts on the default connection; the dialect follows the profile until picked", async () => {
+    const user = userEvent.setup();
+    const api = mockApi({
+      "GET /me": () => ({ body: { name: "jq", role: "contributor", kind: "human" } }),
+      "GET /profiles": () => ({
+        body: [
+          { name: "wh", dialect: "duckdb", default: false },
+          { name: "sf", dialect: "snowflake", default: true },
+        ],
+      }),
+      "POST /parse": () => ({ body: report }),
+      "GET /proposals/count": () => ({ body: { count: 0 } }),
+    });
+    renderPage();
+    const select = await screen.findByLabelText("Dialect");
+    const profileSelect = screen.getByLabelText("Warehouse profile");
+    await waitFor(() => expect(profileSelect).toHaveValue("sf"));
+    expect(select).toHaveValue("snowflake");
+    expect(screen.getByText("From connection sf.")).toBeInTheDocument();
+
+    await user.selectOptions(profileSelect, "wh");
+    expect(select).toHaveValue("duckdb"); // follows the connection
+    expect(screen.getByText("From connection wh.")).toBeInTheDocument();
+
+    await user.selectOptions(select, "postgres");
+    expect(
+      screen.getByText("Differs from connection wh: checks run on SQL translated to duckdb, lower trust."),
+    ).toBeInTheDocument();
+    await user.selectOptions(profileSelect, "sf");
+    expect(select).toHaveValue("postgres"); // picked by the person: no longer follows
+
+    await user.type(screen.getByLabelText(/Trusted SQL/), "SELECT 1");
+    await user.click(screen.getByRole("button", { name: "Parse" }));
+    await screen.findByRole("table");
+    expect(api.calls.find((c) => c.path === "/parse")!.body).toMatchObject({ dialect: "postgres", profile: "sf" });
+  });
+
+  it("falls back to duckdb with no hint when no connection is the default", async () => {
+    mockApi({
+      "GET /me": () => ({ body: { name: "jq", role: "contributor", kind: "human" } }),
+      "GET /profiles": () => ({
+        body: [
+          { name: "wh", dialect: "duckdb", default: false },
+          { name: "sf", dialect: "snowflake", default: false },
+        ],
+      }),
+      "GET /proposals/count": () => ({ body: { count: 0 } }),
+    });
+    renderPage();
+    const profileSelect = await screen.findByLabelText("Warehouse profile");
+    await waitFor(() => expect(within(profileSelect).getByRole("option", { name: "wh (duckdb)" })).toBeInTheDocument());
+    expect(profileSelect).toHaveValue("");
+    expect(screen.getByLabelText("Dialect")).toHaveValue("duckdb");
+    expect(screen.getByText("The dialect the SQL is written in.")).toBeInTheDocument();
   });
 
   it("tells viewers they cannot propose", async () => {

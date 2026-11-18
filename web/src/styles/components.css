@@ -108,6 +108,7 @@
 .tone-newlogic { --tone: var(--t-newlogic); --tone-soft: var(--t-newlogic-soft); }
 .tone-exploratory { --tone: var(--t-exploratory); --tone-soft: var(--t-exploratory-soft); }
 .tone-draft { --tone: var(--t-draft); --tone-soft: var(--t-draft-soft); }
+.tone-meaning { --tone: var(--info); --tone-soft: var(--info-soft); font-weight: 500; }
 .tone-danger { --tone: var(--danger); --tone-soft: var(--danger-soft); }
 .tone-neutral { --tone: var(--text-muted); --tone-soft: var(--surface-2); }
 .tag {
@@ -430,3 +431,14 @@ legend { font-weight: 650; margin-bottom: var(--s2); padding: 0; }
 /* Details */
 .details summary { cursor: pointer; font-weight: 600; font-size: 0.9rem; }
 .details ul { margin: var(--s2) 0 0; padding-left: 1.2em; }
+
+/* Definition ID: locked input + Edit ID / Use title (ADR 0024). */
+.id-field { display: flex; gap: var(--s2); align-items: center; }
+.id-field input { flex: 1; min-width: 0; }
+.id-field input[readonly] { background: var(--surface-2); color: var(--text-muted); }
+
+/* Rename ID (ADR 0024): references grouped by kind, then the typed confirmation. */
+.ref-group { margin-top: var(--s2); }
+.ref-group ul { margin: var(--s2) 0 0; padding-left: 1.2em; }
+.ref-group li { margin-bottom: var(--s1); overflow-wrap: anywhere; }
+.rename-arrow { font-family: var(--font-mono); overflow-wrap: anywhere; }

@@ -87,6 +87,7 @@ def _env_sh(path: Path) -> dict[str, str]:
 def demo(tmp_path_factory: pytest.TempPathFactory) -> Demo:
     directory = tmp_path_factory.mktemp("e2e") / "demo"
     base_env = {k: v for k, v in os.environ.items() if not k.startswith("CTEFORGE_")}
+    base_env["CTEFORGE_SEARCH_EMBEDDINGS"] = "off"  # Tests never download the model.
     done = subprocess.run(
         _cli("demo", str(directory)),
         env=base_env,
@@ -221,7 +222,7 @@ def test_api_library_run_and_four_eyes_review(server: Server) -> None:
         assert created.status_code == 201, created.text
         tokens[name] = created.json()["token"]
     ana, ben = tokens["ana"], tokens["ben"]
-    assert server.api("PUT", "/settings", admin, {"mode": "strict"}).json() == {"mode": "strict"}
+    assert server.api("PUT", "/settings", admin, {"mode": "strict"}).json()["mode"] == "strict"
     try:
         proposed = server.api(
             "POST",

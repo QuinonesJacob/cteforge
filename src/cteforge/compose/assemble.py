@@ -42,7 +42,7 @@ from cteforge.domain.dialects import Dialect
 from cteforge.domain.errors import RenderError, SqlParseError
 from cteforge.domain.issues import Issue, IssueCode, Severity
 from cteforge.domain.models import Definition, Ident
-from cteforge.parsing.analyze import parse
+from cteforge.parsing.analyze import generate, parse
 
 _UNSAFE = re.compile(r"[^a-z0-9_]")
 
@@ -129,7 +129,7 @@ def compose(parts: list[Part], select: str | None, dialect: Dialect) -> Composed
     )
 
     final.set("with_", exp.With(expressions=ctes))
-    sql = final.sql(dialect=str(dialect), pretty=True)
+    sql = generate(final, dialect)
     return ComposedQuery(
         sql=sql, dialect=dialect, issues=issues, raw_tables=raw_tables, joins=joins
     )

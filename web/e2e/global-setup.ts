@@ -63,7 +63,11 @@ export default async function globalSetup(): Promise<() => Promise<void>> {
 
   const tmp = mkdtempSync(join(tmpdir(), "cteforge-e2e-"));
   const demoDir = join(tmp, "demo");
-  const baseEnv = Object.fromEntries(Object.entries(process.env).filter(([k]) => !k.startsWith("CTEFORGE_")));
+  // Tests never download or load the embedding model: meaning search off (keyword only).
+  const baseEnv = {
+    ...Object.fromEntries(Object.entries(process.env).filter(([k]) => !k.startsWith("CTEFORGE_"))),
+    CTEFORGE_SEARCH_EMBEDDINGS: "off",
+  };
   const stdout = execFileSync("uv", ["run", "--directory", ROOT, "cteforge", "demo", demoDir], {
     cwd: tmp,
     env: baseEnv,

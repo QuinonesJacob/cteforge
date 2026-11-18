@@ -10,6 +10,22 @@ that conflicts.
   `explain(sql) -> None` (raises on failure), `run(sql, limit) -> QueryResult`.
 - `duckdb.py` — DuckDB implementation.
 - (M6) one file per connector: `postgres.py`, `snowflake.py`, `bigquery.py`, `databricks.py`.
+- `redshift.py` — Redshift via `redshift_connector` (ADR 0022). **Security review with the
+  user pending: do not commit before it is approved.** Password auth only (IAM/IdP options
+  refused by an option allowlist); every call `BEGIN READ ONLY` + transaction-local
+  `statement_timeout`, rolled back; extended query protocol (one statement); column types
+  from `svv_columns`; server ErrorResponse fields reduced to the message (`base.error_text`).
+- `clickhouse.py` — ClickHouse via `clickhouse-connect` over HTTP(S) (ADR 0025). **Security
+  review with the user pending: do not commit before it is approved.** Password auth only,
+  `user` required (option allowlist refuses dsn / interface / access_token / client certs /
+  settings); every request carries `readonly=2`, `max_execution_time` +
+  `timeout_overflow_mode=throw`, `cancel_http_readonly_queries_on_client_close=1` and the
+  optional scan guards `max_rows_to_read` / `max_bytes_to_read` (`read_overflow_mode=throw`);
+  one statement per HTTP request (server parses with multi-statements off); `run` streams
+  and stops after limit + 1 rows; column types from `system.columns` with server-bound
+  parameters; `EXPLAIN PLAN`; errors reduced to the last `DB::Exception:` message
+  (`clickhouse.error_message`), then scrubbed; no HTTP session; the driver refuses to start
+  if its `invalid_setting_action` is `drop`.
 
 ## Hard rules
 - Credentials MUST come from environment variables or a profile file path passed in by the

@@ -11,7 +11,8 @@ in the same change, and tell the user.
 
 ## Stack
 Python 3.12 · uv · sqlglot (pinned exactly; ADR 0012) · pydantic v2 · duckdb · pyyaml ·
-typer · pytest · ruff · import-linter. GUI: React/TS under `web/` (Vite), served by the API.
+typer · fastembed (ONNX embeddings for meaning search; ADR 0023) · pytest · ruff ·
+import-linter. GUI: React/TS under `web/` (Vite), served by the API.
 
 ## Architecture
 ```
@@ -21,7 +22,7 @@ orchestration      services/               use-cases; the ONLY layer that does I
                  ┌────┴──────────────┐
 pure core        │                   │  I/O adapters (import only domain; never each other)
  domain ← parsing ← templating ←    │  warehouse/ (HARDENED)  files/  store/  audit/
-                 {compose, trust}    │
+                 {compose, trust}    │  embedding/
 ```
 Enforced by import-linter contracts in `pyproject.toml` (`uv run lint-imports`).
 
@@ -36,6 +37,7 @@ Enforced by import-linter contracts in `pyproject.toml` (`uv run lint-imports`).
 - `src/cteforge/files/` — definition files on disk
 - `src/cteforge/store/` — (M3) database repositories
 - `src/cteforge/audit/` — (M3) audit log, SQL tag
+- `src/cteforge/embedding/` — embedding model for meaning search (fastembed; ADR 0023)
 - `src/cteforge/services/` — use-cases
 - `src/cteforge/cli/` — Typer CLI
 - `src/cteforge/mcp/` — (M4) MCP server
@@ -55,6 +57,9 @@ Each has its own CLAUDE.md. Read it before adding files there.
 - Dialect names → `domain/dialects.py` (`Dialect` enum). Don't pass raw dialect strings around.
 - Errors → subclasses of `CteforgeError` in `domain/errors.py`.
 - Warehouse connections → `warehouse/` only. Services receive a `Warehouse` protocol object.
+- Embedding model → `embedding/` only (the only importer of fastembed). Search document
+  text → `domain/search.py`; vectors → store `search_vectors`; similarity and fusion →
+  `services/_meaning.py` / `services/search.py`. Tests never load the real model.
 
 ## Conventions
 - Modules and files: snake_case. Pydantic models: PascalCase, frozen where practical.

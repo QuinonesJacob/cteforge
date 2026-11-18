@@ -14,6 +14,7 @@ from pydantic import BaseModel
 
 from cteforge.domain.errors import CteforgeError
 from cteforge.domain.issues import Issue, Severity
+from cteforge.domain.proposals import ProposalKind
 from cteforge.domain.users import User
 from cteforge.services.auth import local_user
 from cteforge.services.cards import ProposalOutcome, ProposalView, RunOutcome
@@ -176,6 +177,8 @@ def echo_proposal_view(view: ProposalView) -> None:
         rows.append(["version", f"v{view.resulting_version}"])
     if view.impact:
         rows.append(["impact", ", ".join(view.impact)])
+    if view.kind is ProposalKind.RENAME_DEFINITION:
+        rows.append(["rename", f"{view.payload.get('from_id')} -> {view.payload.get('to_id')}"])
     table(rows)
     if view.checks:
         typer.echo("\nchecks:")

@@ -1,6 +1,6 @@
 import { Link, useParams } from "react-router-dom";
 import { getDefinition, getProposal } from "../api/endpoints";
-import type { JoinEdge, ProposalView, Recipe } from "../api/types";
+import type { DefinitionReferences, JoinEdge, ProposalView, Recipe } from "../api/types";
 import { Badge } from "../components/Badge";
 import { DiffViewer } from "../components/DiffViewer";
 import { ErrorState } from "../components/ErrorState";
@@ -11,9 +11,10 @@ import { Loading } from "../components/Loading";
 import { PageHeader } from "../components/PageHeader";
 import { ProposalActions } from "../components/ProposalActions";
 import { RecipeSummary } from "../components/RecipeSummary";
+import { ReferencesList } from "../components/ReferencesList";
 import { SqlViewer } from "../components/SqlViewer";
 import { formatDateTime } from "../lib/format";
-import { canApprove, roleAtLeast, type DecideTarget } from "../lib/roles";
+import { canApprove, DEFINITION_KINDS, roleAtLeast, type DecideTarget } from "../lib/roles";
 import { statusTone } from "../lib/trust";
 import { useAuth } from "../state/AuthContext";
 import { useAsync } from "../state/useAsync";
@@ -27,7 +28,7 @@ export function ProposalPage() {
   // when it changes what is offered; a missing target (new definition) is null.
   const needTarget =
     data?.status === "pending" &&
-    (data.kind === "new_definition" || data.kind === "revise_definition") &&
+    DEFINITION_KINDS.includes(data.kind) &&
     user !== null &&
     (canApprove(user) ? user.kind === "agent" : roleAtLeast(user.role, "contributor"));
   const targetId = data?.target_id;
@@ -45,7 +46,16 @@ export function ProposalPage() {
   if (loading && !data) return <Loading label="Loading proposal…" />;
   if (error) return <ErrorState error={error} title="Could not load proposal" onRetry={reload} />;
   const p = data as ProposalView;
-  const isDefinition = p.kind === "new_definition" || p.kind === "revise_definition";
+  const isDefinition = DEFINITION_KINDS.includes(p.kind);
+  // Renames (ADR 0024) carry from/to and the references the proposer saw.
+  const rename =
+    p.kind === "rename_definition"
+      ? {
+          from: String(p.payload.from_id ?? ""),
+          to: String(p.payload.to_id ?? ""),
+          refs: isObject(p.payload.references) ? (p.payload.references as unknown as DefinitionReferences) : null,
+        }
+      : null;
   const yaml = typeof p.payload.definition_yaml === "string" ? p.payload.definition_yaml : null;
   // Recipe and join proposals carry the object itself (services/_apply.py payloads).
   const recipe = p.kind === "new_recipe" && isObject(p.payload.recipe) ? (p.payload.recipe as unknown as Recipe) : null;
@@ -101,13 +111,33 @@ export function ProposalPage() {
               <RecipeSummary recipe={recipe} />
             </section>
           )}
+          {rename && (
+            <section className="card" aria-label="Proposed rename">
+              <h2>Rename</h2>
+              <p className="rename-arrow">
+                {rename.from} → {rename.to}
+              </p>
+              <p className="small muted">
+                No new version: every version, recipe and pending proposal that uses the ID moves to the new one. The
+                old ID stays searchable; looking it up fails with an error naming the new ID.
+              </p>
+              <h3 className="small">Used inside cteforge when proposed</h3>
+              {rename.refs ? <ReferencesList refs={rename.refs} /> : <p className="muted small">Not recorded.</p>}
+              <div className="callout callout-warn" role="note">
+                <p className="small">
+                  {rename.refs?.outside_warning ||
+                    "References outside cteforge (agent instructions, scripts) stop working."}
+                </p>
+              </div>
+            </section>
+          )}
           {join && (
             <section className="card" aria-label="Proposed join">
               <h2>Join</h2>
               <JoinTable joins={[join]} label="Proposed join" />
             </section>
           )}
-          {(p.diff || yaml || (!recipe && !join)) && (
+          {(p.diff || yaml || (!recipe && !join && !rename)) && (
             <section>
               <h2>Diff</h2>
               {p.diff ? (

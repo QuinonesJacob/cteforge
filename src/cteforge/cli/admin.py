@@ -9,6 +9,7 @@ import typer
 from cteforge.cli._common import (
     app,
     context,
+    echo_issues,
     echo_json,
     echo_token,
     session,
@@ -18,6 +19,7 @@ from cteforge.cli._common import (
 from cteforge.domain.models import TeamMode
 from cteforge.domain.users import ActorKind, UserRole
 from cteforge.services import admin
+from cteforge.services.cards import TeamSettings
 
 db_app = typer.Typer(no_args_is_help=True, help="The cteforge database (CTEFORGE_DB_URL).")
 user_app = typer.Typer(no_args_is_help=True, help="Users, roles and tokens (admin).")
@@ -103,7 +105,15 @@ def settings_show(as_json: JsonOpt = False) -> None:
     if as_json:
         echo_json(settings)
     else:
-        typer.echo(f"mode: {settings.mode}")
+        _echo_settings(settings)
+
+
+def _echo_settings(settings: TeamSettings) -> None:
+    typer.echo(f"mode: {settings.mode}")
+    typer.echo(f"default connection: {settings.default_connection or '(not set)'}")
+    effective = settings.effective_default_connection or "(none: callers must name a profile)"
+    typer.echo(f"effective default connection: {effective}")
+    echo_issues(settings.issues, err=True)
 
 
 @settings_app.command("mode")
@@ -112,3 +122,20 @@ def settings_mode(mode: TeamMode) -> None:
     with session() as (ctx, acting):
         settings = admin.set_settings(ctx, acting, mode)
     typer.echo(f"mode: {settings.mode}")
+
+
+@settings_app.command("connection")
+def settings_connection(
+    name: Annotated[str | None, typer.Argument(help="Warehouse profile name")] = None,
+    clear: Annotated[bool, typer.Option("--clear", help="Unset the default connection")] = False,
+) -> None:
+    """Set the team's default connection (the profile used when none is named; its
+    dialect is the default dialect), or --clear it. Shows it when given neither."""
+    if clear and name is not None:
+        usage("give a NAME or --clear (not both)")
+    with session() as (ctx, acting):
+        if name is None and not clear:
+            settings = admin.get_settings(ctx, acting)
+        else:
+            settings = admin.set_default_connection(ctx, acting, None if clear else name)
+    _echo_settings(settings)

@@ -10,11 +10,14 @@ import { notifyProposalsChanged } from "../state/usePendingCount";
 import { ImportResult } from "./ImportResult";
 import { IssueList } from "./IssueList";
 import { MetadataForm } from "./MetadataForm";
+import { RenameIdPanel } from "./RenameIdPanel";
 
 interface Props {
   def: DefinitionCard;
   /** Called after a revision was applied (the page reloads the card). */
   onApplied: () => void;
+  /** Called when a rename was applied at once (the page moves to the new ID). */
+  onRenamed: (newId: string) => void;
 }
 
 /**
@@ -22,7 +25,7 @@ interface Props {
  * edits send just the changed metadata keys (nothing re-runs); SQL and variables are changed
  * in the import builder in revise mode. Mount with a key per version.
  */
-export function DefinitionEditPanel({ def, onApplied }: Props) {
+export function DefinitionEditPanel({ def, onApplied, onRenamed }: Props) {
   const toast = useToast();
   const [initial] = useState(() => metadataFromCard(def));
   const [meta, setMeta] = useState(initial);
@@ -103,6 +106,7 @@ export function DefinitionEditPanel({ def, onApplied }: Props) {
           {nothing && <span className="muted small">Change a field to propose a revision.</span>}
         </div>
       </section>
+      <RenameIdPanel def={def} onRenamed={onRenamed} />
     </div>
   );
 }

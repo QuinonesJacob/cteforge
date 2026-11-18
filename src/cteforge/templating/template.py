@@ -49,7 +49,9 @@ from cteforge.parsing.analyze import (
     QueryAnalysis,
     find_grains,
     find_literals,
+    generate,
     parse,
+    reject_query_parameters,
 )
 from cteforge.parsing.types import compatible_variable_types
 
@@ -575,13 +577,36 @@ def _partial_grain_issues(specs: list[VariableSpec], analysis: QueryAnalysis) ->
     return issues
 
 
-def _place_placeholders(spec: VariableSpec, found: dict[str, FoundLiteral]) -> None:
+# ClickHouse writes a named placeholder as a query parameter `{name: Type}`, and parses one
+# back only with a type (sqlglot writes an untyped one as `{name: }`, which does not
+# parse). The type is informational: render replaces every placeholder with a literal and
+# cteforge never sends query parameters (ADR 0025).
+_CLICKHOUSE_PLACEHOLDER_TYPES = {
+    VariableType.TEXT: "String",
+    VariableType.TEXT_LIST: "String",
+    VariableType.NUMBER: "Float64",
+    VariableType.DATE: "Date",
+    VariableType.DATE_RANGE: "Date",
+    VariableType.BOOLEAN: "Bool",
+}
+
+
+def _placeholder(name: str, spec: VariableSpec, dialect: Dialect) -> exp.Placeholder:
+    if dialect is not Dialect.CLICKHOUSE:
+        return exp.Placeholder(this=name)
+    kind = exp.DataType.build(_CLICKHOUSE_PLACEHOLDER_TYPES[spec.type], dialect=str(dialect))
+    return exp.Placeholder(this=exp.var(name), kind=kind)
+
+
+def _place_placeholders(
+    spec: VariableSpec, found: dict[str, FoundLiteral], dialect: Dialect
+) -> None:
     """Swap each slot's literal(s) for its named placeholder in the parsed tree. Grain
     slots write nothing: their truncation nodes stay as written (ADR 0011)."""
     if spec.type is VariableType.GRAIN:
         return
     for slot in spec.slots:
-        placeholder = exp.Placeholder(this=slot.placeholder)
+        placeholder = _placeholder(slot.placeholder, spec, dialect)
         if spec.type is VariableType.TEXT_LIST:
             found[slot.literals[0]].predicate.set("expressions", [placeholder])
         else:
@@ -599,7 +624,8 @@ def apply_annotations(
     Raises AnnotationError when no template can be built (see module docstring).
     """
     tree = parse(sql, dialect)
-    found = {f.id: f for f in find_literals(tree)}
+    reject_query_parameters(tree, dialect)
+    found = {f.id: f for f in find_literals(tree, dialect)}
     grains = {g.id: g for g in find_grains(tree, dialect)}
     _check_column_units(analysis, grains)
     names = [a.name for a in annotations]
@@ -620,7 +646,5 @@ def apply_annotations(
         issues += spec_issues
     issues += _partial_grain_issues(specs, analysis)
     for spec in specs:
-        _place_placeholders(spec, found)
-    return AnnotatedTemplate(
-        template=tree.sql(dialect=str(dialect), pretty=True), variables=specs, issues=issues
-    )
+        _place_placeholders(spec, found, dialect)
+    return AnnotatedTemplate(template=generate(tree, dialect), variables=specs, issues=issues)

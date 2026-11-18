@@ -51,3 +51,7 @@ class PermissionDeniedError(CteforgeError):
 
 class PolicyError(CteforgeError):
     """Refused by policy: strict mode, draft definition, non-read-only SQL, ..."""
+
+
+class EmbeddingError(CteforgeError):
+    """The embedding model could not be loaded or used (meaning search; ADR 0023)."""

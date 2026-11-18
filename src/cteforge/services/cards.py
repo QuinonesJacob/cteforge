@@ -14,7 +14,7 @@ import uuid
 from collections.abc import Iterable, Mapping, Sequence
 from decimal import Decimal
 from enum import Enum
-from typing import Any
+from typing import Any, Literal
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field
@@ -29,13 +29,14 @@ from cteforge.domain.models import (
     Definition,
     DefinitionState,
     DefinitionVersionInfo,
+    FormerId,
     JoinEdge,
     Recipe,
     TeamMode,
     TrustLabel,
     VariableSpec,
 )
-from cteforge.domain.proposals import Proposal
+from cteforge.domain.proposals import Proposal, ProposalKind
 from cteforge.domain.variables import RangeShape, Role, VariableType, expected_format
 from cteforge.parsing.analyze import QueryAnalysis, analyze
 from cteforge.templating.render import render
@@ -182,6 +183,12 @@ class DefinitionCard(BaseModel):
     # variables as annotations whose literal IDs address that SQL.
     source_sql: str | None = None
     annotations: list[Annotation] | None = None
+    # Only when asked for (`include_search_document=True`): the generated Markdown text
+    # meaning search embeds for this version (ADR 0023).
+    search_document: str | None = None
+    # IDs this definition had before (ADR 0024), oldest rename first. They stay
+    # searchable; looking one up fails naming this id.
+    former_ids: list[str] = Field(default_factory=list)
 
 
 def card_from_definition(
@@ -213,10 +220,17 @@ def card_from_definition(
     )
 
 
+SearchMatch = Literal["keyword", "meaning", "both"]
+
+
 class SearchHit(BaseModel):
-    """One search result. `score` is a BM25 relevance with no fixed scale: compare it only
-    within one search. `matched_terms` / `matched_fields` say why it matched; a hit whose
-    only match is `dont_use_when` is the library saying NOT to use it for those words."""
+    """One search result. `score` is a relevance with no fixed scale (BM25, or the fused
+    keyword+meaning rank score): compare it only within one search. `match` says how it
+    matched — by its words (`keyword`), by what the question means (`meaning`: none of
+    the query's words appear in it), or `both`; None for an empty query (everything
+    listed). `matched_terms` / `matched_fields` say which words matched where; a hit whose
+    only keyword match is `dont_use_when` is the library saying NOT to use it for those
+    words. `note` is set when meaning search could not run (keyword-only results)."""
 
     model_config = _CARD
 
@@ -231,6 +245,8 @@ class SearchHit(BaseModel):
     score: float
     matched_terms: list[str] = Field(default_factory=list)  # Query terms found (tokenized).
     matched_fields: list[str] = Field(default_factory=list)  # Fields they were found in.
+    match: SearchMatch | None = None
+    note: str | None = None
     keywords: list[str] = Field(default_factory=list)
     variables: list[VariableCard] = Field(default_factory=list)
 
@@ -241,6 +257,8 @@ def search_hit(
     *,
     matched_terms: Sequence[str] = (),
     matched_fields: Sequence[str] = (),
+    match: SearchMatch | None = None,
+    note: str | None = None,
 ) -> SearchHit:
     return SearchHit(
         id=definition.id,
@@ -254,9 +272,80 @@ def search_hit(
         score=score,
         matched_terms=list(matched_terms),
         matched_fields=list(matched_fields),
+        match=match,
+        note=note,
         keywords=list(definition.keywords),
         variables=[variable_card(v) for v in definition.variables],
     )
+
+
+class SearchDocument(BaseModel):
+    """A definition version's generated search document (Markdown; ADR 0023)."""
+
+    model_config = _CARD
+
+    id: str
+    version: int
+    markdown: str
+
+
+class SearchIndexReport(BaseModel):
+    """`rebuild_search_index` result: how many versions were embedded or already current."""
+
+    model_config = _CARD
+
+    model: str
+    definitions: int  # Versions search can show (each needs a vector).
+    embedded: int
+    unchanged: int
+    removed: int  # Vectors deleted (other models; all of them with force).
+
+
+# ── References (ADR 0024) ────────────────────────────────────────────────────────────
+
+
+class RecipeReference(BaseModel):
+    """A recipe (its latest version) that uses a definition under `alias`; `pinned_version`
+    None = it floats on the latest usable version."""
+
+    model_config = _CARD
+
+    recipe_id: str
+    recipe_version: int
+    title: str
+    state: DefinitionState
+    alias: str
+    pinned_version: int | None = None
+
+
+class ProposalReference(BaseModel):
+    """A pending proposal that names a definition: `target` (it changes the definition) or
+    `uses` (its recipe uses it)."""
+
+    model_config = _CARD
+
+    proposal_id: str
+    kind: ProposalKind
+    target_id: str
+    summary: str = ""
+    author: str
+    created_at: dt.datetime
+    relation: Literal["target", "uses"]
+
+
+class DefinitionReferences(BaseModel):
+    """Everything inside cteforge that names a definition's id, shown before a rename
+    (ADR 0024). A rename updates all of it; `outside_warning` says what it cannot see."""
+
+    model_config = _CARD
+
+    id: str
+    version: int
+    state: DefinitionState
+    recipes: list[RecipeReference] = Field(default_factory=list)
+    proposals: list[ProposalReference] = Field(default_factory=list)
+    former_ids: list[FormerId] = Field(default_factory=list)
+    outside_warning: str = ""
 
 
 # ── Catalog (tables) ─────────────────────────────────────────────────────────────────
@@ -398,11 +487,18 @@ class DefinitionDrift(BaseModel):
 
 
 class TeamSettings(BaseModel):
-    """Team settings (DESIGN §8)."""
+    """Team settings (DESIGN §8, §9). `default_connection` is the admin's setting as
+    stored (None = unset); `effective_default_connection` is the profile used when a caller
+    names none (ADR 0021: the setting → CTEFORGE_DEFAULT_PROFILE → the only profile → None).
+    `issues`: a `default_connection_missing` warning when the setting names a profile that
+    is no longer configured."""
 
     model_config = _CARD
 
     mode: TeamMode
+    default_connection: str | None = None
+    effective_default_connection: str | None = None
+    issues: list[Issue] = Field(default_factory=list)
 
 
 # ── Proposals ────────────────────────────────────────────────────────────────────────
@@ -441,7 +537,10 @@ def _base_text(base: Definition | Recipe | JoinEdge | None) -> str:
 
 def proposal_diff(proposal: Proposal, base: Definition | Recipe | JoinEdge | None) -> str:
     """Unified diff of the stored form (codec YAML for definitions) of `base` → proposal.
-    No base (a new object) → every line is an addition."""
+    No base (a new object) → every line is an addition. A rename has no diff (its payload
+    says from → to; ADR 0024)."""
+    if proposal.kind is ProposalKind.RENAME_DEFINITION:
+        return ""
     old = _base_text(base)
     new = _proposed_text(proposal)
     if base is None:

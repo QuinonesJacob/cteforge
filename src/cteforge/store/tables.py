@@ -13,6 +13,7 @@ from sqlalchemy import (
     DateTime,
     ForeignKey,
     Integer,
+    LargeBinary,
     MetaData,
     String,
     Table,
@@ -118,4 +119,34 @@ settings = Table(
     metadata,
     Column("key", String(_ID), primary_key=True),
     Column("value", Text, nullable=False),
+)
+
+# Meaning search (ADR 0023): one vector per definition version per embedding model.
+# Derived data: rebuilt from the definitions at any time (`cteforge search-index rebuild`).
+search_vectors = Table(
+    "search_vectors",
+    metadata,
+    Column("definition_id", String(_ID), primary_key=True),
+    Column("version", Integer, primary_key=True),
+    Column("model", String(_ID), primary_key=True),
+    Column("dim", Integer, nullable=False),
+    Column("doc_sha256", String(64), nullable=False),
+    Column("vector", LargeBinary, nullable=False),  # little-endian float32 × dim
+    Column("created_at", DateTime(timezone=True), nullable=False),
+)
+
+# Renamed definition IDs (ADR 0024): one row per ID a definition no longer has.
+# `definition_id` is the CURRENT id (rewritten on each later rename, so a chain resolves in
+# one lookup); `renamed_to` is what that rename made it. Created by `create_all`; no
+# migration or schema version bump.
+former_ids = Table(
+    "former_ids",
+    metadata,
+    Column("seq", Integer, primary_key=True, autoincrement=True),  # rename order
+    Column("former_id", String(_ID), nullable=False, unique=True),
+    Column("definition_id", String(_ID), nullable=False, index=True),
+    Column("renamed_to", String(_ID), nullable=False),
+    Column("renamed_by", String(_ID), nullable=False),
+    Column("renamed_at", DateTime(timezone=True), nullable=False),
+    Column("proposal_id", String(64), nullable=True),
 )

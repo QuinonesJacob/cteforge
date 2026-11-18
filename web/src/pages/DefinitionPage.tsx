@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { useParams, useSearchParams } from "react-router-dom";
+import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { getDefinition, getDefinitionHistory, verifyDefinition } from "../api/endpoints";
 import type { DefinitionCard } from "../api/types";
 import { DefinitionEditPanel } from "../components/DefinitionEditPanel";
@@ -27,6 +27,7 @@ export function DefinitionPage() {
   const tab = (params.get("tab") as TabKey | null) ?? "overview";
   const { user } = useAuth();
   const toast = useToast();
+  const navigate = useNavigate();
   const [verifying, setVerifying] = useState(false);
 
   const def = useAsync((signal) => getDefinition(id, version, { signal }), [id, version]);
@@ -73,6 +74,9 @@ export function DefinitionPage() {
           <div className="def-meta">
             <StateBadge state={d.state} />
             <span className="mono small">{d.id}</span>
+            {d.former_ids && d.former_ids.length > 0 && (
+              <span className="small muted">formerly {d.former_ids.join(", ")}</span>
+            )}
             {d.verified_by && (
               <span className="small">
                 verified by <strong>{d.verified_by}</strong> on {formatDate(d.verified_at)}
@@ -142,6 +146,7 @@ export function DefinitionPage() {
               def.reload();
               history.reload();
             }}
+            onRenamed={(newId) => navigate(`/definitions/${encodeURIComponent(newId)}`)}
           />
         )}
         {activeTab === "history" &&

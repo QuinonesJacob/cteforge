@@ -28,3 +28,7 @@ Store templates as SQL text in the definition's source dialect, with named place
   constant, and same-query-back cannot see it (both sides parse the same). parsing finds such
   names in the SQL's tokens; templating refuses the import (AnnotationError: qualify the
   column or write a string unit). Qualified columns (`cfg.month`) stay Columns and are kept.
+- ClickHouse (2026-11-17, ADR 0025): placeholders are written as typed query parameters,
+  `{period__start: Date}`; sqlglot writes an untyped one as `{x: }`, which does not parse
+  back. The type is informational; trusted ClickHouse SQL that already contains query
+  parameters is refused, so every placeholder in a ClickHouse template is cteforge's.

@@ -33,6 +33,10 @@ SOURCES = {
         "SELECT date_trunc('month', o.created_at) AS m, COUNT(*) AS n FROM orders AS o "
         "WHERE o.created_at >= TIMESTAMP '2026-01-01' GROUP BY 1"
     ),
+    Dialect.REDSHIFT: (
+        "SELECT date_trunc('month', o.created_at) AS m, COUNT(*) AS n FROM orders AS o "
+        "WHERE o.created_at >= '2026-01-01'::TIMESTAMP GROUP BY 1"
+    ),
     Dialect.SNOWFLAKE: (
         "SELECT DATE_TRUNC(month, o.created_at) AS m, COUNT(*) AS n FROM orders AS o "
         "WHERE o.created_at >= '2026-01-01'::TIMESTAMP_NTZ GROUP BY 1"
@@ -45,16 +49,35 @@ SOURCES = {
         "SELECT DATE_TRUNC('MONTH', o.created_at) AS m, COUNT(*) AS n FROM orders AS o "
         "WHERE o.created_at >= TIMESTAMP '2026-01-01' GROUP BY 1"
     ),
+    Dialect.CLICKHOUSE: (
+        "SELECT toStartOfMonth(o.created_at) AS m, count() AS n FROM orders AS o "
+        "WHERE o.created_at >= toDateTime('2026-01-01 00:00:00') GROUP BY 1"
+    ),
 }
 
 # The truncation each dialect renders for each grain (native syntax, native week).
 EXPECTED = {
     Dialect.DUCKDB: "DATE_TRUNC('{U}', o.created_at)",
     Dialect.POSTGRES: "DATE_TRUNC('{U}', o.created_at)",
+    Dialect.REDSHIFT: "DATE_TRUNC('{U}', o.created_at)",
     Dialect.SNOWFLAKE: "DATE_TRUNC('{U}', o.created_at)",
     Dialect.BIGQUERY: "DATETIME_TRUNC(o.created_at, {U})",
     Dialect.DATABRICKS: "DATE_TRUNC('{U}', o.created_at)",
+    # ClickHouse's own function per grain (ADR 0025); week = toMonday (Monday).
+    Dialect.CLICKHOUSE: {
+        "DAY": "toStartOfDay(o.created_at)",
+        "WEEK": "toMonday(o.created_at)",
+        "MONTH": "toStartOfMonth(o.created_at)",
+        "QUARTER": "toStartOfQuarter(o.created_at)",
+        "YEAR": "toStartOfYear(o.created_at)",
+    },
 }
+
+
+def expected(dialect: Dialect, unit: Grain) -> str:
+    spelled = EXPECTED[dialect]
+    key = unit.value.upper()
+    return spelled[key] if isinstance(spelled, dict) else spelled.format(U=key)
 
 
 def build(sql: str, dialect: Dialect, annotations: list[Annotation], schema=SCHEMA) -> Definition:
@@ -109,7 +132,7 @@ def test_render_every_grain_natively(dialect, unit):
     result = render(definition, {"time_grain": unit.value})
     assert not result.transpiled and result.issues == []
     assert result.values == {"time_grain": unit.value}
-    assert EXPECTED[dialect].format(U=unit.value.upper()) in result.sql
+    assert expected(dialect, unit) in result.sql
     # The rebuilt tree survives a sqlglot round trip: re-parsing the rendered SQL gives the
     # same tree and the requested unit back.
     tree, _, _ = render_tree(definition, {"time_grain": unit.value})

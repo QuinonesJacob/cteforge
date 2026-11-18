@@ -82,6 +82,24 @@ labeled), `parse_query`, `propose_definition`, `revise_definition`, `propose_joi
 `propose_recipe`, and for discovery `list_recipes`, `list_joins` and `describe_tables`. There
 is no approve or verify tool: people do that (GUI, API, CLI).
 
+## Search
+
+`search` (MCP, GUI, `cteforge search`) matches **words** (names, keywords, tables, IDs) and
+**meaning** (a question asked in other words), merged into one ranking; each hit says
+whether it matched by `keyword`, `meaning` or `both` (ADR 0023). Meaning search runs inside
+the server with a small embedding model (`BAAI/bge-small-en-v1.5` via fastembed, CPU only,
+nothing sent elsewhere); vectors are stored in cteforge's own database.
+
+- The first search downloads the model once (about 65 MB) into `CTEFORGE_EMBED_CACHE`
+  (default `~/.cache/cteforge/models`). `cteforge serve` and `cteforge mcp` load it in the
+  background and answer by keyword until it is ready.
+- Servers without internet: run `cteforge search-index download-model` where there is
+  internet, then copy that directory to the server and point `CTEFORGE_EMBED_CACHE` at it.
+- `CTEFORGE_SEARCH_EMBEDDINGS=off` turns meaning search off (keyword search only). If the
+  model can't load, search falls back to keywords and says so in a note.
+- `cteforge search-index rebuild [--force]` (admin) re-embeds the library, e.g. after
+  changing models; normally vectors are kept up to date automatically.
+
 ## Concepts
 
 - **Definition** — one trusted query plus its meaning, keywords, "use when / don't use when",
@@ -129,6 +147,7 @@ All commands act as `CTEFORGE_USER` against `CTEFORGE_DB_URL`. Run `cteforge COM
 | `serve [--host --port]` | GUI at `/`, HTTP API at `/api/v1`, MCP at `/mcp` |
 | `mcp` | MCP over stdio |
 | `search QUERY` · `run --use ALIAS=ID --vars JSON [--select SQL]` | Use the library |
+| `search-index rebuild [--force]` · `search-index download-model` | Meaning-search vectors and model (see Search) |
 | `db init` | Create the database |
 | `user add NAME [--role R] [--agent] [--bootstrap]` · `user list\|role\|token` | Users and tokens (token printed once) |
 | `settings show` · `settings mode strict\|open` | Team mode |
@@ -140,7 +159,8 @@ All commands act as `CTEFORGE_USER` against `CTEFORGE_DB_URL`. Run `cteforge COM
 Environment: `CTEFORGE_DB_URL` (default `sqlite:///cteforge.db`; Postgres via SQLAlchemy URL),
 `CTEFORGE_CONNECTIONS` (path to connections.yml), `CTEFORGE_DEFAULT_PROFILE`,
 `CTEFORGE_AUTH` (`on`; `off` makes every HTTP call the local admin and is refused unless bound
-to localhost), `CTEFORGE_USER` (stdio MCP and CLI).
+to localhost), `CTEFORGE_USER` (stdio MCP and CLI), `CTEFORGE_SEARCH_EMBEDDINGS` (`on`; `off` =
+keyword search only), `CTEFORGE_EMBED_CACHE` (embedding model directory).
 
 ## Warehouse profiles
 
@@ -148,8 +168,9 @@ Profiles live in a `connections.yml` (see
 [examples/connections.example.yml](examples/connections.example.yml)). Secrets are **never**
 written there: `secrets_env` names the environment variable that holds each one, resolved
 only at connect time and never logged or returned (ADR 0020). Drivers other than DuckDB are
-extras: `pip install 'cteforge[postgres]'` (also Redshift), `[snowflake]`, `[bigquery]`,
-`[databricks]`.
+extras: `pip install 'cteforge[postgres]'`, `[redshift]` (AWS `redshift_connector`; Redshift is
+its own dialect, ADR 0022), `[snowflake]`, `[bigquery]`, `[databricks]`, `[clickhouse]`
+(ClickHouse Inc.'s `clickhouse-connect`, HTTP/HTTPS; ADR 0025).
 
 ```yaml
 profiles:
@@ -158,12 +179,23 @@ profiles:
     options: {host: db.internal, port: 5432, dbname: analytics, user: cteforge_ro}
     secrets_env: {password: PG_PASSWORD}
     statement_timeout_s: 120   # default 60; null turns it off
+  warehouse_rs:
+    dialect: redshift          # host, port, database, user, ssl, sslmode, timeout, ...
+    options: {host: wh.abc123.us-east-1.redshift.amazonaws.com, port: 5439, database: analytics, user: cteforge_ro}
+    secrets_env: {password: RS_PASSWORD}   # password auth only; IAM/IdP options are refused
+  traces_ch:
+    dialect: clickhouse        # host, port, database, user, secure, verify, ca_cert, ...
+    options: {host: ch.internal, port: 8443, secure: true, database: agent_traces, user: cteforge_ro}
+    secrets_env: {password: CH_PASSWORD}
+    # optional scan guards, sent with every query (unset by default):
+    # options: {..., max_rows_to_read: 500000000, max_bytes_to_read: 50000000000}
 ```
 
 Every statement is cut off after the profile's `statement_timeout_s` and fails with
-`query timed out after Ns` (DuckDB: interrupt; Postgres: transaction-local
+`query timed out after Ns` (DuckDB: interrupt; Postgres and Redshift: transaction-local
 `statement_timeout`; Snowflake: `STATEMENT_TIMEOUT_IN_SECONDS`; BigQuery: job timeout and
-cancel; Databricks: `STATEMENT_TIMEOUT` session configuration).
+cancel; Databricks: `STATEMENT_TIMEOUT` session configuration; ClickHouse: `max_execution_time`
+on every request).
 
 **Always connect as a dedicated read-only role.** cteforge refuses non-SELECT SQL, enforces
 row limits and uses read-only sessions where the warehouse has them, but grants are the real
@@ -172,7 +204,9 @@ guarantee:
 | Warehouse | Read-only setup |
 |---|---|
 | DuckDB | Opened read-only with external access disabled; one SELECT per call. No setup. |
-| Postgres / Redshift | Every transaction is `BEGIN READ ONLY` and rolled back. Still use a role with only `USAGE` + `SELECT` (`CREATE ROLE cteforge_ro LOGIN; GRANT USAGE ON SCHEMA s TO cteforge_ro; GRANT SELECT ON ALL TABLES IN SCHEMA s TO cteforge_ro;`). |
+| Postgres | Every transaction is `BEGIN READ ONLY` and rolled back. Still use a role with only `USAGE` + `SELECT` (`CREATE ROLE cteforge_ro LOGIN; GRANT USAGE ON SCHEMA s TO cteforge_ro; GRANT SELECT ON ALL TABLES IN SCHEMA s TO cteforge_ro;`). |
+| Redshift | Every call is its own `BEGIN READ ONLY` transaction, rolled back. Still use a user with only `USAGE` + `SELECT` (`CREATE USER cteforge_ro PASSWORD '…'; GRANT USAGE ON SCHEMA s TO cteforge_ro; GRANT SELECT ON ALL TABLES IN SCHEMA s TO cteforge_ro;`; Spectrum: `GRANT USAGE ON SCHEMA <external schema>`), no superuser, not the cluster owner. Column types come from `SVV_COLUMNS`, which every user can read for all local tables unless the admin enables metadata security (`ALTER SYSTEM SET metadata_security = true`). |
+| ClickHouse | Every request carries `readonly = 2` (reads only; `readonly` itself can't be changed), `max_execution_time` and the optional scan guards; one statement per HTTP request. `readonly = 2` still lets a query's own `SETTINGS` clause raise other limits, so give the user a settings profile with constraints and only SELECT grants: `CREATE SETTINGS PROFILE cteforge_ro_profile SETTINGS readonly = 2 CONST, allow_ddl = 0 CONST, max_execution_time = 60 MAX 300, max_memory_usage = 10000000000 MAX 10000000000; CREATE USER cteforge_ro IDENTIFIED WITH sha256_password BY '…' SETTINGS PROFILE cteforge_ro_profile; GRANT SELECT ON agent_traces.* TO cteforge_ro;` No grants on table-function sources (`url`, `s3`, `remote`, …): those read outside the warehouse and are governed by grants, not readonly. Not `readonly = 1`: the connector's own per-request timeout would then be refused. |
 | Snowflake | No read-only session mode: set `options.role` to a role with only USAGE on warehouse/database/schemas and SELECT on tables. One statement per call. |
 | BigQuery | Service account with `roles/bigquery.dataViewer` (datasets) + `roles/bigquery.jobUser` (project). Every job sets `maximum_bytes_billed` (default 10 GiB); EXPLAIN is a dry run. |
 | Databricks | No read-only session mode: a service principal with only `USE CATALOG`, `USE SCHEMA`, `SELECT` and CAN USE on the SQL warehouse. |
@@ -190,7 +224,7 @@ guarantee:
           ┌──────────────────────────┴──────────────────────────────┐
   pure core                                               I/O adapters
   domain ← parsing ← templating ← {compose, trust}        warehouse/ (hardened) · store/
-  (sqlglot only in parsing/templating/compose)            audit/ · files/
+  (sqlglot only in parsing/templating/compose)            audit/ · files/ · embedding/
 ```
 
 Layering is enforced by import-linter (`uv run lint-imports`). Each directory has a
@@ -203,7 +237,8 @@ Layering is enforced by import-linter (`uv run lint-imports`). Each directory ha
 [0015 the analyst decides](docs/decisions/0015-analyst-decides-tool-reports-facts.md) ·
 [0018 MCP and auth](docs/decisions/0018-mcp-and-auth.md) ·
 [0019 HTTP API and GUI](docs/decisions/0019-http-api-and-gui.md) ·
-[0020 warehouse connectors](docs/decisions/0020-warehouse-connectors.md).
+[0020 warehouse connectors](docs/decisions/0020-warehouse-connectors.md) ·
+[0023 meaning search](docs/decisions/0023-meaning-search.md).
 
 ## Development
 
@@ -229,16 +264,17 @@ call the GUI makes.
 ## Status and limitations
 
 - Pre-alpha: APIs, the database schema and the file format may change.
-- Only **DuckDB** is tested against a real warehouse. The Postgres/Redshift, Snowflake,
-  BigQuery and Databricks connectors (including their statement timeouts) are unit-tested
-  against fake drivers and still need validation on real warehouses. The library store is
+- Only **DuckDB** is tested against a real warehouse. The Postgres, Redshift, Snowflake,
+  BigQuery, Databricks and ClickHouse connectors (including their statement timeouts) are
+  unit-tested against fake drivers and still need validation on real warehouses
+  (ClickHouse has an opt-in live suite: `tests/integration/test_clickhouse_live.py`). The library store is
   tested on SQLite; Postgres is untested in CI.
 - A query is not cancelled when the client disconnects; it runs until it finishes or hits
   its profile's `statement_timeout_s`.
 - Cross-dialect rendering uses sqlglot (pinned at 30.31.0) and is labeled and lowers trust.
   Known transpile defects (kept visible in `tests/golden/`): Postgres has no
   `ROUND(double precision, int)`; BigQuery gets `TIMESTAMP_TRUNC` / `PARSE_TIMESTAMP` on
-  `DATETIME` columns; Postgres `TO_TIMESTAMP` is zone-aware against naive columns. Week
+  `DATETIME` columns; Postgres and Redshift `TO_TIMESTAMP` are zone-aware against naive columns. Week
   starts differ by warehouse (DESIGN §13). Prefer rendering in the source dialect.
 - `cteforge demo` needs a source checkout (it reads `examples/`).
 

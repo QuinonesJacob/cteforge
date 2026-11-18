@@ -12,13 +12,24 @@ import pytest
 from cteforge.domain.audit import AuditKind, AuditOutcome
 from cteforge.domain.connections import WarehouseProfile
 from cteforge.domain.dialects import Dialect
-from cteforge.domain.errors import NotFoundError, PermissionDeniedError, SqlParseError
+from cteforge.domain.errors import (
+    NotFoundError,
+    PermissionDeniedError,
+    PolicyError,
+    SqlParseError,
+)
 from cteforge.domain.issues import IssueCode, Severity
 from cteforge.domain.models import Definition, DefinitionState
 from cteforge.domain.users import ActorKind, User, UserRole
 from cteforge.files.definitions import load_definition
+from cteforge.services import _library
 from cteforge.services.audit_log import list_audit
-from cteforge.services.context import AppConfig, AppContext, open_context
+from cteforge.services.context import (
+    AppConfig,
+    AppContext,
+    open_context,
+    save_default_connection,
+)
 from cteforge.services.describe import definition_history, get_definition
 from cteforge.services.parse_query import parse_query
 
@@ -162,6 +173,61 @@ def test_parse_unknown_table_and_no_profile(ctx: AppContext, tmp_path: Path) -> 
         report = parse_query(bare, AGENT, SQL, Dialect.DUCKDB)
         assert [i.code for i in report.issues] == [IssueCode.CHECKS_INCOMPLETE]
         assert len(report.literals) == 7  # 2 dates, 2 statuses, 2 regions, paid
+
+
+def test_parse_omitted_dialect_follows_the_connection(ctx: AppContext, tmp_path: Path) -> None:
+    """Explicit dialect → the profile's dialect (given, else the default connection) →
+    PolicyError (ADR 0021)."""
+    report = parse_query(ctx, AGENT, SQL)
+    assert report.dialect is Dialect.DUCKDB  # the only profile's
+    assert IssueCode.DIALECT_MISMATCH not in {i.code for i in report.issues}
+    explicit = parse_query(ctx, AGENT, SQL, Dialect.POSTGRES)
+    assert explicit.dialect is Dialect.POSTGRES
+    assert IssueCode.DIALECT_MISMATCH in {i.code for i in explicit.issues}
+    assert last_event(ctx).extra["dialect"] == "postgres"
+    config = AppConfig(db_url=f"sqlite:///{tmp_path / 'bare.db'}")
+    with open_context(config, profiles=[]) as bare:
+        with pytest.raises(PolicyError, match="ask an admin to set a default connection"):
+            parse_query(bare, AGENT, SQL)
+        assert parse_query(bare, AGENT, SQL, "duckdb").dialect is Dialect.DUCKDB
+
+
+def test_default_connection_picks_the_profile_and_its_dialect(
+    tmp_path: Path, wh_file: Path
+) -> None:
+    """The admin's default connection → CTEFORGE_DEFAULT_PROFILE → the only one → none;
+    a stored name no longer configured falls back with a warning, never fails."""
+    pg = WarehouseProfile(name="pg", dialect=Dialect.POSTGRES, options={"host": "nowhere"})
+    profiles = [*_profiles(wh_file), pg]
+    config = AppConfig(db_url=f"sqlite:///{tmp_path / 'two.db'}")
+    with open_context(config, profiles=profiles) as two:
+        with pytest.raises(PolicyError, match="No dialect given"):
+            parse_query(two, AGENT, SQL)  # two profiles, no default
+        save_default_connection(two, "pg")
+        assert two.warehouses.default_name == "pg"
+        assert _library.resolve_dialect(two, None) is Dialect.POSTGRES
+        assert _library.resolve_dialect(two, None, "demo") is Dialect.DUCKDB  # profile wins
+        assert parse_query(two, AGENT, SQL, profile="demo").dialect is Dialect.DUCKDB
+        save_default_connection(two, "demo")
+        report = parse_query(two, AGENT, SQL)
+        assert (report.dialect, report.schema_found) == (Dialect.DUCKDB, True)
+        two.store.set_setting("default_connection", "gone")  # removed from connections.yml
+        with pytest.raises(PolicyError, match="No dialect given"):
+            parse_query(two, AGENT, SQL)  # no fallback: two profiles, no env default
+        assert parse_query(two, AGENT, SQL, "duckdb").issues[0].code is (
+            IssueCode.DEFAULT_CONNECTION_MISSING
+        )
+    env_default = config.model_copy(update={"default_profile": "demo"})
+    with open_context(env_default, profiles=profiles) as fallback:
+        report = parse_query(fallback, AGENT, SQL)  # "gone" is still stored
+        assert (report.dialect, report.schema_found) == (Dialect.DUCKDB, True)
+        missing = [i for i in report.issues if i.code is IssueCode.DEFAULT_CONNECTION_MISSING]
+        assert len(missing) == 1 and missing[0].severity is Severity.WARNING
+        assert "'gone'" in missing[0].message and "'demo' is used instead" in missing[0].message
+        save_default_connection(fallback, "pg")  # the setting beats CTEFORGE_DEFAULT_PROFILE
+        assert fallback.warehouses.default_name == "pg"
+        save_default_connection(fallback, None)
+        assert fallback.warehouses.default_name == "demo"
 
 
 def test_parse_errors(ctx: AppContext) -> None:

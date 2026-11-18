@@ -65,6 +65,7 @@ from cteforge.domain.errors import (
     VariableValueError,
     WarehouseError,
 )
+from cteforge.services import search_index
 from cteforge.services.context import AppConfig, AppContext, open_context
 
 logger = logging.getLogger("cteforge.api")
@@ -452,6 +453,8 @@ def create_app(
         owned = app.state.ctx is None
         if owned:
             app.state.ctx = await run_in_threadpool(open_context, config)
+            # Meaning search (ADR 0023): load the model in the background, never in a request.
+            search_index.start_background(app.state.ctx)
         try:
             async with AsyncExitStack() as stack:
                 mcp = _build_mcp(app.state.ctx, bind_host)

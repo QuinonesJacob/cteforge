@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
-import { getDefinition, parseQuery, proposeDefinition, reviseDefinition } from "../api/endpoints";
+import { getDefinition, listProfiles, parseQuery, proposeDefinition, reviseDefinition } from "../api/endpoints";
 import type { DefinitionCard, Dialect, ParseReport, ProposalOutcome } from "../api/types";
 import { ErrorState } from "../components/ErrorState";
 import { Loading } from "../components/Loading";
@@ -18,8 +18,11 @@ import { VariableDraftList } from "../components/VariableDraftList";
 import { ApiError } from "../api/client";
 import {
   carryOverDrafts,
+  connectionDialectHint,
+  defaultImportDialect,
   descriptionRule,
   emptyMetadata,
+  importConnection,
   newDraft,
   newGrainDraft,
   toAnnotation,
@@ -57,7 +60,10 @@ function ImportFlow({ reviseId }: { reviseId: string | null }) {
   const [step, setStep] = useState(0);
   const [maxStep, setMaxStep] = useState(0);
   const [sql, setSql] = useState("");
+  // The dialect follows the connection (ADR 0021): it starts as the default connection's
+  // and switches with the profile until the person picks a dialect for this import.
   const [dialect, setDialect] = useState<Dialect>("duckdb");
+  const [dialectTouched, setDialectTouched] = useState(false);
   const [profile, setProfile] = useState("");
   const [report, setReport] = useState<ParseReport | null>(null);
   const [parsed, setParsed] = useState<ParsedInput | null>(null);
@@ -78,6 +84,19 @@ function ImportFlow({ reviseId }: { reviseId: string | null }) {
     [reviseId],
   );
   const seeded = useRef(false);
+  const profiles = useAsync((signal) => listProfiles({ signal }), []);
+  const suggested = useMemo(() => defaultImportDialect(profiles.data, profile), [profiles.data, profile]);
+  // A new import starts on the effective default connection (`default: true`).
+  const profileSeeded = useRef(false);
+  useEffect(() => {
+    if (reviseId || profileSeeded.current || !profiles.data) return;
+    profileSeeded.current = true;
+    const initial = importConnection(profiles.data, "");
+    if (initial) setProfile((p) => p || initial.name);
+  }, [reviseId, profiles.data]);
+  useEffect(() => {
+    if (!reviseId && !dialectTouched) setDialect(suggested.dialect);
+  }, [reviseId, dialectTouched, suggested.dialect]);
 
   const byId = useMemo(() => Object.fromEntries((report?.literals ?? []).map((l) => [l.id, l])), [report]);
   const ranges = report?.ranges ?? [];
@@ -255,6 +274,7 @@ function ImportFlow({ reviseId }: { reviseId: string | null }) {
     setEditing(null);
     setMeta(emptyMetadata(user?.name ?? ""));
     setIdTouched(false);
+    setDialectTouched(false);
     setShowMetaErrors(false);
     setOutcome(null);
     setSubmitError(null);
@@ -287,7 +307,11 @@ function ImportFlow({ reviseId }: { reviseId: string | null }) {
           sql={sql}
           onSql={setSql}
           dialect={dialect}
-          onDialect={setDialect}
+          onDialect={(d) => {
+            setDialect(d);
+            setDialectTouched(true);
+          }}
+          dialectHint={connectionDialectHint(dialect, suggested.connection)}
           profile={profile}
           onProfile={setProfile}
           parsing={parsing}

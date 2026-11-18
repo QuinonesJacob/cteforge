@@ -110,7 +110,7 @@ def test_auth_off_on_loopback_acts_as_local_admin(new_context, tmp_path, host: s
             assert response.status_code == 200
             assert response.json()["name"] == "me"
             assert response.json()["role"] == "admin"
-            assert client.get("/api/v1/settings").json() == {"mode": "open"}
+            assert client.get("/api/v1/settings").json()["mode"] == "open"
 
 
 def test_auth_off_rejects_foreign_host_and_origin(new_context, tmp_path, check_error) -> None:
@@ -171,6 +171,8 @@ def test_factory_without_ctx_opens_and_closes_context(
         assert client.get("/api/v1/me").json()["name"] == "envuser"
         assert client.get("/api/v1/profiles").json() == []
         assert app.state.ctx is not None
+        # Meaning search never loads the model inside a request (ADR 0023).
+        assert app.state.ctx.background_model is True
     assert app.state.ctx is None
     assert (tmp_path / "env.db").exists()
 

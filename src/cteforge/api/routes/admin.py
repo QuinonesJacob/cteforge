@@ -50,4 +50,11 @@ def get_settings(ctx: Ctx, user: CurrentUser) -> TeamSettings:
 
 @router.put("/settings", response_model=TeamSettings)
 def set_settings(ctx: Ctx, user: CurrentUser, body: SettingsRequest) -> TeamSettings:
-    return admin.set_settings(ctx, user, body.mode)
+    """Admin only. Applies `default_connection` first (it can fail: unknown profile), then
+    `mode`; each change is its own audited call."""
+    settings: TeamSettings | None = None
+    if "default_connection" in body.model_fields_set:
+        settings = admin.set_default_connection(ctx, user, body.default_connection)
+    if body.mode is not None:
+        settings = admin.set_settings(ctx, user, body.mode)
+    return settings if settings is not None else admin.get_settings(ctx, user)

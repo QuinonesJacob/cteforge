@@ -11,6 +11,7 @@ from cteforge.api.schemas import (
     ProposeJoinRequest,
     ProposeRecipeRequest,
     RejectRequest,
+    RenameDefinitionRequest,
     ReviseDefinitionRequest,
 )
 from cteforge.domain.proposals import ProposalStatus
@@ -49,6 +50,20 @@ def revise_definition(
         dialect=body.dialect,
         metadata=body.metadata,
         annotations=body.annotations,
+        summary=body.summary,
+    )
+
+
+@router.post("/proposals/definitions/{id}/rename", response_model=ProposalOutcome)
+def rename_definition(
+    ctx: Ctx, user: CurrentUser, id: str, body: RenameDefinitionRequest
+) -> ProposalOutcome:
+    return propose.rename_definition(
+        ctx,
+        user,
+        id=id,
+        new_id=body.new_id,
+        base_version=body.base_version,
         summary=body.summary,
     )
 

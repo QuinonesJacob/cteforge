@@ -11,7 +11,14 @@ from cteforge.api.auth import Ctx, CurrentUser
 from cteforge.api.schemas import ParseRequest, VerifyRequest
 from cteforge.domain.models import DefinitionVersionInfo, JoinEdge, Recipe
 from cteforge.services import catalog, describe, parse_query, review, search
-from cteforge.services.cards import DefinitionCard, ParseReport, SearchHit, TableCard
+from cteforge.services.cards import (
+    DefinitionCard,
+    DefinitionReferences,
+    ParseReport,
+    SearchDocument,
+    SearchHit,
+    TableCard,
+)
 
 router = APIRouter(tags=["definitions"])
 
@@ -39,6 +46,18 @@ def get_definition(
     include_source: bool = False,
 ) -> DefinitionCard:
     return describe.get_definition(ctx, user, id, version, include_source=include_source)
+
+
+@router.get("/definitions/{id}/search-document", response_model=SearchDocument)
+def search_document(
+    ctx: Ctx, user: CurrentUser, id: str, version: int | None = None
+) -> SearchDocument:
+    return describe.search_document(ctx, user, id, version)
+
+
+@router.get("/definitions/{id}/references", response_model=DefinitionReferences)
+def definition_references(ctx: Ctx, user: CurrentUser, id: str) -> DefinitionReferences:
+    return describe.definition_references(ctx, user, id)
 
 
 @router.get("/definitions/{id}/history", response_model=list[DefinitionVersionInfo])

@@ -31,6 +31,8 @@ export function LibraryPage() {
   }, [text, q, params, setParams]);
 
   const { data, error, loading, reload } = useAsync((signal) => searchDefinitions(q, drafts, { signal }), [q, drafts]);
+  // Meaning search could not run (ADR 0023): every hit carries the same note.
+  const note = data?.find((hit) => hit.note)?.note;
 
   function toggleDrafts(on: boolean) {
     const next = new URLSearchParams(params);
@@ -95,6 +97,11 @@ export function LibraryPage() {
             {plural(data?.length ?? 0, "definition")}
             {loading && " · updating…"}
           </p>
+          {note && (
+            <p className="muted small" role="note">
+              {note}
+            </p>
+          )}
           <div className="hit-grid">
             {(data ?? []).map((hit) => (
               <SearchHitCard key={hit.id} hit={hit} />

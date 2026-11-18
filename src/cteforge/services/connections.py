@@ -19,20 +19,25 @@ from cteforge.domain.dialects import Dialect
 from cteforge.domain.errors import CodecError, NotFoundError, PolicyError, WarehouseError
 from cteforge.warehouse.base import QueryResult, Warehouse
 from cteforge.warehouse.bigquery import BigQueryWarehouse
+from cteforge.warehouse.clickhouse import ClickHouseWarehouse
 from cteforge.warehouse.databricks import DatabricksWarehouse
 from cteforge.warehouse.duckdb import DuckDBWarehouse
 from cteforge.warehouse.postgres import PostgresWarehouse
+from cteforge.warehouse.redshift import RedshiftWarehouse
 from cteforge.warehouse.snowflake import SnowflakeWarehouse
 
 Opener = Callable[[WarehouseProfile], Warehouse]
+TeamDefault = Callable[[], str | None]  # Reads the admin's default connection (a setting).
 
 # Connectors import their drivers lazily, so importing them here costs nothing.
 OPENERS: dict[Dialect, Opener] = {
     Dialect.DUCKDB: DuckDBWarehouse.from_profile,
     Dialect.POSTGRES: PostgresWarehouse,
+    Dialect.REDSHIFT: RedshiftWarehouse,
     Dialect.SNOWFLAKE: SnowflakeWarehouse,
     Dialect.BIGQUERY: BigQueryWarehouse,
     Dialect.DATABRICKS: DatabricksWarehouse,
+    Dialect.CLICKHOUSE: ClickHouseWarehouse,
 }
 
 
@@ -131,12 +136,17 @@ class ProfileSummary(BaseModel):
 
     name: str
     dialect: Dialect
+    default: bool = False  # The profile used when a caller names none.
 
 
 class WarehouseRegistry:
     """Profile name → warehouse, opened on first use and cached until `close_all`.
 
-    Default profile: `default` if given, else the only profile when exactly one exists.
+    Default profile — the effective default connection (ADR 0021), in order: the admin's
+    setting (`team_default()`, read on every lookup so a change applies at once) when it
+    names a configured profile; else `default` (CTEFORGE_DEFAULT_PROFILE); else the only
+    profile when exactly one exists; else none. A stored setting naming a profile that is
+    no longer configured is skipped (`missing_team_default` reports it) instead of failing.
     Thread-safe: opening is locked, and every opened warehouse is wrapped in a
     `SerializedWarehouse`, so concurrent callers never share a result set on the one
     driver connection. A warehouse that fails to open is not cached (the next call
@@ -148,6 +158,7 @@ class WarehouseRegistry:
         profiles: Iterable[WarehouseProfile] = (),
         *,
         default: str | None = None,
+        team_default: TeamDefault | None = None,
         opener: Opener = open_profile,
         busy_timeout: float = BUSY_TIMEOUT_SECONDS,
     ) -> None:
@@ -163,6 +174,7 @@ class WarehouseRegistry:
                 f"(configured: {self.names() or 'none'})"
             )
         self._default = default
+        self._team_default = team_default
         self._opener = opener
         self._open: dict[str, SerializedWarehouse] = {}
         self._lock = threading.Lock()
@@ -171,10 +183,31 @@ class WarehouseRegistry:
         return list(self._profiles)
 
     def summaries(self) -> list[ProfileSummary]:
-        return [ProfileSummary(name=p.name, dialect=p.dialect) for p in self._profiles.values()]
+        default = self.default_name  # One settings read for the whole list.
+        return [
+            ProfileSummary(name=p.name, dialect=p.dialect, default=p.name == default)
+            for p in self._profiles.values()
+        ]
+
+    def has(self, name: str) -> bool:
+        return name in self._profiles
+
+    def _stored_default(self) -> str | None:
+        return self._team_default() if self._team_default is not None else None
+
+    @property
+    def missing_team_default(self) -> str | None:
+        """The admin's default connection when it names a profile that is not configured
+        (e.g. removed from connections.yml); None when unset or valid."""
+        stored = self._stored_default()
+        return stored if stored is not None and stored not in self._profiles else None
 
     @property
     def default_name(self) -> str | None:
+        """The effective default connection (see the class docstring), or None."""
+        stored = self._stored_default()
+        if stored is not None and stored in self._profiles:
+            return stored
         if self._default is not None:
             return self._default
         return next(iter(self._profiles)) if len(self._profiles) == 1 else None
@@ -195,9 +228,15 @@ class WarehouseRegistry:
             )
         default = self.default_name
         if default is None:
+            missing = self.missing_team_default
+            gone = (
+                f"; the default connection '{missing}' is no longer configured"
+                if missing is not None
+                else ""
+            )
             raise PolicyError(
-                f"Several warehouse profiles are configured ({self.names()}); name one "
-                "or set CTEFORGE_DEFAULT_PROFILE"
+                f"Several warehouse profiles are configured ({self.names()}){gone}; name "
+                "one, or ask an admin to set a default connection"
             )
         return default
 
@@ -206,7 +245,7 @@ class WarehouseRegistry:
 
     def summary(self, name: str | None = None) -> ProfileSummary:
         p = self.profile(name)
-        return ProfileSummary(name=p.name, dialect=p.dialect)
+        return ProfileSummary(name=p.name, dialect=p.dialect, default=p.name == self.default_name)
 
     def get(self, name: str | None = None) -> Warehouse:
         """The opened warehouse for `name` (or the default profile)."""

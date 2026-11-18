@@ -1,4 +1,4 @@
-"""Postgres / Redshift connector via psycopg 3 (HARDENED module — read CLAUDE.md here before
+"""Postgres connector via psycopg 3 (HARDENED module — read CLAUDE.md here before
 editing). Install with ``pip install 'cteforge[postgres]'``.
 
 Profile ``options`` are psycopg connection keywords (host, port, dbname or database, user,
@@ -15,7 +15,7 @@ session settings it changes (``set_config(...)``) do not affect the next ``BEGIN
 ONLY``. This is defence in depth, not the guarantee: functions with side effects (e.g.
 dblink) are only stopped by grants. Always connect as a dedicated read-only role, e.g.
 ``CREATE ROLE cteforge_ro LOGIN; GRANT USAGE ON SCHEMA s TO cteforge_ro; GRANT SELECT ON
-ALL TABLES IN SCHEMA s TO cteforge_ro;`` (Redshift: a user with only SELECT grants).
+ALL TABLES IN SCHEMA s TO cteforge_ro;``. Redshift has its own connector (redshift.py).
 Connection poolers in transaction mode (pgbouncer) need prepared-statement support.
 
 Timeout: every call first runs ``SELECT set_config('statement_timeout', <ms>, true)``

@@ -1,3 +1,4 @@
+import { useState } from "react";
 import type { MetadataDraft } from "../lib/importBuilder";
 import { slugify } from "../lib/importBuilder";
 import { Field } from "./Field";
@@ -9,14 +10,25 @@ interface Props {
   showErrors: boolean;
   idTouched: boolean;
   onIdTouched: () => void;
-  /** Revising: the ID is fixed (a definition's id never changes). */
+  /** Revising: the ID can't be edited here; renames go through "Rename ID" (ADR 0024). */
   idLocked?: boolean;
 }
 
-/** Step 3: what the definition means and when to use it. */
+/**
+ * Step 3: what the definition means and when to use it. A new definition's ID is filled in
+ * from the title and locked; "Edit ID" unlocks it (ADR 0024).
+ */
 export function MetadataForm({ value, onChange, errors, showErrors, idTouched, onIdTouched, idLocked = false }: Props) {
+  // A remount (Back, then Continue) keeps an ID the person typed editable.
+  const [idEditing, setIdEditing] = useState(() => idTouched && !idLocked);
   const set = <K extends keyof MetadataDraft>(key: K, v: MetadataDraft[K]) => onChange({ ...value, [key]: v });
   const err = (k: keyof MetadataDraft) => (showErrors ? errors[k] : undefined);
+  const idReadOnly = idLocked || !idEditing;
+  const idHint = idLocked
+    ? "Agents and recipes use this name. To change it, use Rename ID on the definition page."
+    : idEditing
+      ? "Agents and recipes use this name. lower_snake_case: letters, digits, single underscores."
+      : "Filled in from the title. Agents and recipes use this name.";
   return (
     <div className="meta-form">
       <div className="grid-2">
@@ -26,7 +38,7 @@ export function MetadataForm({ value, onChange, errors, showErrors, idTouched, o
             type="text"
             value={value.title}
             onChange={(e) =>
-              onChange({ ...value, title: e.target.value, id: idTouched || idLocked ? value.id : slugify(e.target.value) })
+              onChange({ ...value, title: e.target.value, id: idReadOnly && !idLocked ? slugify(e.target.value) : value.id })
             }
           />
         </Field>
@@ -34,20 +46,40 @@ export function MetadataForm({ value, onChange, errors, showErrors, idTouched, o
           label="ID"
           htmlFor="md-id"
           required
-          hint={idLocked ? "A definition's ID never changes." : "Stable slug agents call it by."}
+          hint={idHint}
           error={err("id")}
         >
-          <input
-            id="md-id"
-            type="text"
-            className="mono"
-            readOnly={idLocked}
-            value={value.id}
-            onChange={(e) => {
-              onIdTouched();
-              set("id", e.target.value);
-            }}
-          />
+          <div className="id-field">
+            <input
+              id="md-id"
+              type="text"
+              className="mono"
+              readOnly={idReadOnly}
+              aria-describedby="md-id-hint"
+              value={value.id}
+              onChange={(e) => {
+                onIdTouched();
+                set("id", e.target.value);
+              }}
+            />
+            {!idLocked &&
+              (idEditing ? (
+                <button
+                  type="button"
+                  className="btn btn-sm"
+                  onClick={() => {
+                    setIdEditing(false);
+                    onChange({ ...value, id: slugify(value.title) });
+                  }}
+                >
+                  Use title
+                </button>
+              ) : (
+                <button type="button" className="btn btn-sm" onClick={() => setIdEditing(true)}>
+                  Edit ID
+                </button>
+              ))}
+          </div>
         </Field>
       </div>
       <Field label="Meaning" htmlFor="md-meaning" required hint="What the result means, in plain language." error={err("meaning")}>

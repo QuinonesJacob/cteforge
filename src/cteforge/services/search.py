@@ -1,20 +1,36 @@
-"""Use-case: search the library (DESIGN §19, ADR 0017).
+"""Use-case: search the library (DESIGN §19, ADR 0017, ADR 0023).
 
-Lexical BM25F-style scoring, pure Python over the store's definitions:
+Hybrid: keyword (BM25, below, unchanged) and meaning (embedded search documents,
+services/_meaning.py) rankings merged by reciprocal rank fusion (RRF):
+- fused score = Σ over the two rankings of 1 / (RRF_K + rank), rank 1-based (equal scores
+  share a rank); RRF_K = 60
+  (the usual constant from Cormack et al. 2009: it damps the difference between neighbouring
+  ranks, so agreement between the two rankings matters more than either rank alone).
+- The keyword ranking is the BM25 hits (score > 0) by score; the meaning ranking only the
+  definitions that count as a meaning match (`_meaning.MIN_SIMILARITY`, `MAX_GAP`), by
+  similarity. Each hit says how it matched: `match` = keyword | meaning | both.
+- Without meaning search (CTEFORGE_SEARCH_EMBEDDINGS=off, or no model) the ranking and the
+  scores are exactly the keyword ones; when the model was wanted but could not run, every
+  hit carries a `note` saying results are keyword-only.
+
+Keyword scoring: lexical BM25F-style, pure Python over the store's definitions:
 - Fields and weights: title 3, keywords 3, meaning 2, use_when 1, variable names and
-  descriptions 1, outputs 1, tables 1, dont_use_when 0.5 (it says when NOT to use it, so
-  a match there is weaker evidence).
+  descriptions 1, outputs 1, tables 1, former ids 2 (ADR 0024: an old name finds the
+  renamed definition), dont_use_when 0.5 (it says when NOT to use it, so a match there is
+  weaker evidence).
 - Tokenizer: lowercase, split on anything that is not a letter or digit (so snake_case
   splits), drop a few English stopwords, light plural stripping (`rates` → `rate`,
   `categories` → `category`, `classes` → `class`; words ending in `ss`/`us`/`is` kept).
-- Ranking: hits whose only matches are in `dont_use_when` come last (the words name what
-  the definition is NOT for); then score desc; at equal score (6 decimals) verified before
-  llm_annotated before draft; then title, then id. A non-empty query only returns
-  definitions that match.
+- Ranking: hits whose only keyword matches are in `dont_use_when` come last (the words
+  name what the definition is NOT for — also when it matches by meaning, since its
+  document holds that text too); then score (fused when meaning ran) desc; at equal score
+  (6 decimals) verified before llm_annotated before draft; then title, then id. A
+  non-empty query only returns definitions that match by keyword or meaning.
 - Each hit carries `use_when` / `dont_use_when` / `grain` and `matched_terms` /
   `matched_fields`, so an agent can judge a hit without fetching its card. Scores are BM25
   with no fixed scale: comparable within one search only.
-- Empty query (no tokens) → every visible definition, ordered by title, score 0.
+- Empty query (no tokens) → every visible definition, ordered by title, score 0,
+  `match` None (meaning search does not run).
 
 Which version is searched (`_library.visible_states` / `newest_in_states`, shared with
 `compile_and_run`): the newest version whose state is visible — drafts are hidden
@@ -28,18 +44,20 @@ from __future__ import annotations
 import math
 import re
 from collections import Counter
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 from cteforge.domain.audit import AuditKind
 from cteforge.domain.models import Definition, DefinitionState
 from cteforge.domain.users import User
-from cteforge.services import _audit, _library
+from cteforge.services import _audit, _library, _meaning
 from cteforge.services.auth import require
 from cteforge.services.cards import SearchHit, search_hit
 from cteforge.services.context import AppContext, team_mode
 from cteforge.trust.approval import Action
 
 MAX_LIMIT = 100
+RRF_K = 60
 K1 = 1.2
 B = 0.75
 
@@ -52,6 +70,7 @@ FIELD_WEIGHTS: dict[str, float] = {
     "variables": 1.0,
     "outputs": 1.0,
     "tables": 1.0,
+    "former_ids": 2.0,  # IDs it had before a rename (ADR 0024): an old name still finds it.
 }
 
 STATE_RANK = {
@@ -84,7 +103,7 @@ def tokenize(text: str) -> list[str]:
     return [_stem(w) for w in _SPLIT.split(text.lower()) if w and w not in _STOPWORDS]
 
 
-def _fields(d: Definition) -> dict[str, list[str]]:
+def _fields(d: Definition, former_ids: Sequence[str] = ()) -> dict[str, list[str]]:
     variables = " ".join(f"{v.name} {v.description}" for v in d.variables)
     return {
         "title": tokenize(d.title),
@@ -95,6 +114,7 @@ def _fields(d: Definition) -> dict[str, list[str]]:
         "variables": tokenize(variables),
         "outputs": tokenize(" ".join(d.outputs)),
         "tables": tokenize(" ".join(d.tables)),
+        "former_ids": tokenize(" ".join(former_ids)),
     }
 
 
@@ -117,10 +137,10 @@ class _Doc:
         return fields == ["dont_use_when"]
 
 
-def _doc(d: Definition) -> _Doc:
+def _doc(d: Definition, former_ids: Sequence[str] = ()) -> _Doc:
     tf: Counter[str] = Counter()
     length = 0.0
-    fields = _fields(d)
+    fields = _fields(d, former_ids)
     for name, tokens in fields.items():
         weight = FIELD_WEIGHTS[name]
         length += weight * len(tokens)
@@ -173,29 +193,87 @@ def search(
         if (found := _library.newest_in_states(ctx, latest, states)) is not None
     ]
     terms = tokenize(query or "")
-    docs = [_doc(d) for d in candidates]
-    if terms:
-        scored = [
-            (score, doc) for score, doc in zip(bm25(terms, docs), docs, strict=True) if score > 0
-        ]
+    formers = _meaning.former_ids_of(ctx)
+    docs = [_doc(d, formers.get(d.id, ())) for d in candidates]
+    if not terms:
+        ranked = sorted(docs, key=lambda doc: _order(doc, terms, 0.0))
+        hits = [search_hit(doc.definition, 0.0) for doc in ranked[:limit]]
+        _record(ctx, user, query, hits, include_drafts, question)
+        return hits
+    keyword = {
+        _key(doc): score for score, doc in zip(bm25(terms, docs), docs, strict=True) if score > 0
+    }
+    meaning = _meaning.similarities(ctx, query, candidates)
+    if meaning.similarities:
+        scores = _fuse(keyword, meaning.similarities)
     else:
-        scored = [(0.0, doc) for doc in docs]
-    scored.sort(
-        key=lambda item: (
-            # Matching only where the definition says NOT to use it is no evidence for it.
-            item[1].only_dont_use_when(terms),
-            -round(item[0], 6),
-            STATE_RANK[item[1].definition.state],
-            item[1].definition.title.lower(),
-            item[1].definition.id,
-        )
-    )
+        scores = keyword
+    matched = [doc for doc in docs if _key(doc) in scores]
+    matched.sort(key=lambda doc: _order(doc, terms, scores[_key(doc)]))
     hits = []
-    for score, doc in scored[:limit]:
+    for doc in matched[:limit]:
         found, fields = doc.matches(terms)
+        key = _key(doc)
+        by_word, by_meaning = key in keyword, key in meaning.similarities
+        kind = "both" if by_word and by_meaning else "keyword" if by_word else "meaning"
         hits.append(
-            search_hit(doc.definition, round(score, 6), matched_terms=found, matched_fields=fields)
+            search_hit(
+                doc.definition,
+                round(scores[key], 6),
+                matched_terms=found,
+                matched_fields=fields,
+                match=kind,
+                note=meaning.note,
+            )
         )
+    _record(ctx, user, query, hits, include_drafts, question)
+    return hits
+
+
+def _key(doc: _Doc) -> tuple[str, int]:
+    return (doc.definition.id, doc.definition.version)
+
+
+def _order(doc: _Doc, terms: list[str], score: float) -> tuple:
+    d = doc.definition
+    return (
+        # Matching only where the definition says NOT to use it is no evidence for it.
+        doc.only_dont_use_when(terms),
+        -round(score, 6),
+        STATE_RANK[d.state],
+        d.title.lower(),
+        d.id,
+    )
+
+
+def _ranks(scores: dict[tuple[str, int], float]) -> dict[tuple[str, int], int]:
+    """1-based rank by score desc; equal scores (6 decimals) share the better rank."""
+    ordered = sorted(scores.values(), key=lambda score: -round(score, 6))
+    first: dict[float, int] = {}
+    for rank, score in enumerate(ordered, start=1):
+        first.setdefault(round(score, 6), rank)
+    return {key: first[round(score, 6)] for key, score in scores.items()}
+
+
+def _fuse(
+    keyword: dict[tuple[str, int], float], meaning: dict[tuple[str, int], float]
+) -> dict[tuple[str, int], float]:
+    """Reciprocal rank fusion of the keyword and meaning rankings (module docstring)."""
+    fused: dict[tuple[str, int], float] = {}
+    for ranking in (_ranks(keyword), _ranks(meaning)):
+        for key, rank in ranking.items():
+            fused[key] = fused.get(key, 0.0) + 1.0 / (RRF_K + rank)
+    return fused
+
+
+def _record(
+    ctx: AppContext,
+    user: User,
+    query: str,
+    hits: list[SearchHit],
+    include_drafts: bool,
+    question: str | None,
+) -> None:
     _audit.record(
         ctx,
         user,
@@ -205,4 +283,3 @@ def search(
         definitions=[f"{h.id}@{h.version}" for h in hits],
         extra={"query": query, "hits": len(hits), "include_drafts": include_drafts},
     )
-    return hits

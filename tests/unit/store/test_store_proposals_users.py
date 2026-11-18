@@ -174,6 +174,10 @@ def test_settings(store: Store) -> None:
     store.set_setting("other", "")
     assert store.get_setting("other") == ""
     assert store.get_setting("team_mode") == "strict"
+    store.delete_setting("other")
+    assert store.get_setting("other") is None
+    store.delete_setting("other")  # absent: no-op
+    assert store.get_setting("team_mode") == "strict"
 
 
 # ----------------------------------------------------- compare-and-swap (expected_status)

@@ -7,11 +7,24 @@ Reads SQL and reports its structure. Pure. Project root: ../../../CLAUDE.md
   columns, filter literals with stable IDs, the column each literal is compared to (through
   wrappers, CTEs and derived tables), structural context facts, suggested range pairs, and
   grain candidates (date truncations, `QueryAnalysis.grains`, M1.5).
-  Also `parse`, `transpile` (one statement from a source to a target dialect), `scopes`, `find_literals` / `FoundLiteral`, `wrapper_sql`, `find_grains` /
+  Also `parse` (raises SqlParseError with `syntax_error_message`: "SQL syntax error at
+  line L, column C: <cause>"; sqlglot's tokenizer position is unreliable, so unclosed
+  quotes / comments are located by `_unclosed_opener`, preferring a quoted span that runs
+  across a line break), `transpile` (one statement from a source to a target dialect),
+  `generate` (tree → SQL text; EVERY SQL text cteforge writes goes through it: in ClickHouse
+  it writes toStartOf* / toMonday back under their own names instead of sqlglot's
+  `dateTrunc`, and date_trunc / dateTrunc with the name written and a lower-case unit), `reject_query_parameters` (ClickHouse `{x:Type}` / `?` in trusted SQL →
+  SqlParseError), `is_truncation` / `truncated_expression`, `lambda_binding` /
+  `array_join_binding` (ClickHouse element bindings), `CLICKHOUSE_*` names, `scopes`, `find_literals` / `FoundLiteral`, `wrapper_sql`, `find_grains` /
   `FoundGrain`, `truncation_unit`, `identifier_units`, `COLUMN_UNIT_PREFIX` and
   `TRUNCATIONS`, shared with templating so both sides
   agree on IDs.
 - `types.py` — warehouse type string → VariableType candidates + sqlglot DataType.
+  Text includes BPCHAR; Redshift SUPER / VARBYTE / GEOMETRY / HLLSKETCH map to no
+  variable type (not filterable by a typed value). ClickHouse: LowCardinality(T) /
+  SimpleAggregateFunction(f, T) unwrap to T (Nullable is a flag in sqlglot); FixedString /
+  Enum8 / Enum16 / UUID are text in ClickHouse only; Array / Map / Tuple / JSON / Nested
+  have no variable type. `element_type` gives an Array's element / a Map's value type.
 
 If something does not clearly fit one of the above, it does not belong here.
 "Not forbidden" is not the same as "allowed."
@@ -36,6 +49,17 @@ If something does not clearly fit one of the above, it does not belong here.
   `(a, b) = (1, 2)` / `(a, b) IN ((1, 2), ...)` → `ROW =` / `ROW IN`, each element compared
   to the matching element of the column-side row (row `<`/`>` are lexicographic, hence ROW).
   None of these form IN groups (templating's text_list replaces plain IN lists only).
+- **ClickHouse shapes** (only when the dialect is ClickHouse, so other dialects' literal IDs
+  never shift; `find_literals(tree, dialect)`): `has(arr, 'x')` → `HAS`; `hasAny(arr,
+  [...])` / `hasAll` → `HAS ANY` / `HAS ALL` (list shapes like `= ANY`, no IN group);
+  `match(s, 're')` → `MATCH`. `compared_type` of HAS* is the array's element type. A lambda
+  parameter (`arrayExists(x -> x = 'a', arr)`; parameter i ↔ the i-th non-lambda argument)
+  counts as the column side and resolves to its array column, typed as the element; an
+  unqualified `ARRAY JOIN` name likewise. `map['k']` / `arr[i]` → value / element type;
+  toDate / toDateTime* / toString / toStartOf* / JSONExtractString have their ClickHouse
+  result types. Arguments after the value of toDate / toDateTime64 / toDecimal* /
+  parseDateTime*BestEffort (scale, time zone) are never literals. ARRAY JOIN is not a join.
+  A scalar `WITH 'x' AS m` is a scope with no outputs and no filter literals.
 - **IN groups** are `<scope>.IN<n>`, numbered per scope in ID order (operator `IN` only).
 - **Context facts** (ADR 0015), computed from the predicate up to the scope root:
   `negated` (any NOT, a predicate's own `negate` flag, e.g. DuckDB `NOT LIKE`, or an
@@ -69,8 +93,11 @@ If something does not clearly fit one of the above, it does not belong here.
   else the single key whose overlapping trailing parts match. Table names in results are
   qualified as written with unquoted parts lower-cased (`analytics.deals`).
 - **Grain candidates** (M1.5): every DateTrunc / TimestampTrunc / DatetimeTrunc node (what
-  sqlglot makes of DATE_TRUNC, TRUNC(d, fmt), TIMESTAMP_TRUNC, DATETIME_TRUNC in the five
-  dialects) gets `<scope>.G<n>`. n counts truncations in the same walk as literal IDs,
+  sqlglot makes of DATE_TRUNC, TRUNC(d, fmt), TIMESTAMP_TRUNC, DATETIME_TRUNC, and
+  ClickHouse toStartOfDay / Month / ... / toMonday / dateTrunc) gets `<scope>.G<n>`; in
+  ClickHouse also the Anonymous `toStartOfWeek(x[, mode[, tz]])` (even / no mode →
+  `week(sunday)`, odd → `week`) and `toStartOfInterval(x, INTERVAL n unit[, ...])` (`unit`
+  when n = 1 without origin, else e.g. `'15' minute`). n counts truncations in the same walk as literal IDs,
   wherever they sit (SELECT list, filters, nested). `GrainCandidate`: `unit` (lower case,
   abbreviations spelled out: `MM` → month, `Q` → quarter; BigQuery `WEEK` / `WEEK(SUNDAY)`
   → `week`, other week starts → `week(<day>)`, `ISOWEEK` → `isoweek`), `column_sql` (the
@@ -79,7 +106,7 @@ If something does not clearly fit one of the above, it does not belong here.
   The unit argument is never a literal ID; a literal inside a value-side truncation still is.
   A unit read from a column is `column <name>` (never a grain value): a qualified Column
   (`cfg.month`) from the tree; a bare or double-quoted name in DuckDB / Postgres /
-  Databricks (where the unit is a string expression) from the SQL's tokens
+  Redshift / Databricks (where the unit is a string expression) from the SQL's tokens
   (`identifier_units`), because sqlglot parses it like the string. A name used both ways
   in one query marks every truncation to that unit (conservative). `COLUMN_UNIT_PREFIX`.
 - **Joins**: per JOIN, sources resolved through aliases to base tables / CTE names /

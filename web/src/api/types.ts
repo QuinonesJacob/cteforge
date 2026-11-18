@@ -34,16 +34,45 @@ export interface CreatedUser {
 export interface Profile {
   name: string;
   dialect: Dialect;
+  /** The effective default connection: the profile used when none is named (ADR 0021). */
+  default?: boolean;
 }
 
 export type TeamMode = "strict" | "open";
 export interface Settings {
   mode: TeamMode;
+  /** The admin's default connection (a profile name) as stored; null = not set. */
+  default_connection?: string | null;
+  /** The profile used when none is named: the setting → CTEFORGE_DEFAULT_PROFILE → the only one. */
+  effective_default_connection?: string | null;
+  /** e.g. `default_connection_missing`: the stored profile is no longer configured. */
+  issues?: Issue[];
+}
+
+/** PUT /settings changes only the fields given. */
+export interface SettingsUpdate {
+  mode?: TeamMode;
+  default_connection?: string | null;
 }
 
 // ── Definitions (domain/models.py, services/cards.py) ──────────────────────────
-export type Dialect = "duckdb" | "postgres" | "snowflake" | "bigquery" | "databricks";
-export const DIALECTS: Dialect[] = ["duckdb", "postgres", "snowflake", "bigquery", "databricks"];
+export type Dialect =
+  | "duckdb"
+  | "postgres"
+  | "redshift"
+  | "snowflake"
+  | "bigquery"
+  | "databricks"
+  | "clickhouse";
+export const DIALECTS: Dialect[] = [
+  "duckdb",
+  "postgres",
+  "redshift",
+  "snowflake",
+  "bigquery",
+  "databricks",
+  "clickhouse",
+];
 
 export type DefinitionState = "draft" | "llm_annotated" | "verified";
 export type TrustLabel =
@@ -119,7 +148,12 @@ export interface DefinitionCard {
    * with its original values, and the variables as annotations addressing that SQL. */
   source_sql?: string | null;
   annotations?: Annotation[] | null;
+  /** IDs it had before a rename (ADR 0024), oldest first. */
+  former_ids?: string[];
 }
+
+/** How a search hit matched (ADR 0023): its words, the meaning of the query, or both. */
+export type SearchMatch = "keyword" | "meaning" | "both";
 
 export interface SearchHit {
   id: string;
@@ -128,6 +162,10 @@ export interface SearchHit {
   meaning: string;
   state: DefinitionState;
   score: number;
+  /** null for an empty query (everything listed). */
+  match?: SearchMatch | null;
+  /** Set when meaning search could not run: results match by keyword only. */
+  note?: string | null;
   keywords: string[];
   variables: VariableCard[];
 }
@@ -340,7 +378,7 @@ export interface TableCard {
 }
 
 // ── Proposals (domain/proposals.py, services/review.py) ────────────────────────
-export type ProposalKind = "new_definition" | "revise_definition" | "new_recipe" | "new_join";
+export type ProposalKind = "new_definition" | "revise_definition" | "new_recipe" | "new_join" | "rename_definition";
 export type ProposalStatus = "pending" | "approved" | "rejected" | "withdrawn";
 
 export interface Annotation {
@@ -384,6 +422,53 @@ export interface ReviseDefinitionRequest {
   metadata?: Partial<DefinitionMetadata> & { profile?: string | null };
   annotations?: Annotation[];
   summary: string;
+}
+
+/** POST /proposals/definitions/{id}/rename (ADR 0024). */
+export interface RenameDefinitionRequest {
+  new_id: string;
+  base_version?: number;
+  summary: string;
+}
+
+// ── References (GET /definitions/{id}/references; ADR 0024) ───────────────────
+export interface RecipeReference {
+  recipe_id: string;
+  recipe_version: number;
+  title: string;
+  state: DefinitionState;
+  alias: string;
+  /** null = floats on the latest usable version. */
+  pinned_version?: number | null;
+}
+
+export interface ProposalReference {
+  proposal_id: string;
+  kind: ProposalKind;
+  target_id: string;
+  summary: string;
+  author: string;
+  created_at: string;
+  relation: "target" | "uses";
+}
+
+export interface FormerId {
+  former_id: string;
+  definition_id: string;
+  renamed_to: string;
+  renamed_by: string;
+  renamed_at: string;
+  proposal_id?: string | null;
+}
+
+export interface DefinitionReferences {
+  id: string;
+  version: number;
+  state: DefinitionState;
+  recipes: RecipeReference[];
+  proposals: ProposalReference[];
+  former_ids: FormerId[];
+  outside_warning: string;
 }
 
 /** Impact preview: recipes using the target. Accepts a list or an object form. */

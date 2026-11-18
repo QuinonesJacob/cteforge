@@ -45,6 +45,7 @@ from cteforge.services import (
     propose,
     propose_other,
     search,
+    search_index,
 )
 from cteforge.services import run as run_service
 from cteforge.services.cards import (
@@ -175,9 +176,18 @@ _Question = Annotated[
 ]
 _Profile = Annotated[
     str | None,
-    Field(description="Warehouse profile name; omit for the default profile."),
+    Field(description="Warehouse profile name; omit for the team's default connection."),
 ]
 _Summary = Annotated[str, Field(description="One line for reviewers: what and why.")]
+_SourceDialect = Annotated[
+    Dialect | None,
+    Field(
+        description=(
+            "The SQL's dialect. Omit to use the connection's dialect (the profile you "
+            "pass, else the team's default connection)."
+        )
+    ),
+]
 _Annotations = Annotated[
     list[Annotation],
     Field(
@@ -238,9 +248,16 @@ def build_server(
         id: Annotated[str, Field(description="Definition id, e.g. 'realization_rate'.")],
         mcp_context: Context,
         version: Annotated[int | None, Field(ge=1, description="Omit for the latest.")] = None,
+        include_search_document: Annotated[
+            bool, Field(description="Also return the Markdown text meaning search uses.")
+        ] = False,
     ) -> DefinitionCard:
         return await _call(
-            mcp_context, resolve_user, lambda user: describe.get_definition(ctx, user, id, version)
+            mcp_context,
+            resolve_user,
+            lambda user: describe.get_definition(
+                ctx, user, id, version, include_search_document=include_search_document
+            ),
         )
 
     async def compile_and_run_tool(
@@ -308,8 +325,8 @@ def build_server(
 
     async def parse_query_tool(
         sql: Annotated[str, Field(description="The trusted query, one statement.")],
-        dialect: Annotated[Dialect, Field(description="The SQL's dialect.")],
         mcp_context: Context,
+        dialect: _SourceDialect = None,
         profile: _Profile = None,
     ) -> ParseReport:
         return await _call(
@@ -320,10 +337,10 @@ def build_server(
 
     async def propose_definition_tool(
         sql: Annotated[str, Field(description="The trusted query exactly as the user gave it.")],
-        dialect: Annotated[Dialect, Field(description="The SQL's dialect.")],
         metadata: _Metadata,
         annotations: _Annotations,
         mcp_context: Context,
+        dialect: _SourceDialect = None,
         profile: _Profile = None,
         summary: _Summary = "",
     ) -> ProposalOutcome:
@@ -352,13 +369,20 @@ def build_server(
         ] = None,
         metadata: Annotated[
             DefinitionMetadata | None,
-            Field(description="Only the keys to change (id cannot change)."),
+            Field(description="Only the keys to change (not id: use new_id to rename)."),
         ] = None,
         annotations: Annotated[
             list[Annotation] | None,
             Field(description="The full new list of variables, if they change."),
         ] = None,
         summary: _Summary = "",
+        new_id: Annotated[
+            str | None,
+            Field(
+                description="Propose renaming the definition to this ID instead of a new "
+                "version. Pass nothing else to change."
+            ),
+        ] = None,
     ) -> ProposalOutcome:
         return await _call(
             mcp_context,
@@ -373,6 +397,7 @@ def build_server(
                 metadata=metadata,
                 annotations=annotations,
                 summary=summary,
+                new_id=new_id,
             ),
         )
 
@@ -560,6 +585,8 @@ def run_stdio() -> None:
         # Never creates the user: whoever is on the other end of stdio is an MCP client,
         # usually an agent, and must not become the first human admin of an empty store.
         auth.local_user(ctx, create=False)
+        # Meaning search (ADR 0023): load the model in the background, never in a call.
+        search_index.start_background(ctx)
         server = build_server(ctx, lambda: auth.local_user(ctx, create=False))
         server.run("stdio")
     finally:

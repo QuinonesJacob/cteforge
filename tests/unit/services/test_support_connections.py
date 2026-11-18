@@ -218,12 +218,35 @@ def test_registry_default_resolution() -> None:
 
     several, _ = _registry(_profile("a"), _profile("b"))
     assert several.default_name is None
-    with pytest.raises(PolicyError, match="CTEFORGE_DEFAULT_PROFILE"):
+    assert [p.default for p in several.summaries()] == [False, False]
+    with pytest.raises(PolicyError, match="ask an admin to set a default connection"):
         several.get()
 
     chosen, _ = _registry(_profile("a"), _profile("b"), default="b")
     assert chosen.get().profile.name == "b"  # type: ignore[attr-defined]
+    assert [p.default for p in chosen.summaries()] == [False, True]
     assert chosen.profile().name == "b"
+
+
+def test_registry_team_default_comes_first_and_falls_back_when_gone() -> None:
+    """ADR 0021: the admin's setting → `default` (env) → the only profile → none."""
+    stored: list[str | None] = [None]
+    a, b, c = _profile("a"), _profile("b", Dialect.SNOWFLAKE), _profile("c")
+    reg = WarehouseRegistry([a, b, c], default="c", team_default=lambda: stored[0])
+    assert reg.default_name == "c" and reg.missing_team_default is None
+    stored[0] = "b"  # read on every lookup: applies at once
+    assert reg.default_name == "b" and reg.summary().dialect is Dialect.SNOWFLAKE
+    assert [p.default for p in reg.summaries()] == [False, True, False]
+    assert reg.resolve_name("a") == "a"  # a named profile always wins
+    stored[0] = "gone"
+    assert reg.default_name == "c" and reg.missing_team_default == "gone"
+
+    only = WarehouseRegistry([a], team_default=lambda: "gone")
+    assert only.default_name == "a"
+    none_left = WarehouseRegistry([a, b], team_default=lambda: "gone")
+    assert none_left.default_name is None
+    with pytest.raises(PolicyError, match="'gone' is no longer configured"):
+        none_left.resolve_name()
 
 
 def test_empty_registry_gives_clear_policy_error() -> None:
@@ -253,7 +276,7 @@ def test_summaries_never_include_options_or_secrets() -> None:
         _profile("pg", options={"host": "db.internal"}, secrets_env={"password": "PG_PW"})
     )
     (summary,) = reg.summaries()
-    assert summary.model_dump(mode="json") == {"name": "pg", "dialect": "postgres"}
+    assert summary.model_dump(mode="json") == {"name": "pg", "dialect": "postgres", "default": True}
     assert reg.summary("pg") == summary
 
 

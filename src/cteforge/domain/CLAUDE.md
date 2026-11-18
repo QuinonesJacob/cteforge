@@ -5,17 +5,25 @@ cteforge. Project root: ../../../CLAUDE.md
 
 ## What belongs here (authoritative)
 - `models.py` — Definition, Annotation, VariableSpec, VariableSlot (one place a
-  variable fills; M1 files migrate on read), DefinitionVersionInfo, Recipe,
-  DefinitionRef, JoinEdge, JoinKey, DefinitionState, TrustLabel (+ TRUST_ORDER), TeamMode.
+  variable fills; M1 files migrate on read), DefinitionVersionInfo, Recipe (+
+  `uses_definition`, `with_definition_renamed`), DefinitionRef, FormerId (a renamed
+  definition's earlier id → its current id; ADR 0024), JoinEdge, JoinKey, DefinitionState,
+  TrustLabel (+ TRUST_ORDER), TeamMode.
 - `variables.py` — VariableType enum and the strict input model + validation per type.
 - `dialects.py` — Dialect enum.
 - `codec.py` — definition file format: dict/YAML text ⇄ Definition, with schema_version.
-- `errors.py` — CteforgeError and subclasses.
+- `errors.py` — CteforgeError and subclasses (incl. EmbeddingError: the model can't load/run).
 - `issues.py` — Issue, IssueCode, Severity: structured problems/warnings (ADR 0015).
   IssueCode is append-only; add new codes at the end of their group with Edit.
 - `users.py` — User, UserRole, ActorKind (ADR 0018). No tokens or hashes here.
-- `proposals.py` — Proposal, ProposalKind, ProposalStatus (DESIGN §18).
+- `proposals.py` — Proposal, ProposalKind (incl. `rename_definition`, ADR 0024),
+  ProposalStatus, `DEFINITION_KINDS`, `proposal_with_definition_renamed` (every stored copy
+  of a definition id in a proposal → the new id; a rename's from/to kept) (DESIGN §18).
 - `audit.py` — AuditEvent, AuditKind, AuditOutcome (ADR 0008).
+- `search.py` — meaning search (ADR 0023): `search_document(definition, joins=(),
+  former_ids=())` → the
+  generated Markdown search document (pure, deterministic; no version/state/SQL);
+  `document_sha256`; `SearchVector` (definition_id, version, model, doc_sha256, vector).
 - `connections.py` — WarehouseProfile: connection options + env-var NAMES of secrets,
   row/byte caps and `statement_timeout_s` (default 60, None = off; ADR 0020). Never
   secret values.

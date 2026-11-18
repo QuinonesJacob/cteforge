@@ -1,6 +1,7 @@
 """Use-cases: users, roles, tokens and team settings (ADR 0018, DESIGN §8).
 
-Admin only, except that any user may rotate their own token. Tokens are random
+Admin only, except that any user may rotate their own token. Team settings: the mode
+(strict/open) and the default connection (ADR 0021). Tokens are random
 (`auth.new_token`), returned ONCE to the caller, and stored only as SHA-256 hashes; they are
 never written to the audit log.
 
@@ -26,7 +27,14 @@ from cteforge.domain.users import ActorKind, User, UserRole
 from cteforge.services import _audit
 from cteforge.services.auth import hash_token, new_token, require
 from cteforge.services.cards import TeamSettings
-from cteforge.services.context import AppContext, set_team_mode, team_mode
+from cteforge.services.context import (
+    AppContext,
+    default_connection,
+    default_connection_issues,
+    save_default_connection,
+    set_team_mode,
+    team_mode,
+)
 from cteforge.trust.approval import Action
 
 _NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.@-]{0,63}$")
@@ -144,10 +152,19 @@ def rotate_token(ctx: AppContext, user: User, name: str) -> str:
     return token
 
 
+def _settings(ctx: AppContext) -> TeamSettings:
+    return TeamSettings(
+        mode=team_mode(ctx),
+        default_connection=default_connection(ctx),
+        effective_default_connection=ctx.warehouses.default_name,
+        issues=default_connection_issues(ctx),
+    )
+
+
 def get_settings(ctx: AppContext, user: User) -> TeamSettings:
     with _audit.audit_failures(ctx, user, AuditKind.ADMIN, **_fields("get_settings")):
         require(user, Action.MANAGE_SETTINGS)
-        settings = TeamSettings(mode=team_mode(ctx))
+        settings = _settings(ctx)
     _audit.record(ctx, user, AuditKind.ADMIN, fail_closed=False, **_fields("get_settings"))
     return settings
 
@@ -160,6 +177,27 @@ def set_settings(ctx: AppContext, user: User, mode: TeamMode | str) -> TeamSetti
             parsed = TeamMode(mode)
         except ValueError:
             raise PolicyError(f"mode must be one of {[m.value for m in TeamMode]}") from None
-        settings = TeamSettings(mode=set_team_mode(ctx, parsed))
+        set_team_mode(ctx, parsed)
+        settings = _settings(ctx)
+    _audit.record(ctx, user, AuditKind.ADMIN, **fields)
+    return settings
+
+
+def set_default_connection(ctx: AppContext, user: User, name: str | None) -> TeamSettings:
+    """Set (or, with None, clear) the team's default connection (ADR 0021): the warehouse
+    profile used when a caller names none, whose dialect is the default dialect. Admin
+    only (MANAGE_SETTINGS). A name that is not a configured profile → NotFoundError.
+    Existing definitions keep their own profile. A blank name clears it."""
+    name = (name or "").strip() or None
+    fields = _fields("set_default_connection", default_connection=name)
+    with _audit.audit_failures(ctx, user, AuditKind.ADMIN, **fields):
+        require(user, Action.MANAGE_SETTINGS)
+        if name is not None and not ctx.warehouses.has(name):
+            raise NotFoundError(
+                f"Warehouse profile '{name}' is not configured "
+                f"(configured: {', '.join(ctx.warehouses.names()) or 'none'})"
+            )
+        save_default_connection(ctx, name)
+        settings = _settings(ctx)
     _audit.record(ctx, user, AuditKind.ADMIN, **fields)
     return settings

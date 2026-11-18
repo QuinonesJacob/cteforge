@@ -216,6 +216,22 @@ class DefinitionVersionInfo(BaseModel):
     verified_at: dt.date | None = None
 
 
+class FormerId(BaseModel):
+    """An ID a definition no longer has (ADR 0024). `definition_id` is its CURRENT id (a
+    chain a → b → c points `a` and `b` at `c`); `renamed_to` the id it got by that rename.
+    A former ID stays searchable, its lookups fail naming the current id, and no other
+    definition may take it."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    former_id: str
+    definition_id: str
+    renamed_to: str
+    renamed_by: str
+    renamed_at: dt.datetime
+    proposal_id: str | None = None
+
+
 class JoinKey(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -261,3 +277,15 @@ class Recipe(BaseModel):
     select: str | None = None  # Final SELECT over the aliases, in `dialect`.
     dialect: Dialect
     state: DefinitionState = DefinitionState.DRAFT
+
+    def uses_definition(self, id: str) -> bool:
+        return any(ref.id == id for ref in self.uses.values())
+
+    def with_definition_renamed(self, old: str, new: str) -> Recipe:
+        """This recipe with every use of definition `old` pointing at `new` (ADR 0024);
+        pinned versions are kept (a rename keeps version numbers)."""
+        uses = {
+            alias: ref.model_copy(update={"id": new}) if ref.id == old else ref
+            for alias, ref in self.uses.items()
+        }
+        return self.model_copy(update={"uses": uses})

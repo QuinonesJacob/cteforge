@@ -129,9 +129,12 @@ async def test_lists_the_tools_with_sane_schemas(ctx: AppContext) -> None:
     run = by_name["compile_and_run"].inputSchema
     assert {"uses", "values", "select", "recipe_id", "run", "limit"} <= set(run["properties"])
     assert "mcp_context" not in run["properties"]
-    assert by_name["parse_query"].inputSchema["required"] == ["sql", "dialect"]
+    parse_schema = by_name["parse_query"].inputSchema
+    assert parse_schema["required"] == ["sql"]  # dialect: the connection's when omitted
+    assert "team's default connection" in json.dumps(parse_schema["properties"]["dialect"])
     propose = by_name["propose_definition"].inputSchema
-    assert {"sql", "dialect", "metadata", "annotations"} <= set(propose["required"])
+    assert {"sql", "metadata", "annotations"} <= set(propose["required"])
+    assert "dialect" in propose["properties"] and "dialect" not in propose["required"]
     recipe_tool = by_name["propose_recipe"].inputSchema
     ref = recipe_tool["properties"]["recipe"].get("$ref") or json.dumps(
         recipe_tool["properties"]["recipe"]
@@ -169,6 +172,27 @@ async def test_search_finds_realization_rate(ctx: AppContext) -> None:
     assert hits[0]["id"] == "realization_rate"
     assert hits[0]["state"] == DefinitionState.LLM_ANNOTATED.value
     assert {v["name"] for v in hits[0]["variables"]} >= {"period", "regions"}
+
+
+@pytest.mark.anyio
+async def test_search_hits_say_how_they_matched(ctx: AppContext) -> None:
+    async with client(ctx, AGENT) as session:
+        hits = ok(await session.call_tool("search", {"query": "realization"}))["result"]
+    assert hits and all(h["match"] == "keyword" and h["note"] is None for h in hits)
+
+
+@pytest.mark.anyio
+async def test_get_definition_can_include_the_search_document(ctx: AppContext) -> None:
+    async with client(ctx, AGENT) as session:
+        plain = ok(await session.call_tool("get_definition", {"id": "realization_rate"}))
+        full = ok(
+            await session.call_tool(
+                "get_definition", {"id": "realization_rate", "include_search_document": True}
+            )
+        )
+    assert plain["search_document"] is None
+    assert full["search_document"].startswith("# Realization Rate")
+    assert "## Variables" in full["search_document"]
 
 
 @pytest.mark.anyio
@@ -253,6 +277,8 @@ async def test_parse_then_propose_definition_auto_applies_in_open_mode(ctx: AppC
         ids = {lit["id"] for lit in report["literals"]}
         assert {"booked.L1", "collected.L1", "main.L1"} <= ids
         assert report["schema_found"]
+        no_dialect = ok(await session.call_tool("parse_query", {"sql": sql}))
+        assert no_dialect["dialect"] == "duckdb"  # the default connection's
         out = ok(
             await session.call_tool(
                 "propose_definition",
@@ -291,6 +317,22 @@ async def test_revise_metadata_only_applies(ctx: AppContext) -> None:
     assert out["auto_applied"] and out["definition"]["version"] == 2
     assert out["definition"]["keywords"] == ["cash"]
     assert out["definition"]["title"].startswith("Realization Rate")  # kept
+
+
+@pytest.mark.anyio
+async def test_revise_with_new_id_renames_and_the_old_id_names_the_new_one(
+    ctx: AppContext,
+) -> None:
+    # ADR 0024: an agent proposes a rename through revise_definition(new_id=...); a later
+    # lookup of the old id is a NotFoundError naming the new one.
+    args = {"id": "realization_rate", "base_version": 1, "new_id": "realization_rate_monthly"}
+    async with client(ctx, AGENT) as session:
+        out = ok(await session.call_tool("revise_definition", args))
+        body, err = error(await session.call_tool("get_definition", {"id": "realization_rate"}))
+    assert out["auto_applied"] and out["proposal"]["kind"] == "rename_definition"
+    assert out["definition"]["id"] == "realization_rate_monthly"
+    assert body.startswith("NotFoundError: ")
+    assert "was renamed to 'realization_rate_monthly'" in err["message"]
 
 
 @pytest.mark.anyio

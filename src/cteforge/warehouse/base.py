@@ -178,15 +178,35 @@ class Sensitive:
         return Sensitive(secrets=(*self.secrets, *extra), details=self.details)
 
 
+def error_fields(exc: BaseException) -> Mapping[str, str] | None:
+    """The server's ErrorResponse fields when a driver raises them as a dict (S severity,
+    C SQLSTATE, M message, F/L/R server source file/line/routine, ...): redshift_connector
+    does. None for drivers whose exceptions carry a plain message."""
+    args = getattr(exc, "args", ())
+    if len(args) == 1 and isinstance(args[0], dict) and isinstance(args[0].get("M"), str):
+        return args[0]
+    return None
+
+
+def error_text(exc: BaseException) -> str:
+    """A driver exception's message. For ErrorResponse fields only the message (M): the
+    other fields name server source paths and are not shown to anyone."""
+    fields = error_fields(exc)
+    return fields["M"] if fields is not None else str(exc)
+
+
 def driver_error(context: str, exc: BaseException, sensitive: Sensitive) -> WarehouseError:
     """A WarehouseError carrying the scrubbed driver message (raise it `from None`)."""
-    detail = sensitive.scrub(str(exc).strip()) or type(exc).__name__
+    detail = sensitive.scrub(error_text(exc).strip()) or type(exc).__name__
     return WarehouseError(f"{context}: {detail}")
 
 
 # SQLSTATE "query_canceled": Postgres statement_timeout, Snowflake statement timeout.
 _QUERY_CANCELED_SQLSTATE = "57014"
 _TIMEOUT_CLASS_NAMES = frozenset({"QueryCanceled", "DeadlineExceeded", "Timeout"})
+# Redshift's statement_timeout message ("Query (150) canceled on user's request", AWS docs
+# for statement_timeout); both spellings occur.
+_REDSHIFT_CANCELED = re.compile(r"\bcancell?ed on user's request\b", re.IGNORECASE)
 
 
 def timeout_error(seconds: int | float | None) -> WarehouseError:
@@ -196,11 +216,18 @@ def timeout_error(seconds: int | float | None) -> WarehouseError:
 
 def is_timeout(exc: BaseException) -> bool:
     """True when a driver exception says the statement was cancelled by a timeout:
-    SQLSTATE 57014 (Postgres, Snowflake), a TimeoutError (BigQuery's job.result), or a
-    driver timeout class (QueryCanceled, DeadlineExceeded)."""
+    SQLSTATE 57014 (Postgres, Snowflake; Redshift in its ErrorResponse fields), Redshift's
+    "canceled on user's request", a TimeoutError (BigQuery's job.result), or a driver
+    timeout class (QueryCanceled, DeadlineExceeded). Only consulted when the profile sets
+    a timeout; a cancel by someone else then also reads as a timeout."""
     if isinstance(exc, TimeoutError):
         return True
     if getattr(exc, "sqlstate", None) == _QUERY_CANCELED_SQLSTATE:
+        return True
+    fields = error_fields(exc)
+    if fields is not None and (
+        fields.get("C") == _QUERY_CANCELED_SQLSTATE or _REDSHIFT_CANCELED.search(fields["M"])
+    ):
         return True
     return type(exc).__name__ in _TIMEOUT_CLASS_NAMES
 
@@ -251,16 +278,21 @@ def sensitive_values(profile: WarehouseProfile, secrets: dict[str, str]) -> Sens
 
 
 def columns_query(
-    parts: tuple[str | None, str | None, str], placeholder: str, current_schema: str
+    parts: tuple[str | None, str | None, str],
+    placeholder: str,
+    current_schema: str,
+    view: str = "information_schema.columns",
 ) -> tuple[str, list[str]]:
-    """information_schema.columns lookup with every identifier passed as a parameter.
+    """Column lookup in `view` (information_schema.columns, or a view with the same
+    columns such as Redshift's svv_columns; a constant, never user input) with every
+    identifier passed as a parameter.
 
     Names compare case-insensitively (unquoted semantics). Unqualified names resolve in
     `current_schema` (a constant SQL expression such as ``current_schema()``).
     """
     catalog, schema, name = parts
     sql = (
-        "SELECT lower(column_name), data_type FROM information_schema.columns "
+        f"SELECT lower(column_name), data_type FROM {view} "
         f"WHERE lower(table_name) = lower({placeholder})"
     )
     params = [name]

@@ -1,4 +1,5 @@
-"""Use-cases: propose a new definition, revise an existing one (DESIGN §6, §7, §15, §18).
+"""Use-cases: propose a new definition, revise an existing one, rename one (DESIGN §6, §7,
+§15, §18; ADR 0024).
 
 Both run the checks engine (services/import_query.py) against a warehouse profile, store a
 Proposal with the resulting issues, and auto-apply it when the team is in open mode, every
@@ -9,6 +10,12 @@ Stale base version: `revise_definition` RAISES StaleVersionError when `base_vers
 the latest version; the error carries the `stale_base_version` Issue on `.issues`. The same
 check runs again when the proposal is applied.
 
+Rename (`rename_definition`, or `revise_definition(new_id=...)` for MCP): a
+RENAME_DEFINITION proposal under the same auto-apply rule (open mode, target not verified);
+the new id must be a valid id, not exist, and not be another definition's former id
+(`_library.check_id_available`). It snapshots the references (`_library.
+definition_references`) for the reviewer. Applying it is `_apply.apply_proposal`.
+
 Owner rule: `owner` may be set only to the proposer, or left empty, unless the user is an
 approver or admin. A human proposer owns a new definition by default; an agent's has none.
 """
@@ -18,11 +25,11 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, ValidationError
+from pydantic import BaseModel, ConfigDict, TypeAdapter, ValidationError
 
 from cteforge.domain.audit import AuditKind
 from cteforge.domain.dialects import Dialect
-from cteforge.domain.errors import CodecError, NotFoundError, PolicyError
+from cteforge.domain.errors import CodecError, PolicyError
 from cteforge.domain.issues import Issue
 from cteforge.domain.models import Annotation, Definition, DefinitionState, Ident
 from cteforge.domain.proposals import ProposalKind
@@ -35,6 +42,8 @@ from cteforge.trust.approval import Action
 
 _OP_NEW = "propose_definition"
 _OP_REVISE = "revise_definition"
+_OP_RENAME = "rename_definition"
+_ID = TypeAdapter(Ident)
 
 
 class DefinitionMetadata(BaseModel):
@@ -74,7 +83,7 @@ def propose_definition(
     user: User,
     *,
     sql: str,
-    dialect: Dialect | str,
+    dialect: Dialect | str | None = None,
     metadata: Mapping[str, Any] | DefinitionMetadata,
     annotations: Sequence[Annotation | Mapping[str, Any]],
     profile: str | None = None,
@@ -85,6 +94,8 @@ def propose_definition(
     metadata: id, title (required), meaning, keywords, use_when, dont_use_when, grain,
     join_keys, owner, profile. The warehouse profile is `profile`, else metadata.profile,
     else the default one; the definition records the profile its checks ran on.
+    An omitted `dialect` is that profile's dialect (the connection's; ADR 0021,
+    `_library.resolve_dialect`; PolicyError when there is no profile to take it from).
     Raises StoreError (StaleVersionError) when the id exists — use revise_definition.
     """
     with _audit.audit_failures(ctx, user, AuditKind.PROPOSE, extra={"op": _OP_NEW}):
@@ -95,14 +106,16 @@ def propose_definition(
         latest = ctx.store.latest_version(meta.id)
         if latest is not None:
             raise _apply.stale_error("Definition", meta.id, latest, None)
+        _library.check_id_available(ctx, meta.id)  # not a former id (ADR 0024)
         default_owner = user.name if user.kind is ActorKind.HUMAN else None
         owner = meta.owner if "owner" in meta.model_fields_set else default_owner
         _apply.check_owner(user, owner, None)
+        source_dialect = _library.resolve_dialect(ctx, dialect, profile or meta.profile)
         profile_name, warehouse = _apply.warehouse_for(ctx, profile or meta.profile)
         fields = meta.given() | {"owner": owner, "profile": profile_name, "version": 1}
         definition, issues = _apply.checked_definition(
             sql,
-            _library.parse_dialect(dialect),
+            source_dialect,
             _apply.parse_annotations(annotations),
             fields,
             warehouse,
@@ -132,8 +145,10 @@ def revise_definition(
     metadata: Mapping[str, Any] | DefinitionMetadata | None = None,
     annotations: Sequence[Annotation | Mapping[str, Any]] | None = None,
     summary: str = "",
+    new_id: str | None = None,
 ) -> ProposalOutcome:
-    """Propose version base_version+1 of a definition.
+    """Propose version base_version+1 of a definition — or, with `new_id` (and nothing
+    else to change), propose renaming it (`rename_definition`; ADR 0024).
 
     - `sql` given: new SQL (in `dialect`, default the source dialect) with `annotations`
       (default: the current ones, whose literal IDs must still exist). Checks re-run.
@@ -144,18 +159,29 @@ def revise_definition(
     Revisions of a VERIFIED definition are never auto-applied (ADR 0007).
     Raises NotFoundError, StaleVersionError (with a stale_base_version issue on `.issues`).
     """
+    if new_id is not None:
+        if sql is not None or annotations is not None or metadata or dialect is not None:
+            raise PolicyError(
+                "A rename is its own proposal: pass only new_id (and summary), then revise "
+                "the definition under its new ID."
+            )
+        return rename_definition(
+            ctx, user, id=id, new_id=new_id, base_version=base_version, summary=summary
+        )
     with _audit.audit_failures(
         ctx, user, AuditKind.PROPOSE, definitions=[f"{id}@{base_version}"], extra={"op": _OP_REVISE}
     ):
         require(user, Action.PROPOSE)
         current = ctx.store.get_definition(id)
         if current is None:
-            raise NotFoundError(f"Definition '{id}' does not exist; use propose_definition")
+            raise _library.definition_not_found(ctx, id, hint="; use propose_definition")
         if current.version != base_version:
             raise _apply.stale_error("Definition", id, current.version, base_version)
         meta = _metadata(metadata)
         if meta.id is not None and meta.id != id:
-            raise PolicyError("A definition's id cannot change; propose a new definition")
+            raise PolicyError(
+                "metadata.id can't change the ID; propose a rename instead (new_id, ADR 0024)"
+            )
         if sql is None and annotations is None and not meta.given():
             raise PolicyError("Nothing to revise: pass sql, annotations or metadata")
         new_dialect = None if dialect is None else _library.parse_dialect(dialect)
@@ -193,6 +219,46 @@ def revise_definition(
         )
         result = _apply.submit(ctx, user, proposal)
     _apply.record_proposal(ctx, user, AuditKind.PROPOSE, result.proposal, _OP_REVISE)
+    return result
+
+
+def rename_definition(
+    ctx: AppContext,
+    user: User,
+    *,
+    id: str,
+    new_id: str,
+    base_version: int | None = None,
+    summary: str = "",
+) -> ProposalOutcome:
+    """Propose renaming definition `id` to `new_id` (ADR 0024). Same policy as any change:
+    auto-applied in open mode when the definition is not verified, else it waits for a
+    person (a verified one for a human; four-eyes). `base_version`, when given, must be the
+    current version (a guard against renaming what you have not seen). The proposal keeps
+    the references seen now. Raises NotFoundError (a former id names the current one),
+    CodecError (not a valid id), PolicyError (same id, taken, or a former id of another
+    definition), StaleVersionError."""
+    fields = {"definitions": [id], "extra": {"op": _OP_RENAME, "new_id": new_id}}
+    with _audit.audit_failures(ctx, user, AuditKind.PROPOSE, **fields):
+        require(user, Action.PROPOSE)
+        current = ctx.store.get_definition(id)
+        if current is None:
+            raise _library.definition_not_found(ctx, id)
+        if base_version is not None and current.version != base_version:
+            raise _apply.stale_error("Definition", id, current.version, base_version)
+        try:
+            new_id = _ID.validate_python(new_id.strip())
+        except ValidationError:
+            raise CodecError(
+                f"'{new_id}' is not a valid ID: lower_snake_case (a letter first, then "
+                "letters, digits and single underscores)"
+            ) from None
+        if new_id == id:
+            raise PolicyError(f"'{id}' is already the definition's ID; nothing to rename")
+        _library.check_id_available(ctx, new_id, renaming=id)
+        proposal = _apply.rename_proposal(ctx, user, current, new_id, summary)
+        result = _apply.submit(ctx, user, proposal)
+    _apply.record_proposal(ctx, user, AuditKind.PROPOSE, result.proposal, _OP_RENAME)
     return result
 
 

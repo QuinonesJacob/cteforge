@@ -29,7 +29,7 @@ from cteforge.parsing.analyze import Schema, analyze
 from cteforge.services import _audit, _library
 from cteforge.services.auth import require
 from cteforge.services.cards import ParseReport, parse_report
-from cteforge.services.context import AppContext
+from cteforge.services.context import AppContext, default_connection_issues
 from cteforge.services.import_query import fetch_schema
 from cteforge.trust.approval import Action
 
@@ -41,7 +41,10 @@ def _issue(code: IssueCode, message: str) -> Issue:
 def _schema(
     ctx: AppContext, sql: str, dialect: Dialect, profile: str | None
 ) -> tuple[Schema, str | None, list[Issue]]:
-    """(schema, profile used, issues). Raises NotFoundError for an unknown named profile."""
+    """(schema, profile used, issues). Raises NotFoundError for an unknown named profile.
+    With no profile named, a stored default connection that is no longer configured adds a
+    `default_connection_missing` warning (the effective default falls back)."""
+    stale = default_connection_issues(ctx) if profile is None else []
     try:
         name = ctx.warehouses.resolve_name(profile)
     except PolicyError:  # no profiles, or several and no default (a bad name: NotFound)
@@ -49,11 +52,12 @@ def _schema(
             {},
             None,
             [
+                *stale,
                 _issue(
                     IssueCode.CHECKS_INCOMPLETE,
                     "No single warehouse profile to read column types from; pass a "
                     "profile. Literals are reported without column types.",
-                )
+                ),
             ],
         )
     summary = ctx.warehouses.summary(name)
@@ -75,6 +79,7 @@ def _schema(
             {},
             name,
             [
+                *stale,
                 *mismatch,
                 _issue(
                     IssueCode.CHECKS_INCOMPLETE,
@@ -83,26 +88,35 @@ def _schema(
                 ),
             ],
         )
-    issues = mismatch + [
-        _issue(
-            IssueCode.TYPE_UNKNOWN,
-            f"Table '{table}' was not found in profile '{name}'; its column types are unknown.",
-        )
-        for table, columns in schema.items()
-        if not columns
-    ]
+    issues = (
+        stale
+        + mismatch
+        + [
+            _issue(
+                IssueCode.TYPE_UNKNOWN,
+                f"Table '{table}' was not found in profile '{name}'; its column types are unknown.",
+            )
+            for table, columns in schema.items()
+            if not columns
+        ]
+    )
     return {t: c for t, c in schema.items() if c}, name, issues
 
 
 def parse_query(
-    ctx: AppContext, user: User, sql: str, dialect: Dialect, profile: str | None = None
+    ctx: AppContext,
+    user: User,
+    sql: str,
+    dialect: Dialect | str | None = None,
+    profile: str | None = None,
 ) -> ParseReport:
-    """Analyze `sql` (one statement in `dialect`). Raises SqlParseError for SQL that does
-    not parse, NotFoundError for an unknown profile name, PolicyError for an unknown
-    dialect."""
+    """Analyze `sql` (one statement in `dialect`). An omitted dialect is the connection's:
+    `profile`'s, else the default connection's (`_library.resolve_dialect`). Raises SqlParseError
+    for SQL that does not parse, NotFoundError for an unknown profile name, PolicyError for
+    an unknown dialect or when no dialect can be resolved."""
     with _audit.audit_failures(ctx, user, AuditKind.PARSE_QUERY, sql=sql):
         require(user, Action.DESCRIBE)
-        dialect = _library.parse_dialect(dialect)
+        dialect = _library.resolve_dialect(ctx, dialect, profile)
     used: str | None = profile
     fields = {"sql": sql, "extra": {"dialect": dialect.value, "profile": profile}}
     with _audit.audit_failures(ctx, user, AuditKind.PARSE_QUERY, **fields):

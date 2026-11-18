@@ -23,3 +23,7 @@ Status: accepted · 2026-11-16
   Compose (several definitions by alias + final SELECT → `/run`; save as a recipe proposal),
   Join map (`GET /joins`), Tables (`GET /tables`), SQL (exploratory, `POST /check`).
 - The Review page shows recipe and join proposals as a recipe summary / join table.
+
+## Amendment (2026-11-17): see ADR 0026
+Accepted, not built: Library and Review merge; the Explore page is removed (Join map
+becomes its own nav item).

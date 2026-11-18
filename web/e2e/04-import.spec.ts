@@ -1,4 +1,4 @@
-import { expect, screenshot, signIn, test, tokens } from "./helpers";
+import { api, expect, screenshot, signIn, test, tokens } from "./helpers";
 
 const SQL = `SELECT status, COUNT(*) AS n
 FROM invoices
@@ -67,7 +67,16 @@ test("import a trusted query, build variables, auto-apply, then run it", async (
 
   // Step 3: describe it. Continue without a meaning shows the error first.
   await page.getByLabel(/^Title/).fill("Invoices by status");
-  await expect(page.getByLabel(/^ID/)).toHaveValue("invoices_by_status");
+  // ADR 0024: the ID is filled in from the title and locked until "Edit ID".
+  const idField = page.getByLabel(/^ID/);
+  await expect(idField).toHaveValue("invoices_by_status");
+  await expect(idField).toHaveAttribute("readonly", "");
+  await expect(page.getByText("Filled in from the title. Agents and recipes use this name.")).toBeVisible();
+  await page.getByRole("button", { name: "Edit ID" }).click();
+  await expect(idField).not.toHaveAttribute("readonly", "");
+  await page.getByRole("button", { name: "Use title" }).click();
+  await expect(idField).toHaveAttribute("readonly", "");
+  await expect(idField).toHaveValue("invoices_by_status");
   await page.getByRole("button", { name: "Continue" }).click();
   await expect(page.locator("#md-meaning-error")).toBeVisible();
   await page.getByLabel(/^Meaning/).fill("Number of non-void invoices per invoice status in a period.");
@@ -101,4 +110,37 @@ test("import a trusted query, build variables, auto-apply, then run it", async (
   expect(statuses).not.toContain("void");
   await expect(result.getByText(/\/\* cteforge: invoices_by_status v1 compile_id=\w+ \*\//)).toBeVisible();
   await screenshot(page, "04-imported-definition-run");
+});
+
+test("admin sets the default connection in Settings; Import starts on it", async ({ page }) => {
+  try {
+    await signIn(page, tokens.admin, "/settings");
+    const select = page.getByLabel("Default connection");
+    await expect(select).toBeEnabled();
+    await expect(select.locator("option")).toHaveText(["None", "demo (duckdb)"]);
+    await select.selectOption("demo");
+    await expect(page.getByText("Default connection set to demo")).toBeVisible();
+    await expect(select).toHaveValue("demo");
+    await screenshot(page, "04-settings-default-connection");
+
+    await page.getByRole("link", { name: "Import", exact: true }).click();
+    await expect(page).toHaveURL(/\/import$/);
+    await expect(page.getByLabel("Warehouse profile")).toHaveValue("demo");
+    const dialect = page.getByLabel("Dialect", { exact: true });
+    await expect(dialect).toHaveValue("duckdb");
+    await expect(page.getByText("From connection demo.")).toBeVisible();
+    // Still overridable per import, with the cost spelled out.
+    await dialect.selectOption("postgres");
+    await expect(
+      page.getByText("Differs from connection demo: checks run on SQL translated to duckdb, lower trust."),
+    ).toBeVisible();
+
+    // Non-admins have no Settings link (team settings are admin-only).
+    await page.evaluate(() => sessionStorage.clear()); // sign out (the token lives there)
+    await signIn(page, tokens.approver);
+    await expect(page.getByRole("link", { name: "Import", exact: true })).toBeVisible();
+    await expect(page.getByRole("link", { name: "Settings", exact: true })).toHaveCount(0);
+  } finally {
+    await api("PUT", "/settings", tokens.admin, { default_connection: null });
+  }
 });

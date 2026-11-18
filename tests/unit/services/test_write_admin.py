@@ -9,17 +9,26 @@ import pytest
 from sqlalchemy import select
 
 from cteforge.domain.audit import AuditKind, AuditOutcome
+from cteforge.domain.connections import WarehouseProfile
+from cteforge.domain.dialects import Dialect
 from cteforge.domain.errors import (
     NotFoundError,
     PermissionDeniedError,
     PolicyError,
     StoreError,
 )
+from cteforge.domain.issues import IssueCode
 from cteforge.domain.models import TeamMode
 from cteforge.domain.users import ActorKind, User, UserRole
 from cteforge.services import admin
 from cteforge.services.auth import authenticate, hash_token
-from cteforge.services.context import AppConfig, AppContext, open_context, team_mode
+from cteforge.services.context import (
+    DEFAULT_CONNECTION_SETTING,
+    AppConfig,
+    AppContext,
+    open_context,
+    team_mode,
+)
 from cteforge.store import tables
 
 FIXED = dt.datetime(2026, 11, 16, 9, 30, tzinfo=dt.UTC)
@@ -148,3 +157,36 @@ def test_agent_admin_cannot_mint_or_take_over_humans(ctx: AppContext, root: User
     assert admin.rotate_token(ctx, agent_admin, "agentadm")  # own token
     event = ctx.audit.list_events(kind=AuditKind.ADMIN, limit=1)[0]
     assert event.actor == "agentadm" and event.outcome is AuditOutcome.OK
+
+
+def test_default_connection_admin_only_validated_and_audited() -> None:
+    profiles = [
+        WarehouseProfile(name="pg", dialect=Dialect.POSTGRES),
+        WarehouseProfile(name="sf", dialect=Dialect.SNOWFLAKE),
+    ]
+    with open_context(AppConfig(db_url="sqlite://"), profiles=profiles) as c:
+        admin_user, _ = admin.bootstrap_admin(c, "root")
+        viewer, _ = admin.create_user(c, admin_user, "vic", "viewer")
+        unset = admin.get_settings(c, admin_user)
+        assert (unset.default_connection, unset.effective_default_connection) == (None, None)
+        saved = admin.set_default_connection(c, admin_user, " sf ")
+        assert (saved.default_connection, saved.effective_default_connection) == ("sf", "sf")
+        assert saved.mode is TeamMode.OPEN and saved.issues == []
+        assert c.warehouses.summary().dialect is Dialect.SNOWFLAKE
+        event = c.audit.list_events(kind=AuditKind.ADMIN, limit=1)[0]
+        assert event.extra["op"] == "set_default_connection"
+        assert event.extra["default_connection"] == "sf"
+        with pytest.raises(NotFoundError, match="'nope' is not configured"):
+            admin.set_default_connection(c, admin_user, "nope")
+        assert c.audit.list_events(kind=AuditKind.ADMIN, limit=1)[0].outcome is (AuditOutcome.ERROR)
+        with pytest.raises(PermissionDeniedError):
+            admin.set_default_connection(c, viewer, "pg")
+        assert admin.get_settings(c, admin_user).default_connection == "sf"
+        # A stored profile later removed from connections.yml: a warning, not a failure.
+        c.store.set_setting(DEFAULT_CONNECTION_SETTING, "gone")
+        stale = admin.get_settings(c, admin_user)
+        assert stale.default_connection == "gone" and stale.effective_default_connection is None
+        assert [i.code for i in stale.issues] == [IssueCode.DEFAULT_CONNECTION_MISSING]
+        cleared = admin.set_default_connection(c, admin_user, None)
+        assert cleared.default_connection is None and cleared.issues == []
+        assert c.store.get_setting(DEFAULT_CONNECTION_SETTING) is None

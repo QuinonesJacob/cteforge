@@ -6,7 +6,9 @@ Support module, not a use-case: no permission checks of its own (callers `requir
   recipe checks (render + compose dry-run, nothing runs), owner rule, warehouse lookup.
 - Submitting: store the proposal, auto-apply it when the team mode and checks allow.
 - Applying an approved proposal to the store (`apply_proposal`): a new definition/recipe
-  version or a join edge, then the join map is refreshed (services/_library.py).
+  version or a join edge, then the join map is refreshed (services/_library.py) and a new
+  definition version gets its meaning-search vector (services/_meaning.py; best effort,
+  only when the model is already loaded — never fails or delays the apply).
 
 Applied state (ADR 0007): VERIFIED only when a human approver verifies on approval;
 otherwise the state the checks earned (LLM_ANNOTATED when they passed and were complete,
@@ -34,6 +36,14 @@ tables exist, every key column exists; else a `not_found` error; no profile or a
 failure → `checks_incomplete`, so it waits for review). It records the edge it was based
 on (`payload.base_join`, None for a new edge); applying it after the edge changed (content
 or state, usage_count ignored) raises StaleVersionError with a `stale_base_version` issue.
+
+Renames (ADR 0024): a RENAME_DEFINITION proposal (`rename_proposal`) carries `from_id`,
+`to_id` and the references seen when it was proposed. It is checked like any change to its
+target (auto-applied only in open mode on a definition that is not verified; never with
+verify). Applying it re-checks that the definition still has `from_id` (a rename that
+another rename overtook is stale) and that `to_id` is still free, then the store renames
+it in one transaction (`Store.rename_definition`): no new version, every stored copy of
+the id (versions' YAML, recipes, proposals) rewritten, the old id recorded as a former id.
 
 Decisions are serialized in-process (`DECISIONS`): applying and deciding re-read the
 proposal under the lock and refuse one that is no longer pending. Across processes on one
@@ -81,7 +91,7 @@ from cteforge.domain.models import (
 from cteforge.domain.proposals import Proposal, ProposalKind, ProposalStatus
 from cteforge.domain.users import User, UserRole, role_at_least
 from cteforge.parsing.analyze import parse
-from cteforge.services import _audit, _library
+from cteforge.services import _audit, _library, _meaning
 from cteforge.services.cards import (
     ProposalOutcome,
     ProposalView,
@@ -149,20 +159,21 @@ def record_proposal(
         and proposal.kind in (ProposalKind.NEW_DEFINITION, ProposalKind.REVISE_DEFINITION)
         else []
     )
-    _audit.record(
-        ctx,
-        user,
-        kind,
-        definitions=definitions,
-        extra={
-            "op": op,
-            "proposal_id": proposal.id,
-            "proposal_kind": proposal.kind.value,
-            "target_id": proposal.target_id,
-            "status": proposal.status.value,
-            "auto_applied": proposal.auto_applied,
-        },
-    )
+    extra: dict[str, Any] = {
+        "op": op,
+        "proposal_id": proposal.id,
+        "proposal_kind": proposal.kind.value,
+        "target_id": proposal.target_id,
+        "status": proposal.status.value,
+        "auto_applied": proposal.auto_applied,
+    }
+    if proposal.kind is ProposalKind.RENAME_DEFINITION:
+        # Listed under both ids, so the audit history of either finds the rename.
+        old, new = str(proposal.payload["from_id"]), str(proposal.payload["to_id"])
+        version = proposal.base_version
+        definitions = [f"{old}@{version}", f"{new}@{version}"]
+        extra |= {"renamed_from": old, "renamed_to": new}
+    _audit.record(ctx, user, kind, definitions=definitions, extra=extra)
 
 
 # ── Inputs ───────────────────────────────────────────────────────────────────────────
@@ -310,12 +321,8 @@ def recipe_checks(ctx: AppContext, recipe: Recipe) -> list[Issue]:
             continue
         definition = ctx.store.get_definition(ref.id, ref.version)
         if definition is None:
-            at = f" version {ref.version}" if ref.version is not None else ""
-            issues.append(
-                _recipe_issue(
-                    f"'{alias}': definition '{ref.id}'{at} does not exist.", IssueCode.NOT_FOUND
-                )
-            )
+            missing = _library.definition_not_found(ctx, ref.id, ref.version)
+            issues.append(_recipe_issue(f"'{alias}': {missing}", IssueCode.NOT_FOUND))
             continue
         if definition.state is DefinitionState.DRAFT:
             issues.append(
@@ -403,6 +410,47 @@ def recipe_proposal(ctx: AppContext, user: User, recipe: Recipe, summary: str) -
     )
 
 
+def rename_proposal(
+    ctx: AppContext, user: User, current: Definition, new_id: str, summary: str
+) -> Proposal:
+    """A RENAME_DEFINITION proposal of `current` to `new_id` (ADR 0024). Callers validate
+    `new_id` (`_library.check_id_available`). The payload keeps the references seen now,
+    so a reviewer sees what the proposer saw; `base_version` is informational (a rename
+    keeps every version, so a later revision does not make it stale)."""
+    references = _library.definition_references(ctx, current)
+    return new_proposal(
+        ctx,
+        user,
+        ProposalKind.RENAME_DEFINITION,
+        current.id,
+        {
+            "from_id": current.id,
+            "to_id": new_id,
+            "references": references.model_dump(mode="json"),
+        },
+        [],
+        summary=summary.strip() or f"Rename {current.id} to {new_id}",
+        base_version=current.version,
+    )
+
+
+def stale_rename_error(proposal: Proposal) -> StaleVersionError:
+    """StaleVersionError for a rename whose definition no longer has `from_id`."""
+    old = str(proposal.payload.get("from_id"))
+    now = proposal.target_id
+    message = (
+        f"This rename was proposed for '{old}', which has since been renamed to '{now}'. "
+        f"Reject it and propose the rename again from '{now}'."
+        if now != old
+        else f"Definition '{old}' no longer exists; this rename can't be applied."
+    )
+    error = StaleVersionError(f"stale_base_version: {message}")
+    error.issues = [  # type: ignore[attr-defined]
+        Issue(code=IssueCode.STALE_BASE_VERSION, severity=Severity.ERROR, message=message)
+    ]
+    return error
+
+
 def _join_basis(edge: JoinEdge | None) -> dict[str, Any] | None:
     """What a join proposal is based on: the edge without its usage_count."""
     return None if edge is None else edge.model_dump(mode="json", exclude={"usage_count"})
@@ -483,7 +531,8 @@ def target_state(ctx: AppContext, proposal: Proposal) -> DefinitionState | None:
 
 
 def proposed_state(proposal: Proposal) -> DefinitionState | None:
-    """The state a definition proposal's checks earned; None for recipes and joins."""
+    """The state a definition proposal's checks earned; None for recipes, joins and
+    renames."""
     if proposal.kind not in (ProposalKind.NEW_DEFINITION, ProposalKind.REVISE_DEFINITION):
         return None
     return definition_from_yaml(str(proposal.payload["definition_yaml"])).state
@@ -505,6 +554,8 @@ def verify_refusal(proposal: Proposal) -> str | None:
     """Why `proposal` may not be applied with verify (None when it may). A verified result
     must rest on complete, passing checks (ADR 0007, DESIGN §8)."""
     codes = {i.code for i in proposal.checks}
+    if proposal.kind is ProposalKind.RENAME_DEFINITION:
+        return "is a rename; there is nothing to verify (approve it without verify)"
     if has_errors(proposal.checks):
         return "has failing checks; it cannot be approved or verified"
     if IssueCode.CHECKS_INCOMPLETE in codes:
@@ -552,6 +603,9 @@ def view(ctx: AppContext, proposal: Proposal) -> ProposalView:
     if proposal.kind in (ProposalKind.NEW_DEFINITION, ProposalKind.REVISE_DEFINITION):
         if proposal.base_version is not None:
             base = ctx.store.get_definition(proposal.target_id, proposal.base_version)
+        impact = [r.id for r in ctx.store.recipes_using(proposal.target_id)]
+    elif proposal.kind is ProposalKind.RENAME_DEFINITION:
+        # No diff: the payload says from → to; impact is what uses the definition now.
         impact = [r.id for r in ctx.store.recipes_using(proposal.target_id)]
     elif proposal.kind is ProposalKind.NEW_RECIPE:
         if proposal.base_version is not None:
@@ -650,6 +704,11 @@ def _check_base(ctx: AppContext, proposal: Proposal) -> None:
         latest = None if current is None else current.version
         if latest != proposal.base_version:
             raise stale_error("Recipe", proposal.target_id, latest, proposal.base_version)
+    elif proposal.kind is ProposalKind.RENAME_DEFINITION:
+        old = str(proposal.payload["from_id"])
+        if proposal.target_id != old or ctx.store.latest_version(old) is None:
+            raise stale_rename_error(proposal)
+        _library.check_id_available(ctx, str(proposal.payload["to_id"]), renaming=old)
     # Proposals stored before base_join existed carry no basis and are not checked.
     elif "base_join" in proposal.payload:
         current_edge = _join_basis(ctx.store.get_join(proposal.target_id))
@@ -658,8 +717,9 @@ def _check_base(ctx: AppContext, proposal: Proposal) -> None:
 
 
 def _resulting_version(proposal: Proposal) -> int | None:
-    """The version applying creates (base + 1); None for a join edge."""
-    if proposal.kind is ProposalKind.NEW_JOIN:
+    """The version applying creates (base + 1); None for a join edge or a rename (a rename
+    creates no version, ADR 0024)."""
+    if proposal.kind in (ProposalKind.NEW_JOIN, ProposalKind.RENAME_DEFINITION):
         return None
     return (proposal.base_version or 0) + 1
 
@@ -747,6 +807,14 @@ def apply_proposal(
             elif proposal.kind is ProposalKind.NEW_RECIPE:
                 assert version is not None
                 applied = _apply_recipe(ctx, proposal, verify, version)
+            elif proposal.kind is ProposalKind.RENAME_DEFINITION:
+                applied = ctx.store.rename_definition(
+                    str(proposal.payload["from_id"]),
+                    str(proposal.payload["to_id"]),
+                    renamed_by=user.name,
+                    renamed_at=ctx.now(),
+                    proposal_id=proposal.id,
+                )
             else:
                 applied = _apply_join(ctx, proposal, verify)
         except BaseException:
@@ -758,4 +826,11 @@ def apply_proposal(
             edge = ctx.store.get_join(applied.id)
             assert edge is not None
             applied = edge
+    if proposal.kind is ProposalKind.RENAME_DEFINITION:
+        # The store moved this proposal's target to the new id: return it as stored.
+        decided = ctx.store.get_proposal(proposal.id) or decided
+    if isinstance(applied, Definition):
+        # Meaning search vector (ADR 0023): best effort, never fails or delays the apply
+        # (only embeds when the model is already loaded; search backfills otherwise).
+        _meaning.index_definition(ctx, applied)
     return decided, applied

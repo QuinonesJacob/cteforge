@@ -73,7 +73,11 @@ export function ProposalActions({ proposal, user, target = null, targetLoading =
           <Field label="Comment" htmlFor="pa-comment" hint="Kept with the proposal. Required to reject.">
             <textarea id="pa-comment" rows={2} value={comment} onChange={(e) => setComment(e.target.value)} />
           </Field>
-          {mayApprove && proposal.kind !== "new_join" && proposal.kind !== "new_recipe" && !ownerOnly && (
+          {mayApprove &&
+            proposal.kind !== "new_join" &&
+            proposal.kind !== "new_recipe" &&
+            proposal.kind !== "rename_definition" &&
+            !ownerOnly && (
             <label className="check">
               <input
                 type="checkbox"

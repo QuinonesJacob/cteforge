@@ -6,7 +6,8 @@ MCP server (ADR 0018, DESIGN §6). Thin adapter over services. Project root: ../
 - `server.py` — `build_server(ctx: AppContext, resolve_user: Callable[[], User], *,
   transport_security=None) -> FastMCP` registering the tools below; `run_stdio()` used by
   `cteforge mcp` (acts as CTEFORGE_USER via `services.auth.local_user(create=False)`, re-read
-  per call: the user must exist, an empty store is refused);
+  per call: the user must exist, an empty store is refused; starts meaning search in the
+  background — `search_index.start_background` — so no tool call waits for the model);
   `http_app(server, *, path="/") -> Starlette` for the API to mount (mounted at `/mcp` →
   endpoint `/mcp/`; the parent app's lifespan must run `server.session_manager.run()`,
   Starlette does not run a mounted app's lifespan); `current_request()` — the HTTP request
@@ -27,6 +28,15 @@ If something does not clearly fit one of the above, it does not belong here.
 search · get_definition · compile_and_run · check_and_run · parse_query ·
 propose_definition · revise_definition · propose_join · propose_recipe · list_recipes ·
 list_joins · describe_tables.
+`search` hits carry `match` (keyword | meaning | both) and a `note` when meaning search
+could not run; its description explains both (ADR 0023). `get_definition` takes
+`include_search_document` (adds the Markdown search document). The tool count stays 12.
+`parse_query` and `propose_definition` take an optional `dialect` (omitted → the
+connection's: the profile passed, else the team's default connection; services
+`_library.resolve_dialect`, ADR 0021).
+`revise_definition` takes an optional `new_id`: with nothing else to change it proposes a
+rename (ADR 0024; `services.propose.rename_definition`). A former id in any tool fails with
+NotFoundError "… was renamed to '<new>' …"; INSTRUCTIONS tells agents to switch to it.
 propose_recipe's `recipe` argument is `services.propose_other.RecipeInput` (no `version`,
 `state` or `schema_version`: cteforge sets them).
 No approve/verify tools (ADR 0007). Errors are returned as tool errors carrying the

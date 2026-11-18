@@ -46,7 +46,7 @@ from cteforge.domain.dialects import Dialect
 from cteforge.domain.errors import SqlParseError
 from cteforge.domain.models import LiteralForm
 from cteforge.domain.variables import RangeShape
-from cteforge.parsing.types import data_type
+from cteforge.parsing.types import data_type, element_type
 
 # Table key → column → warehouse type. Keys: "table", "schema.table" or "db.schema.table",
 # any case (matching rules: SchemaIndex).
@@ -155,9 +155,60 @@ _UNIT_ALIASES = {
 _STRING_UNIT_ARGS: dict[Dialect, dict[str, int]] = {
     Dialect.DUCKDB: {"DATE_TRUNC": 0, "DATETRUNC": 0},
     Dialect.POSTGRES: {"DATE_TRUNC": 0},
+    Dialect.REDSHIFT: {"DATE_TRUNC": 0},
     Dialect.DATABRICKS: {"DATE_TRUNC": 0, "TRUNC": 1},
 }
 COLUMN_UNIT_PREFIX = "column "  # `GrainCandidate.unit` of a truncation to a column's value.
+
+# ── ClickHouse (ADR 0025) ──
+# Array membership / regex predicates, ClickHouse only (in other dialects these nodes were
+# never filter predicates, and adding them there would renumber stored literal IDs):
+# `has(arr, 'x')` → HAS (the literal is an element sought in the array column),
+# `hasAny(arr, ['a', 'b'])` / `hasAll(...)` → HAS ANY / HAS ALL (list shapes like `= ANY`:
+# each element its own literal, no IN group), `match(s, 're')` → MATCH.
+_CLICKHOUSE_LIST_FUNCS = {"hasAny": "HAS ANY", "hasAll": "HAS ALL"}
+_ELEMENT_OPERATORS = {"HAS", "HAS ANY", "HAS ALL"}  # compared with the array's element type
+# toStartOfWeek(x[, mode[, tz]]) and toStartOfInterval(x, INTERVAL n unit[, ...]) stay
+# Anonymous in sqlglot; they are grain candidates in ClickHouse. toStartOfDay / Month /
+# Quarter / Year / Hour / Minute and toMonday parse as TimestampTrunc (sqlglot keeps the
+# name in meta, `CLICKHOUSE_NAME_KEY`) and date_trunc / dateTrunc as DateTrunc.
+CLICKHOUSE_WEEK_FUNC = "toStartOfWeek"
+CLICKHOUSE_INTERVAL_FUNC = "toStartOfInterval"
+CLICKHOUSE_NAME_KEY = "clickhouse_name"
+# ClickHouse conversions whose arguments after the first are options (scale, time zone,
+# mode), never values: `toDateTime64('2026-01-01 00:00:00', 3, 'UTC')` has one value.
+_CLICKHOUSE_VALUE_FIRST_FUNCS = {
+    "toDate",
+    "toDate32",
+    "toDateTime",
+    "toDateTime32",
+    "toDateTime64",
+    "toDecimal32",
+    "toDecimal64",
+    "toDecimal128",
+    "toDecimal256",
+    "parseDateTimeBestEffort",
+    "parseDateTime64BestEffort",
+    "parseDateTimeBestEffortOrNull",
+    "parseDateTime64BestEffortOrNull",
+}
+# Result types of common ClickHouse conversions sqlglot cannot type (Anonymous).
+_CLICKHOUSE_RESULT_TYPES = {
+    "toDate": "Date",
+    "toDate32": "Date32",
+    "toDateTime": "DateTime",
+    "toDateTime64": "DateTime64(3)",
+    "toString": "String",
+    "toStartOfWeek": "Date",
+    "toMonday": "Date",
+    "toStartOfMonth": "Date",
+    "toStartOfQuarter": "Date",
+    "toStartOfYear": "Date",
+    "toStartOfDay": "DateTime",
+    "toStartOfHour": "DateTime",
+    "toStartOfMinute": "DateTime",
+    "JSONExtractString": "String",
+}
 
 
 # ── Result models ───────────────────────────────────────────────────────────────────
@@ -295,16 +346,178 @@ def parse(sql: str, dialect: Dialect) -> exp.Expression:
     try:
         statements = [s for s in sqlglot.parse(sql, read=str(dialect)) if s is not None]
     except (ParseError, TokenError) as exc:
-        raise SqlParseError(f"Could not parse SQL as {dialect}: {exc}") from exc
-    if len(statements) != 1:
-        raise SqlParseError(f"Expected exactly one SQL statement, got {len(statements)}")
+        raise SqlParseError(syntax_error_message(sql, dialect, exc)) from exc
+    if not statements:
+        raise SqlParseError("No SQL statement found.")
+    if len(statements) > 1:
+        raise SqlParseError(
+            f"Found {len(statements)} SQL statements separated by ';'. Use exactly one."
+        )
     return statements[0]
+
+
+_QUOTE_NAMES = {"'": "quote (')", '"': 'double quote (")', "`": "backtick (`)"}
+
+
+def syntax_error_message(sql: str, dialect: Dialect, exc: ParseError | TokenError) -> str:
+    """A readable "SQL syntax error at line L, column C: <likely cause>" from sqlglot's error.
+
+    Says only what sqlglot reports (position, offending token) plus the usual causes of that
+    kind of failure; falls back to sqlglot's own text when it gives no position."""
+    if isinstance(exc, TokenError):
+        # sqlglot's TokenError position is unreliable (often the start of the SQL), so
+        # find the opener that never closes ourselves.
+        found = _unclosed_opener(sql, dialect)
+        if found is None:
+            return (
+                "SQL syntax error: the SQL could not be split into words and symbols "
+                f"(read as {dialect}). Check for an unclosed quote or comment."
+            )
+        offset, opener = found
+        line = sql.count("\n", 0, offset) + 1
+        col = offset - (sql.rfind("\n", 0, offset) + 1) + 1
+        what = "comment (/*)" if opener == "/*" else _QUOTE_NAMES[opener]
+        near = sql[offset:].split("\n", 1)[0]
+        return (
+            f"SQL syntax error at line {line}, column {col}: the {what} opened here "
+            f"is never closed (near {_excerpt(near)})."
+        )
+    errors = getattr(exc, "errors", None) or []
+    if not errors or not errors[0].get("line"):
+        return f"SQL syntax error (read as {dialect}): {exc}"
+    first = errors[0]
+    token = str(first.get("highlight") or "").strip()
+    col = max(1, int(first.get("col") or 1) - len(token) + 1)
+    where = f"SQL syntax error at line {first['line']}, column {col}"
+    description = str(first.get("description") or "").strip()
+    if description.startswith("Invalid expression") or description == "Unexpected token":
+        cause = (
+            f"unexpected {_excerpt(token)}. Common causes: a missing comma between "
+            "columns, a misspelled keyword, or an unclosed parenthesis."
+        )
+    elif description.startswith("Expecting )"):
+        cause = f"a '(' is never closed; expected ')' before {_excerpt(token)}."
+    else:
+        cause = f"{description.rstrip('.')} near {_excerpt(token)}."
+    return f"{where}: {cause} (Read as {dialect}; check the dialect if the SQL is valid.)"
+
+
+# sqlglot's tokenizers for these read \' as an escaped quote (Redshift: like its
+# QUOTE_LITERAL, which doubles backslashes; ClickHouse: STRING_ESCAPES ' and \, as its
+# string-literal syntax documents).
+_BACKSLASH_ESCAPES = {
+    Dialect.REDSHIFT,
+    Dialect.SNOWFLAKE,
+    Dialect.BIGQUERY,
+    Dialect.DATABRICKS,
+    Dialect.CLICKHOUSE,
+}
+
+
+def _unclosed_opener(sql: str, dialect: Dialect) -> tuple[int, str] | None:
+    """(offset, opener) of the first quote or /* comment that never closes, else None.
+    A doubled quote ('') is an escaped quote; so is \\' where the dialect allows it.
+
+    One missing closing quote shifts the pairing, so the LAST quote looks unclosed. A
+    quoted span running across a line break is the likelier culprit, so when an unclosed
+    quote is found, the first such earlier span's opener is reported instead."""
+    i, n = 0, len(sql)
+    multiline: dict[str, int] = {}  # quote char → opener offset of first multi-line span
+    while i < n:
+        if sql.startswith("--", i):
+            end = sql.find("\n", i)
+            i = n if end < 0 else end + 1
+        elif sql.startswith("/*", i):
+            end = sql.find("*/", i + 2)
+            if end < 0:
+                return i, "/*"
+            i = end + 2
+        elif sql[i] in _QUOTE_NAMES:
+            quote, j = sql[i], i + 1
+            while j < n:
+                if sql[j] == "\\" and dialect in _BACKSLASH_ESCAPES:
+                    j += 2
+                elif sql[j] == quote and sql[j + 1 : j + 2] == quote:
+                    j += 2
+                elif sql[j] == quote:
+                    break
+                else:
+                    j += 1
+            if j >= n:
+                return multiline.get(quote, i), quote
+            if "\n" in sql[i:j]:
+                multiline.setdefault(quote, i)
+            i = j + 1
+        else:
+            i += 1
+    return None
+
+
+def _excerpt(text: str, limit: int = 30) -> str:
+    text = " ".join(text.split())
+    return f"`{text[:limit]}…`" if len(text) > limit else f"`{text}`" if text else "end of SQL"
 
 
 def transpile(sql: str, source: Dialect, target: Dialect) -> str:
     """One statement written in `source`, as `target` SQL (sqlglot transpile; ADR 0013).
     Raises SqlParseError when it does not parse."""
-    return parse(sql, source).sql(dialect=str(target), pretty=True)
+    return generate(parse(sql, source), target)
+
+
+def generate(tree: exp.Expression, dialect: Dialect, *, pretty: bool = True) -> str:
+    """SQL text of a tree in `dialect`. Every SQL text cteforge writes goes through here.
+
+    ClickHouse: sqlglot reads toStartOfDay / toStartOfMonth / ... / toMonday as a
+    TimestampTrunc and would write `dateTrunc('MONTH', x)`; these are written back under
+    the name the SQL used (kept in the node's meta), so trusted SQL keeps its functions
+    and their return types, and date_trunc keeps its name and a lower-case unit
+    (ADR 0025). The tree itself is not changed."""
+    if dialect is Dialect.CLICKHOUSE:
+        tree = tree.copy().transform(_clickhouse_native_name, copy=False)
+    return tree.sql(dialect=str(dialect), pretty=pretty)
+
+
+def _clickhouse_native_name(node: exp.Expression) -> exp.Expression:
+    """toStartOf* / toMonday under their own name; date_trunc / dateTrunc under the name
+    written with a lower-case unit (sqlglot writes `dateTrunc('MONTH', x)`; ClickHouse reads
+    an upper-case unit only since 23.12, a lower-case one in every version)."""
+    name = node.meta.get(CLICKHOUSE_NAME_KEY)
+    zone = node.args.get("zone")
+    tail = [zone] if zone is not None else []
+    if isinstance(node, exp.TimestampTrunc) and isinstance(name, str):
+        if name.startswith("toStartOf") or name == "toMonday":
+            return exp.Anonymous(this=name, expressions=[node.this, *tail])
+    if isinstance(node, exp.DateTrunc | exp.TimestampTrunc):
+        unit = node.args.get("unit")
+        if not isinstance(unit, exp.Literal | exp.Var):
+            return node
+        written = (
+            name
+            if isinstance(name, str) and name.lower() in ("datetrunc", "date_trunc")
+            else "dateTrunc"
+        )
+        unit_text = exp.Literal.string(unit.name.lower())
+        return exp.Anonymous(this=written, expressions=[unit_text, node.this, *tail])
+    return node
+
+
+def reject_query_parameters(tree: exp.Expression, dialect: Dialect) -> None:
+    """Trusted SQL must run as written. A ClickHouse query parameter (`{name:Type}`) or a
+    `?` would make ClickHouse fail ("Substitution ... is not set": cteforge never sends
+    parameters) and would collide with cteforge's own template placeholders, which use the
+    same syntax in ClickHouse templates (ADR 0025). Raises SqlParseError."""
+    if dialect is not Dialect.CLICKHOUSE:
+        return
+    found = next(tree.find_all(exp.Placeholder), None)
+    if found is None:
+        return
+    shown = generate(found, dialect, pretty=False)
+    raise SqlParseError(
+        f"The SQL contains the ClickHouse query parameter {shown}. Trusted SQL must run as "
+        "written: replace the parameter with a literal value (e.g. 'claude-sonnet' or "
+        "toDate('2026-01-01')) and mark that literal as a variable; cteforge fills it in "
+        "when the definition runs."
+    )
 
 
 @dataclass(frozen=True)
@@ -402,8 +615,54 @@ def _is_wrapper(node: exp.Expression) -> bool:
     return isinstance(node, _WRAPPERS) and not isinstance(node, _NOT_WRAPPERS)
 
 
-def _has_reference(node: exp.Expression) -> bool:
-    return node.find(*_REFERENCES) is not None
+def _has_reference(node: exp.Expression, dialect: Dialect | None = None) -> bool:
+    if node.find(*_REFERENCES) is not None:
+        return True
+    # ClickHouse lambdas: `x -> x = 'web_search'` compares the array's elements.
+    return dialect is Dialect.CLICKHOUSE and any(
+        lambda_binding(i) is not None for i in node.find_all(exp.Identifier)
+    )
+
+
+def lambda_binding(ident: exp.Expression) -> exp.Expression | None:
+    """The array a lambda parameter ranges over: for `x` in `arrayExists(x -> x = 'a', tools)`
+    the `tools` argument (parameter i ↔ the i-th non-lambda argument). None otherwise."""
+    if not isinstance(ident, exp.Identifier) or isinstance(ident.parent, exp.Column):
+        return None
+    child, node = ident, ident.parent
+    while node is not None:
+        if isinstance(node, exp.Lambda):
+            if child.arg_key == "expressions":  # the parameter's own declaration
+                return None
+            params = [p.name for p in node.expressions]
+            if ident.name in params:
+                func = node.parent
+                arrays = [a for a in func.iter_expressions() if a is not node] if func else []
+                index = params.index(ident.name)
+                return arrays[index] if index < len(arrays) else None
+        child, node = node, node.parent
+    return None
+
+
+def array_join_binding(column: exp.Expression) -> exp.Expression | None:
+    """The array an unqualified column ranges over through ClickHouse ARRAY JOIN:
+    `ARRAY JOIN tool_names AS tool` binds `tool`, `ARRAY JOIN tool_names` rebinds
+    `tool_names` to its elements. None otherwise."""
+    if not isinstance(column, exp.Column) or column.table:
+        return None
+    select = column.find_ancestor(exp.Select)
+    while select is not None:
+        for join in select.args.get("joins") or []:
+            if (join.kind or "").upper() != "ARRAY":
+                continue
+            items = [join.this, *(join.expressions or [])]
+            for item in items:
+                if isinstance(item, exp.Alias) and item.alias == column.name:
+                    return item.this
+                if isinstance(item, exp.Column) and item.name == column.name and item is not column:
+                    return item
+        select = select.find_ancestor(exp.Select)
+    return None
 
 
 def _is_unit_arg(parent: exp.Expression, node: exp.Expression) -> bool:
@@ -416,24 +675,49 @@ def _is_unit_arg(parent: exp.Expression, node: exp.Expression) -> bool:
     )
 
 
-def _climbable(parent: exp.Expression, node: exp.Expression) -> bool:
+def _is_option_arg(parent: exp.Expression, node: exp.Expression, dialect: Dialect | None) -> bool:
+    """ClickHouse `toDateTime64(value, 3, 'UTC')`: the scale / time zone after the value."""
+    return (
+        dialect is Dialect.CLICKHOUSE
+        and isinstance(parent, exp.Anonymous)
+        and parent.name in _CLICKHOUSE_VALUE_FIRST_FUNCS
+        and node.arg_key == "expressions"
+        and (node.index or 0) > 0
+    )
+
+
+def _climbable(
+    parent: exp.Expression, node: exp.Expression, dialect: Dialect | None = None
+) -> bool:
     if node.arg_key in _NON_VALUE_ARGS or _is_unit_arg(parent, node):
+        return False
+    if _is_option_arg(parent, node, dialect):
         return False
     return _is_wrapper(parent) or isinstance(parent, exp.Tuple | exp.Any | exp.All)
 
 
-def _locate(literal: exp.Expression) -> _Located | None:
+def _is_predicate(node: exp.Expression | None, dialect: Dialect | None) -> bool:
+    if isinstance(node, _PREDICATES):
+        return True
+    if dialect is not Dialect.CLICKHOUSE:
+        return False
+    if isinstance(node, exp.ArrayContains | exp.RegexpLike):
+        return True
+    return isinstance(node, exp.Anonymous) and node.name in _CLICKHOUSE_LIST_FUNCS
+
+
+def _locate(literal: exp.Expression, dialect: Dialect | None = None) -> _Located | None:
     """Climb from a literal through value-side wrappers to its predicate, if any."""
     target = node = _target(literal)
     path = [node]
-    while not isinstance(node.parent, _PREDICATES):
+    while not _is_predicate(node.parent, dialect):
         parent = node.parent
-        if parent is None or not _climbable(parent, node):
+        if parent is None or not _climbable(parent, node, dialect):
             return None
         node = parent
         path.append(node)
     predicate = node.parent
-    operand = _classify(predicate, path[::-1])
+    operand = _classify(predicate, path[::-1], dialect)
     if operand is None:
         return None
     return _Located(target, operand.value_root, predicate, operand.operator, operand.other)
@@ -502,7 +786,24 @@ def _comparison_operand(predicate: exp.Expression, nodes: list[exp.Expression]) 
     return _Operand(operator, head, other)
 
 
-def _classify(predicate: exp.Expression, nodes: list[exp.Expression]) -> _Operand | None:
+def _clickhouse_operand(predicate: exp.Expression, nodes: list[exp.Expression]) -> _Operand | None:
+    """`has(arr, 'x')`, `match(s, 're')`: the literal is the second argument;
+    `hasAny(arr, ['a', 'b'])` / `hasAll`: each element of the literal array."""
+    head = nodes[0]
+    if isinstance(predicate, exp.ArrayContains | exp.RegexpLike):
+        if head.arg_key != "expression":
+            return None
+        operator = "HAS" if isinstance(predicate, exp.ArrayContains) else "MATCH"
+        return _Operand(operator, head, predicate.this)
+    args = predicate.expressions
+    if len(args) != 2 or head is not args[1] or not isinstance(head, exp.Array) or len(nodes) < 2:
+        return None
+    return _Operand(_CLICKHOUSE_LIST_FUNCS[predicate.name], _list_element(nodes, 0), args[0])
+
+
+def _classify(
+    predicate: exp.Expression, nodes: list[exp.Expression], dialect: Dialect | None = None
+) -> _Operand | None:
     """The literal's operand when `nodes` (predicate operand first, literal last) is the
     value side of `predicate`."""
     if isinstance(predicate, exp.In):
@@ -512,11 +813,13 @@ def _classify(predicate: exp.Expression, nodes: list[exp.Expression]) -> _Operan
         if head.arg_key not in ("low", "high"):
             return None
         operand = _Operand(f"BETWEEN_{head.arg_key.upper()}", head, predicate.this)
-    else:
+    elif isinstance(predicate, tuple(_COMPARISONS)):
         operand = _comparison_operand(predicate, nodes)
-    if operand is None or _has_reference(operand.value_root):
+    else:
+        operand = _clickhouse_operand(predicate, nodes)
+    if operand is None or _has_reference(operand.value_root, dialect):
         return None
-    if operand.other is None or not _has_reference(operand.other):
+    if operand.other is None or not _has_reference(operand.other, dialect):
         return None
     return operand
 
@@ -580,15 +883,16 @@ def _format_literal(located: _Located) -> exp.Literal | None:
     return None
 
 
-def find_literals(tree: exp.Expression) -> list[FoundLiteral]:
-    """All filter literals in the tree with stable IDs (see module docstring)."""
+def find_literals(tree: exp.Expression, dialect: Dialect | None = None) -> list[FoundLiteral]:
+    """All filter literals in the tree with stable IDs (see module docstring). `dialect`
+    enables dialect-only shapes (ClickHouse has / hasAny / match / lambdas)."""
     found: list[FoundLiteral] = []
     for scope in scopes(tree):
         ordinal = 0
         for node in _walk(scope, tree):
             if not isinstance(node, exp.Literal | exp.Boolean):
                 continue
-            located = _locate(node)
+            located = _locate(node, dialect)
             if located is None:
                 continue
             ordinal += 1
@@ -623,12 +927,65 @@ class FoundGrain:
     context: tuple[LiteralContext, ...]
 
 
+def is_truncation(node: exp.Expression, dialect: Dialect) -> bool:
+    """A grain candidate node: DateTrunc / TimestampTrunc / DatetimeTrunc, and in ClickHouse
+    also toStartOfWeek(...) and toStartOfInterval(...) (Anonymous in sqlglot)."""
+    if isinstance(node, TRUNCATIONS):
+        return True
+    return (
+        dialect is Dialect.CLICKHOUSE
+        and isinstance(node, exp.Anonymous)
+        and node.name in (CLICKHOUSE_WEEK_FUNC, CLICKHOUSE_INTERVAL_FUNC)
+        and bool(node.expressions)
+    )
+
+
+def truncated_expression(node: exp.Expression) -> exp.Expression:
+    """The expression a truncation node truncates (first argument of a ClickHouse call)."""
+    return node.expressions[0] if isinstance(node, exp.Anonymous) else node.this
+
+
+def _clickhouse_week_unit(node: exp.Anonymous, dialect: Dialect) -> str:
+    """toStartOfWeek(x[, mode[, tz]]): the mode picks the first day as in toWeek: even
+    modes (and the default, 0) start on Sunday, odd modes on Monday. Monday is ClickHouse's
+    native week (toMonday, date_trunc('week'), toStartOfInterval WEEK), so `week`;
+    Sunday is `week(sunday)` (not a changeable grain); a non-literal mode is reported."""
+    mode = node.expressions[1] if len(node.expressions) > 1 else None
+    if mode is None:
+        return "week(sunday)"
+    if isinstance(mode, exp.Literal) and not mode.is_string and mode.name.isdigit():
+        return "week" if int(mode.name) % 2 else "week(sunday)"
+    return f"week(mode {mode.sql(dialect=str(dialect))})"
+
+
+def _clickhouse_interval_unit(node: exp.Anonymous, dialect: Dialect) -> str:
+    """toStartOfInterval(x, INTERVAL n unit[, origin][, tz]): `unit` when n = 1 and no
+    origin; else a descriptive unit that no grain value equals."""
+    args = node.expressions
+    interval = args[1] if len(args) > 1 else None
+    if not isinstance(interval, exp.Interval) or interval.args.get("unit") is None:
+        return node.sql(dialect=str(dialect)).lower()
+    unit = _unit_name(interval.args["unit"].name)
+    count = interval.this
+    zone = len(args) == 3 and isinstance(args[2], exp.Literal) and args[2].is_string
+    origin = len(args) > 3 or (len(args) == 3 and not zone)
+    if isinstance(count, exp.Literal) and count.name == "1" and not origin:
+        return unit
+    shown = count.sql(dialect=str(dialect)) if count is not None else "?"
+    return f"{shown} {unit}" + (" with origin" if origin else "")
+
+
 def truncation_unit(node: exp.Expression, dialect: Dialect) -> str:
     """Normalized lower-case unit of a truncation node. Abbreviations are spelled out
     ("MM" → "month", "Q" → "quarter"). BigQuery parses `WEEK` as WEEK(SUNDAY), which is its
     native week, so that is "week"; any other explicit week start is "week(<day>)". A
     qualified column is "column <name>"; a bare column name needs the SQL's tokens
-    (`identifier_units`), because sqlglot parses it as the unit keyword."""
+    (`identifier_units`), because sqlglot parses it as the unit keyword. ClickHouse: see
+    `_clickhouse_week_unit` / `_clickhouse_interval_unit`."""
+    if isinstance(node, exp.Anonymous):
+        if node.name == CLICKHOUSE_WEEK_FUNC:
+            return _clickhouse_week_unit(node, dialect)
+        return _clickhouse_interval_unit(node, dialect)
     unit = node.args.get("unit")
     if isinstance(unit, exp.WeekStart):
         day = unit.this.name.lower() if unit.this is not None else ""
@@ -704,7 +1061,7 @@ def find_grains(tree: exp.Expression, dialect: Dialect) -> list[FoundGrain]:
     for scope in scopes(tree):
         ordinal = 0
         for node in _walk(scope, tree):
-            if not isinstance(node, TRUNCATIONS):
+            if not is_truncation(node, dialect):
                 continue
             ordinal += 1
             found.append(
@@ -734,7 +1091,7 @@ def wrapper_sql(found: FoundLiteral, dialect: Dialect) -> str | None:
         child = target.args[key]
         target = child[index] if isinstance(child, list) else child
     target.replace(exp.Var(this="?"))
-    return copy.sql(dialect=str(dialect))
+    return generate(copy, dialect, pretty=False)
 
 
 # ── Schema lookups ──────────────────────────────────────────────────────────────────
@@ -902,7 +1259,14 @@ def _pick_source(column: exp.Column, sources: dict[str, _Source], lin: _Lineage)
 
 
 def _resolve(column: exp.Column, lin: _Lineage, depth: int = 0) -> _Resolved:
-    """Trace a column to its base table (through CTEs and derived tables)."""
+    """Trace a column to its base table (through CTEs and derived tables). A ClickHouse
+    ARRAY JOIN name resolves to the array column it ranges over."""
+    if lin.dialect is Dialect.CLICKHOUSE and depth <= _MAX_DEPTH:
+        bound = array_join_binding(column)
+        if bound is not None:
+            inner = bound if isinstance(bound, exp.Column) else bound.find(exp.Column)
+            if inner is not None:
+                return _resolve(inner, lin, depth + 1)
     select = column.find_ancestor(exp.Select)
     source = None
     while select is not None and source is None:
@@ -961,7 +1325,39 @@ def _expr_type(expr: exp.Expression, lin: _Lineage, depth: int = 0) -> exp.DataT
     return result
 
 
+def _bound_array(expr: exp.Expression, lin: _Lineage) -> exp.Expression | None:
+    """ClickHouse: the array a lambda parameter or an ARRAY JOIN name ranges over."""
+    if lin.dialect is not Dialect.CLICKHOUSE:
+        return None
+    if isinstance(expr, exp.Identifier):
+        return lambda_binding(expr)
+    return array_join_binding(expr)
+
+
+def _clickhouse_type(expr: exp.Expression, lin: _Lineage, depth: int) -> exp.DataType | None:
+    """Types sqlglot cannot infer for ClickHouse: elements of a lambda parameter / ARRAY
+    JOIN name / `arr[i]` / `map['k']`, and common conversion functions."""
+    bound = _bound_array(expr, lin)
+    if bound is not None:
+        array_type = _expr_type(bound, lin, depth + 1)
+        return element_type(array_type) if array_type is not None else None
+    if isinstance(expr, exp.Bracket):
+        container = _expr_type(expr.this, lin, depth + 1)
+        return element_type(container) if container is not None else None
+    name = expr.meta.get(CLICKHOUSE_NAME_KEY) if isinstance(expr, exp.Func) else None
+    if isinstance(expr, exp.Anonymous):
+        name = expr.name
+        if name == CLICKHOUSE_INTERVAL_FUNC and expr.expressions:
+            return _expr_type(expr.expressions[0], lin, depth + 1)
+    known = _CLICKHOUSE_RESULT_TYPES.get(name) if isinstance(name, str) else None
+    return data_type(known, lin.dialect) if known is not None else None
+
+
 def _compute_type(expr: exp.Expression, lin: _Lineage, depth: int) -> exp.DataType | None:
+    if lin.dialect is Dialect.CLICKHOUSE:
+        clickhouse = _clickhouse_type(expr, lin, depth)
+        if clickhouse is not None:
+            return clickhouse
     if isinstance(expr, exp.Column):
         resolved = _resolve(expr, lin)
         if resolved.ref.type:
@@ -976,10 +1372,36 @@ def _compute_type(expr: exp.Expression, lin: _Lineage, depth: int) -> exp.DataTy
         column_type = _expr_type(original, lin, depth + 1)
         if column_type is not None:
             clone.replace(exp.Cast(this=exp.Null(), to=column_type.copy()))
+    if lin.dialect is Dialect.CLICKHOUSE:  # lambda parameters (`lower(x) = 'a'`)
+        params = [i for i in expr.find_all(exp.Identifier) if lambda_binding(i) is not None]
+        for param in params:
+            param_type = _expr_type(param, lin, depth + 1)
+            clone = _same_position(expr, param, copy)
+            if param_type is not None and clone is not None:
+                clone.replace(exp.Cast(this=exp.Null(), to=param_type.copy()))
     annotated = _annotate(copy, lin.dialect)
     if annotated is not None and annotated.this != exp.DataType.Type.UNKNOWN:
         return annotated
     return _preserved_type(expr, lin, depth)
+
+
+def _same_position(
+    root: exp.Expression, node: exp.Expression, copy: exp.Expression
+) -> exp.Expression | None:
+    """The node in `copy` (a copy of `root`) at the position `node` has in `root`."""
+    path: list[tuple[str, int | None]] = []
+    while node is not root:
+        if node.parent is None:
+            return None
+        path.append((node.arg_key, node.index))
+        node = node.parent
+    target: exp.Expression = copy
+    for key, index in reversed(path):
+        child = target.args.get(key)
+        target = child[index] if isinstance(child, list) and index is not None else child
+        if not isinstance(target, exp.Expression):
+            return None
+    return target
 
 
 def _preserved_type(expr: exp.Expression, lin: _Lineage, depth: int) -> exp.DataType | None:
@@ -1001,10 +1423,25 @@ def _preserved_type(expr: exp.Expression, lin: _Lineage, depth: int) -> exp.Data
     return None
 
 
-def _compared_type(other: exp.Expression, resolved: _Resolved | None, lin: _Lineage) -> str | None:
-    if isinstance(other, exp.Column) and resolved is not None and resolved.ref.type:
+def _compared_type(
+    other: exp.Expression,
+    resolved: _Resolved | None,
+    lin: _Lineage,
+    element: bool = False,
+) -> str | None:
+    """Type of the column side. `element`: the element type of that (array) side, what
+    ClickHouse `has` / `hasAny` / `hasAll` compare the literal with."""
+    if (
+        not element
+        and isinstance(other, exp.Column)
+        and resolved is not None
+        and resolved.ref.type
+        and _bound_array(other, lin) is None
+    ):
         return resolved.ref.type
     dtype = _expr_type(other, lin)
+    if element and dtype is not None:
+        dtype = element_type(dtype)
     return dtype.sql(dialect=str(lin.dialect)) if dtype is not None else None
 
 
@@ -1030,12 +1467,26 @@ def _suggested_format(found: FoundLiteral, value: str) -> str | None:
     return pattern
 
 
+def _column_node(other: exp.Expression | None, lin: _Lineage) -> exp.Expression | None:
+    """The column a column-side expression filters: itself, its first column, or (ClickHouse
+    lambda) the column of the array its parameter ranges over."""
+    if other is None:
+        return None
+    if isinstance(other, exp.Column):
+        return other
+    column = other.find(exp.Column)
+    if column is None and lin.dialect is Dialect.CLICKHOUSE:
+        for ident in other.find_all(exp.Identifier):
+            bound = lambda_binding(ident)
+            if bound is not None:
+                return bound if isinstance(bound, exp.Column) else bound.find(exp.Column)
+    return column
+
+
 def _literal_info(found: FoundLiteral, in_list: str | None, lin: _Lineage) -> LiteralInfo:
     dialect = str(lin.dialect)
     other = found.other_side
-    column_node = (
-        other if isinstance(other, exp.Column) else (other.find(exp.Column) if other else None)
-    )
+    column_node = _column_node(other, lin)
     resolved = _resolve(column_node, lin) if column_node is not None else None
     typed = isinstance(found.node, exp.Cast)
     value = _literal_value(found)
@@ -1047,14 +1498,18 @@ def _literal_info(found: FoundLiteral, in_list: str | None, lin: _Lineage) -> Li
         form=LiteralForm.TYPED if typed else LiteralForm.BARE,
         cast_type=found.node.to.sql(dialect=dialect) if typed else None,
         operator=found.operator,
-        column_sql=other.sql(dialect=dialect) if other is not None else None,
+        column_sql=generate(other, lin.dialect, pretty=False) if other is not None else None,
         column=resolved.ref if resolved is not None else None,
         wrapped=other is not None and not isinstance(other, exp.Column),
         in_list=in_list,
         context=list(found.context),
         wrapper_sql=wrapper_sql(found, lin.dialect),
         suggested_format=_suggested_format(found, value),
-        compared_type=_compared_type(other, resolved, lin) if other is not None else None,
+        compared_type=(
+            _compared_type(other, resolved, lin, found.operator in _ELEMENT_OPERATORS)
+            if other is not None
+            else None
+        ),
     )
 
 
@@ -1086,19 +1541,18 @@ def _projection_output(node: exp.Expression) -> str | None:
 def _grain_candidate(
     found: FoundGrain, lin: _Lineage, column_units: dict[str, str]
 ) -> GrainCandidate:
-    dialect = str(lin.dialect)
     unit = found.unit
     if unit in column_units and isinstance(found.node.args.get("unit"), exp.Var | exp.Literal):
         unit = COLUMN_UNIT_PREFIX + column_units[unit]
-    this = found.node.this
+    this = truncated_expression(found.node)
     column_node = this if isinstance(this, exp.Column) else this.find(exp.Column)
     resolved = _resolve(column_node, lin) if column_node is not None else None
     return GrainCandidate(
         id=found.id,
         scope=found.scope,
         unit=unit,
-        column_sql=this.sql(dialect=dialect),
-        sql=found.node.sql(dialect=dialect),
+        column_sql=generate(this, lin.dialect, pretty=False),
+        sql=generate(found.node, lin.dialect, pretty=False),
         column=resolved.ref if resolved is not None else None,
         column_type=_compared_type(this, resolved, lin) if column_node is not None else None,
         output=_projection_output(found.node),
@@ -1278,6 +1732,8 @@ def _joins(tree: exp.Expression, lin: _Lineage) -> list[JoinInfo]:
     for scope in scopes(tree):
         for node in _walk(scope, tree):
             if isinstance(node, exp.Join) and isinstance(node.parent, exp.Select):
+                if (node.kind or "").upper() == "ARRAY":  # ClickHouse ARRAY JOIN: no table
+                    continue
                 info = _join_info(node, scope.name, lin)
                 if info is not None:
                     joins.append(info)
@@ -1315,8 +1771,9 @@ def referenced_tables(sql: str, dialect: Dialect) -> list[str]:
 
 def analyze(sql: str, dialect: Dialect, schema: Schema | None = None) -> QueryAnalysis:
     tree = parse(sql, dialect)
+    reject_query_parameters(tree, dialect)
     lin = _lineage(tree, dialect, schema)
-    found = find_literals(tree)
+    found = find_literals(tree, dialect)
     literals = _literal_infos(found, lin)
     column_units = identifier_units(sql, dialect)
     return QueryAnalysis(
@@ -1325,7 +1782,8 @@ def analyze(sql: str, dialect: Dialect, schema: Schema | None = None) -> QueryAn
             CteInfo(
                 name=name,
                 reads=_table_names(body, lin, include_ctes=True),
-                outputs=list(body.named_selects),
+                # A ClickHouse scalar WITH (`WITH 'x' AS m`) names a value, not a query.
+                outputs=list(body.named_selects) if isinstance(body, exp.Query) else [],
             )
             for name, body in lin.ctes.values()
         ],

@@ -13,7 +13,17 @@ from cteforge.domain.variables import VariableType
 
 _DATE_TYPES = {exp.DataType.Type.DATE, exp.DataType.Type.DATE32}
 _TIMESTAMP_TYPES = exp.DataType.TEMPORAL_TYPES - _DATE_TYPES
-_TEXT_TYPES = exp.DataType.TEXT_TYPES
+# BPCHAR: blank-padded CHAR as Postgres / Redshift catalogs may spell it.
+_TEXT_TYPES = exp.DataType.TEXT_TYPES | {exp.DataType.Type.BPCHAR}
+# ClickHouse FixedString, Enum8 / Enum16 and UUID columns compare with string literals
+# (`status = 'error'`, `id = '…-…'`), so a text value filters them (ADR 0025).
+_CLICKHOUSE_TEXT_TYPES = {
+    exp.DataType.Type.FIXEDSTRING,
+    exp.DataType.Type.ENUM,
+    exp.DataType.Type.ENUM8,
+    exp.DataType.Type.ENUM16,
+    exp.DataType.Type.UUID,
+}
 _NUMERIC_TYPES = exp.DataType.NUMERIC_TYPES
 _BOOL_TYPES = {exp.DataType.Type.BOOLEAN}
 
@@ -26,6 +36,36 @@ def data_type(type_str: str, dialect: Dialect) -> exp.DataType | None:
         return None
 
 
+def _value_type(dtype: exp.DataType) -> exp.DataType:
+    """The type a value is compared as. ClickHouse wrappers are unwrapped:
+    LowCardinality(T) → T (Nullable(T) is already T with a nullable flag in sqlglot), and
+    SimpleAggregateFunction(f, T) → T (the column stores plain T values)."""
+    while dtype.expressions:
+        if dtype.this is exp.DataType.Type.LOWCARDINALITY:
+            inner = dtype.expressions[0]
+        elif dtype.this is exp.DataType.Type.SIMPLEAGGREGATEFUNCTION:
+            inner = dtype.expressions[-1]
+        else:
+            break
+        if not isinstance(inner, exp.DataType):
+            break
+        dtype = inner
+    return dtype
+
+
+def element_type(dtype: exp.DataType) -> exp.DataType | None:
+    """Element type of an Array(T) (through LowCardinality / Nullable), the value type of a
+    Map(K, V); None for other types. What `has(arr, 'x')`, `arr[1]`, `m['k']` compare."""
+    dtype = _value_type(dtype)
+    if dtype.this is exp.DataType.Type.ARRAY and dtype.expressions:
+        inner = dtype.expressions[0]
+    elif dtype.this is exp.DataType.Type.MAP and len(dtype.expressions) == 2:
+        inner = dtype.expressions[1]
+    else:
+        return None
+    return inner if isinstance(inner, exp.DataType) else None
+
+
 def compatible_variable_types(type_str: str | None, dialect: Dialect) -> set[VariableType]:
     """Variable types that can filter a column of this type. Empty set = unknown type."""
     if type_str is None:
@@ -33,10 +73,10 @@ def compatible_variable_types(type_str: str | None, dialect: Dialect) -> set[Var
     dtype = data_type(type_str, dialect)
     if dtype is None:
         return set()
-    kind = dtype.this
+    kind = _value_type(dtype).this
     if kind in _DATE_TYPES or kind in _TIMESTAMP_TYPES:
         return {VariableType.DATE, VariableType.DATE_RANGE}
-    if kind in _TEXT_TYPES:
+    if kind in _TEXT_TYPES or (dialect is Dialect.CLICKHOUSE and kind in _CLICKHOUSE_TEXT_TYPES):
         return {VariableType.TEXT, VariableType.TEXT_LIST}
     if kind in _NUMERIC_TYPES:
         return {VariableType.NUMBER}

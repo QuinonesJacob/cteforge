@@ -3,9 +3,11 @@
 import type {
   Annotation,
   DefinitionMetadata,
+  Dialect,
   GrainCandidate,
   LiteralContext,
   LiteralInfo,
+  Profile,
   RangeCandidate,
   RangeShape,
   Role,
@@ -454,4 +456,35 @@ export function toMetadata(m: MetadataDraft): DefinitionMetadata {
     join_keys: parseList(m.join_keys),
     owner: m.owner.trim() || null,
   };
+}
+
+/**
+ * The connection an import uses (ADR 0021): the chosen profile, else the effective default
+ * connection (`default: true` from GET /profiles), else the only profile; undefined when
+ * none applies (e.g. profiles not loaded yet, or several and no default).
+ */
+export function importConnection(profiles: Profile[] | null | undefined, profile: string): Profile | undefined {
+  const list = profiles ?? [];
+  if (profile) return list.find((p) => p.name === profile);
+  return list.find((p) => p.default) ?? (list.length === 1 ? list[0] : undefined);
+}
+
+/**
+ * The Import page's dialect while the person has not picked one: the connection's dialect
+ * (the dialect follows the connection, as the server resolves an omitted dialect), else
+ * duckdb. `connection` is the profile it came from, if any.
+ */
+export function defaultImportDialect(
+  profiles: Profile[] | null | undefined,
+  profile: string,
+): { dialect: Dialect; connection: Profile | undefined } {
+  const connection = importConnection(profiles, profile);
+  return { dialect: connection?.dialect ?? "duckdb", connection };
+}
+
+/** The hint under the Dialect field: where the dialect came from, or what a different one costs. */
+export function connectionDialectHint(dialect: Dialect, connection: Profile | undefined): string | undefined {
+  if (!connection) return undefined;
+  if (connection.dialect === dialect) return `From connection ${connection.name}.`;
+  return `Differs from connection ${connection.name}: checks run on SQL translated to ${connection.dialect}, lower trust.`;
 }

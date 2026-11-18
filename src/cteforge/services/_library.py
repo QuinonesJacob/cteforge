@@ -12,7 +12,13 @@ No permission checks and no audit events of its own: callers `require` and recor
 - The join map (DESIGN §3, §17): canonical edges and their deterministic ids, mining edges
   from a definition's SQL (joins between two BASE tables only; CTE sides are skipped),
   recomputing `usage_count`, and matching a join against the edges.
-- Input parsing shared by several use-cases (`parse_dialect`).
+- Input parsing shared by several use-cases (`parse_dialect`, `resolve_dialect`: an
+  omitted dialect → the connection's: the profile passed, else the default connection).
+- Definition lookup by id (ADR 0024): `get_definition` / `definition_not_found` — the ONE
+  place a missing id becomes a NotFoundError, so a former id (renamed) fails naming the
+  current id in every caller (describe, history, run, recipes, verify, revise,
+  revalidate); `check_id_available` refuses a new id that exists or is another
+  definition's former id; `definition_references` lists what inside cteforge uses an id.
 """
 
 from __future__ import annotations
@@ -22,16 +28,23 @@ from typing import Any
 
 from cteforge.domain.codec import AnnotationFile
 from cteforge.domain.dialects import Dialect
-from cteforge.domain.errors import CteforgeError, PolicyError
+from cteforge.domain.errors import CteforgeError, NotFoundError, PolicyError
 from cteforge.domain.models import (
     Annotation,
     Definition,
     DefinitionState,
+    FormerId,
     JoinEdge,
     JoinKey,
     TeamMode,
 )
+from cteforge.domain.proposals import DEFINITION_KINDS, ProposalStatus
 from cteforge.parsing.analyze import analyze
+from cteforge.services.cards import (
+    DefinitionReferences,
+    ProposalReference,
+    RecipeReference,
+)
 from cteforge.services.context import AppContext
 from cteforge.templating.render import render
 
@@ -45,6 +58,135 @@ def parse_dialect(value: Dialect | str) -> Dialect:
     except ValueError:
         options = ", ".join(d.value for d in Dialect)
         raise PolicyError(f"Unknown dialect '{value}'; expected one of {options}") from None
+
+
+def resolve_dialect(
+    ctx: AppContext, dialect: Dialect | str | None, profile: str | None = None
+) -> Dialect:
+    """The dialect of SQL a caller sends (DESIGN §12, ADR 0021): the explicit `dialect`,
+    else the connection's — the dialect of `profile`, else of the team's effective default
+    connection. PolicyError when none applies; NotFoundError for an unknown profile name.
+    A dialect that differs from the connection's is allowed (`dialect_mismatch`)."""
+    if dialect is not None:
+        return parse_dialect(dialect)
+    try:
+        return ctx.warehouses.summary(profile).dialect
+    except PolicyError:
+        raise PolicyError(
+            "No dialect given: pass `dialect`, or ask an admin to set a default connection"
+        ) from None
+
+
+# ── Definition lookup by id (ADR 0024) ───────────────────────────────────────────────
+
+
+def renamed_message(former: FormerId) -> str:
+    """What a lookup of a former id says: the current id, and when it changed."""
+    when = former.renamed_at.date().isoformat()
+    return (
+        f"Definition '{former.former_id}' was renamed to '{former.definition_id}' on {when}; "
+        "use the new ID."
+    )
+
+
+def definition_not_found(
+    ctx: AppContext, id: str, version: int | None = None, *, hint: str = ""
+) -> NotFoundError:
+    """The NotFoundError for a definition id (version) the store does not have. A former id
+    (renamed, ADR 0024) gets a message naming the current id, so an agent with stale
+    instructions corrects itself in one step; there is no silent alias. `hint` is appended
+    to the plain not-found message only."""
+    former = ctx.store.former_id(id)
+    if former is not None:
+        return NotFoundError(renamed_message(former))
+    suffix = f" version {version}" if version is not None else ""
+    return NotFoundError(f"Definition '{id}'{suffix} does not exist{hint}")
+
+
+def get_definition(ctx: AppContext, id: str, version: int | None = None) -> Definition:
+    """The stored definition (latest unless `version`); NotFoundError otherwise
+    (`definition_not_found`: a former id names the current one)."""
+    definition = ctx.store.get_definition(id, version)
+    if definition is None:
+        raise definition_not_found(ctx, id, version)
+    return definition
+
+
+def check_id_available(ctx: AppContext, id: str, *, renaming: str | None = None) -> None:
+    """PolicyError unless `id` may become a definition's id: it must not exist and must
+    not be a former id of another definition (ADR 0024: an error naming the wrong
+    definition would mislead). `renaming` is the definition being renamed: taking back
+    one of its own former ids is allowed (undoing a rename)."""
+    if ctx.store.latest_version(id) is not None:
+        raise PolicyError(f"Definition '{id}' already exists; choose another ID")
+    former = ctx.store.former_id(id)
+    if former is not None and former.definition_id != renaming:
+        when = former.renamed_at.date().isoformat()
+        raise PolicyError(
+            f"'{id}' is a former ID of definition '{former.definition_id}' (renamed on "
+            f"{when}); a former ID can't be reused, because lookups of it point agents at "
+            f"'{former.definition_id}'. Choose another ID."
+        )
+
+
+OUTSIDE_WARNING = (
+    "References outside cteforge (agent instructions, prompts, scripts, notebooks) are not "
+    "listed and will stop working. A lookup of the old ID fails with an error naming the "
+    "new ID; there is no alias."
+)
+
+
+def definition_references(ctx: AppContext, definition: Definition) -> DefinitionReferences:
+    """Everything stored in cteforge that names `definition`'s id (ADR 0024): recipes (their
+    latest version; which alias, pinned version or floating) and pending proposals that
+    target it or whose recipe uses it. Join-map edges name tables, not definitions, and
+    audit events are history (never rewritten), so neither is listed."""
+    id = definition.id
+    recipes = [
+        RecipeReference(
+            recipe_id=recipe.id,
+            recipe_version=recipe.version,
+            title=recipe.title,
+            state=recipe.state,
+            alias=alias,
+            pinned_version=ref.version,
+        )
+        for recipe in ctx.store.recipes_using(id)
+        for alias, ref in sorted(recipe.uses.items())
+        if ref.id == id
+    ]
+    proposals: list[ProposalReference] = []
+    for p in ctx.store.list_proposals(ProposalStatus.PENDING):
+        if p.kind in DEFINITION_KINDS and p.target_id == id:
+            relation = "target"
+        else:
+            recipe = p.payload.get("recipe")
+            uses = recipe.get("uses") if isinstance(recipe, dict) else None
+            if not isinstance(uses, dict) or not any(
+                isinstance(ref, dict) and ref.get("id") == id for ref in uses.values()
+            ):
+                continue
+            relation = "uses"
+        proposals.append(
+            ProposalReference(
+                proposal_id=p.id,
+                kind=p.kind,
+                target_id=p.target_id,
+                summary=p.summary,
+                author=p.author,
+                created_at=p.created_at,
+                relation=relation,
+            )
+        )
+    return DefinitionReferences(
+        id=id,
+        version=definition.version,
+        state=definition.state,
+        recipes=recipes,
+        proposals=proposals,
+        former_ids=ctx.store.former_ids(id),
+        outside_warning=OUTSIDE_WARNING,
+    )
 
 
 # ── Version visibility ───────────────────────────────────────────────────────────────

@@ -3,8 +3,11 @@ import type { GrainCandidate, LiteralInfo, RangeCandidate } from "../api/types";
 import {
   allPairsSuggested,
   carryOverDrafts,
+  connectionDialectHint,
+  defaultImportDialect,
   descriptionRule,
   grainUsable,
+  importConnection,
   newGrainDraft,
   rangeShape,
   sameUnitGrains,
@@ -330,5 +333,35 @@ describe("metadata", () => {
       join_keys: ["account_id"],
       owner: "jq",
     });
+  });
+});
+
+describe("import connection and dialect", () => {
+  const profiles = [
+    { name: "wh", dialect: "duckdb" as const, default: false },
+    { name: "sf", dialect: "snowflake" as const, default: true },
+  ];
+  it("uses the chosen profile, else the default connection, else the only profile", () => {
+    expect(importConnection(profiles, "wh")?.name).toBe("wh");
+    expect(importConnection(profiles, "")?.name).toBe("sf");
+    expect(importConnection([{ name: "pg", dialect: "postgres" }], "")?.name).toBe("pg");
+    expect(importConnection(profiles, "gone")).toBeUndefined();
+  });
+  it("takes the dialect from the connection", () => {
+    expect(defaultImportDialect(profiles, "wh")).toEqual({ dialect: "duckdb", connection: profiles[0] });
+    expect(defaultImportDialect(profiles, "")).toEqual({ dialect: "snowflake", connection: profiles[1] });
+  });
+  it("uses duckdb when no connection applies", () => {
+    expect(defaultImportDialect([], "")).toEqual({ dialect: "duckdb", connection: undefined });
+    expect(defaultImportDialect(null, "")).toEqual({ dialect: "duckdb", connection: undefined });
+    const noDefault = profiles.map((p) => ({ ...p, default: false }));
+    expect(defaultImportDialect(noDefault, "")).toEqual({ dialect: "duckdb", connection: undefined });
+  });
+  it("hints where the dialect came from, or that it differs", () => {
+    expect(connectionDialectHint("snowflake", profiles[1])).toBe("From connection sf.");
+    expect(connectionDialectHint("postgres", profiles[1])).toBe(
+      "Differs from connection sf: checks run on SQL translated to snowflake, lower trust.",
+    );
+    expect(connectionDialectHint("duckdb", undefined)).toBeUndefined();
   });
 });

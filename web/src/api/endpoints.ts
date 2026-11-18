@@ -19,11 +19,13 @@ import type {
   ProposalStatus,
   ProposalView,
   ProposeDefinitionRequest,
+  DefinitionReferences,
+  RenameDefinitionRequest,
   RunOutcome,
   RunRequest,
   SearchHit,
   Settings,
-  TeamMode,
+  SettingsUpdate,
   User,
   UserRole,
   ActorKind,
@@ -47,16 +49,22 @@ export const getDefinition = (id: string, version?: number, opts: Opts & { inclu
   });
 export const getDefinitionHistory = (id: string, opts: Opts = {}) =>
   request<DefinitionVersionInfo[]>("GET", `/definitions/${enc(id)}/history`, opts);
+/** Everything inside cteforge that uses the ID (ADR 0024): shown before a rename. */
+export const getDefinitionReferences = (id: string, opts: Opts = {}) =>
+  request<DefinitionReferences>("GET", `/definitions/${enc(id)}/references`, opts);
 export const verifyDefinition = (id: string, version: number) =>
   request<DefinitionCard>("POST", `/definitions/${enc(id)}/verify`, { body: { version } });
 
 // ── Build ──
-export const parseQuery = (body: { sql: string; dialect: Dialect; profile?: string }) =>
+/** `dialect` omitted → the connection's: the profile's, else the default connection's. */
+export const parseQuery = (body: { sql: string; dialect?: Dialect; profile?: string }) =>
   request<ParseReport>("POST", "/parse", { body });
 export const proposeDefinition = (body: ProposeDefinitionRequest) =>
   request<ProposalOutcome>("POST", "/proposals/definitions", { body });
 export const reviseDefinition = (id: string, body: ReviseDefinitionRequest) =>
   request<ProposalOutcome>("POST", `/proposals/definitions/${enc(id)}/revise`, { body });
+export const renameDefinition = (id: string, body: RenameDefinitionRequest) =>
+  request<ProposalOutcome>("POST", `/proposals/definitions/${enc(id)}/rename`, { body });
 export const proposeRecipe = (recipe: RecipeInput, summary: string) =>
   request<ProposalOutcome>("POST", "/proposals/recipes", { body: { recipe, summary } });
 
@@ -127,4 +135,4 @@ export const rotateToken = async (name: string) =>
 export const setUserRole = (name: string, role: UserRole) =>
   request<User>("PUT", `/users/${enc(name)}/role`, { body: { role } });
 export const getSettings = (opts: Opts = {}) => request<Settings>("GET", "/settings", opts);
-export const putSettings = (mode: TeamMode) => request<Settings>("PUT", "/settings", { body: { mode } });
+export const putSettings = (body: SettingsUpdate) => request<Settings>("PUT", "/settings", { body });

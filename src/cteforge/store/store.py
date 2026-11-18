@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import struct
 import threading
 from collections.abc import Iterator
 from contextlib import AbstractContextManager, contextmanager, nullcontext
@@ -21,6 +22,7 @@ from sqlalchemy import (
     Table,
     and_,
     create_engine,
+    delete,
     event,
     insert,
     or_,
@@ -37,10 +39,12 @@ from cteforge.domain.models import (
     Definition,
     DefinitionState,
     DefinitionVersionInfo,
+    FormerId,
     JoinEdge,
     Recipe,
 )
-from cteforge.domain.proposals import Proposal, ProposalStatus
+from cteforge.domain.proposals import Proposal, ProposalStatus, proposal_with_definition_renamed
+from cteforge.domain.search import SearchVector
 from cteforge.domain.users import ActorKind, User, UserRole
 from cteforge.store import tables as t
 
@@ -91,7 +95,8 @@ def _expect_next(latest: int | None, version: int, what: str, id: str) -> None:
 
 
 class Store:
-    """Persistence for definitions, recipes, joins, proposals, users and settings."""
+    """Persistence for definitions, recipes, joins, proposals, users, settings and search
+    vectors."""
 
     def __init__(self, url: str) -> None:
         self._engine = _make_engine(url)
@@ -288,6 +293,110 @@ class Store:
             )
         return updated
 
+    # ------------------------------------------------------------ renaming (ADR 0024)
+
+    def rename_definition(
+        self,
+        old: str,
+        new: str,
+        *,
+        renamed_by: str,
+        renamed_at: dt.datetime | None = None,
+        proposal_id: str | None = None,
+    ) -> Definition:
+        """Give definition `old` the id `new`, in ONE transaction, everywhere it is stored:
+        the `definitions` row, every version (row and the id inside its YAML; version
+        numbers, authors and states unchanged), every recipe version that uses it, every
+        proposal that targets or uses it (`proposal_with_definition_renamed`), and its
+        search vectors (deleted: the search document names the id, so they are rebuilt).
+        Records `old` as a former id of `new` (earlier former ids of `old` now point at
+        `new`). Taking back one of its own former ids removes that record. Audit events are
+        never rewritten (they are in another table). Returns the latest version.
+        StoreError when `old` does not exist, `new` exists, or `new` is a former id of
+        another definition."""
+        defs, dv, fi = t.definitions, t.definition_versions, t.former_ids
+        conflict = StoreError(f"Definition '{new}' already exists (renamed concurrently?)")
+        with self._tx(conflict=conflict) as conn:
+            row = conn.execute(select(defs).where(defs.c.id == old)).first()
+            if row is None:
+                raise StoreError(f"Definition '{old}' does not exist")
+            if self._latest(conn, defs, new) is not None:
+                raise StoreError(f"Definition '{new}' already exists")
+            taken = conn.execute(
+                select(fi.c.definition_id).where(fi.c.former_id == new)
+            ).scalar_one_or_none()
+            if taken is not None and taken != old:
+                raise StoreError(f"'{new}' is a former id of definition '{taken}'")
+            conn.execute(delete(fi).where(fi.c.former_id == new))
+            now = _now()
+            when = _utc(renamed_at) if renamed_at is not None else now
+            conn.execute(insert(defs).values(**(row._asdict() | {"id": new, "updated_at": now})))
+            versions = conn.execute(
+                select(dv.c.pk, dv.c.yaml).where(dv.c.definition_id == old)
+            ).all()
+            for pk, text in versions:
+                renamed = definition_from_yaml(text).model_copy(update={"id": new})
+                conn.execute(
+                    update(dv)
+                    .where(dv.c.pk == pk)
+                    .values(definition_id=new, yaml=definition_to_yaml(renamed))
+                )
+            conn.execute(delete(defs).where(defs.c.id == old))
+            conn.execute(update(fi).where(fi.c.definition_id == old).values(definition_id=new))
+            conn.execute(
+                insert(fi).values(
+                    former_id=old,
+                    definition_id=new,
+                    renamed_to=new,
+                    renamed_by=renamed_by,
+                    renamed_at=when,
+                    proposal_id=proposal_id,
+                )
+            )
+            rv = t.recipe_versions
+            for pk, data in conn.execute(select(rv.c.pk, rv.c.data)).all():
+                recipe = Recipe.model_validate_json(data)
+                if recipe.uses_definition(old):
+                    renamed_recipe = recipe.with_definition_renamed(old, new)
+                    conn.execute(
+                        update(rv)
+                        .where(rv.c.pk == pk)
+                        .values(data=renamed_recipe.model_dump_json())
+                    )
+            tp = t.proposals
+            for seq, data in conn.execute(select(tp.c.seq, tp.c.data)).all():
+                changed = proposal_with_definition_renamed(
+                    Proposal.model_validate_json(data), old, new
+                )
+                if changed is not None:
+                    conn.execute(
+                        update(tp)
+                        .where(tp.c.seq == seq)
+                        .values(target_id=changed.target_id, data=changed.model_dump_json())
+                    )
+            sv = t.search_vectors
+            conn.execute(delete(sv).where(sv.c.definition_id == old))
+            text = self._version_yaml(conn, new, None)
+        assert text is not None
+        return definition_from_yaml(text)
+
+    def former_id(self, id: str) -> FormerId | None:
+        """The rename record of `id` when it is a former id (ADR 0024), else None."""
+        with self._read() as conn:
+            row = conn.execute(select(t.former_ids).where(t.former_ids.c.former_id == id)).first()
+        return None if row is None else _former(row)
+
+    def former_ids(self, definition_id: str | None = None) -> list[FormerId]:
+        """Former ids (of `definition_id`, its current id; None = of every definition),
+        oldest rename first."""
+        fi = t.former_ids
+        query = select(fi).order_by(fi.c.renamed_at, fi.c.seq)
+        if definition_id is not None:
+            query = query.where(fi.c.definition_id == definition_id)
+        with self._read() as conn:
+            rows = conn.execute(query).all()
+        return [_former(row) for row in rows]
+
     # ------------------------------------------------------------------- recipes
 
     def add_recipe_version(self, r: Recipe, *, author: str) -> Recipe:
@@ -328,11 +437,7 @@ class Store:
         return [Recipe.model_validate_json(data) for data in rows]
 
     def recipes_using(self, definition_id: str) -> list[Recipe]:
-        return [
-            r
-            for r in self.list_recipes()
-            if any(ref.id == definition_id for ref in r.uses.values())
-        ]
+        return [r for r in self.list_recipes() if r.uses_definition(definition_id)]
 
     # ------------------------------------------------------------------ join map
 
@@ -486,6 +591,72 @@ class Store:
     def set_setting(self, key: str, value: str) -> None:
         self._upsert(t.settings, t.settings.c.key == key, {"key": key, "value": value})
 
+    def delete_setting(self, key: str) -> None:
+        """Remove a setting (absent → no-op), so `get_setting` returns None again."""
+        with self._tx() as conn:
+            conn.execute(delete(t.settings).where(t.settings.c.key == key))
+
+    # ------------------------------------------------------------- search vectors
+
+    def put_search_vector(self, v: SearchVector) -> None:
+        """Insert or replace the vector of (definition_id, version, model)."""
+        sv = t.search_vectors
+        key = and_(
+            sv.c.definition_id == v.definition_id,
+            sv.c.version == v.version,
+            sv.c.model == v.model,
+        )
+        values = {
+            "definition_id": v.definition_id,
+            "version": v.version,
+            "model": v.model,
+            "dim": v.dim,
+            "doc_sha256": v.doc_sha256,
+            "vector": _pack(v.vector),
+            "created_at": _now(),
+        }
+        self._upsert(sv, key, values)
+
+    def search_vectors(self, model: str) -> list[SearchVector]:
+        """Every stored vector of `model`, ordered by definition id and version."""
+        sv = t.search_vectors
+        query = select(sv).where(sv.c.model == model).order_by(sv.c.definition_id, sv.c.version)
+        with self._read() as conn:
+            rows = conn.execute(query).all()
+        return [
+            SearchVector(
+                definition_id=row.definition_id,
+                version=row.version,
+                model=row.model,
+                doc_sha256=row.doc_sha256,
+                vector=_unpack(row.vector, row.dim),
+            )
+            for row in rows
+        ]
+
+    def search_vector_models(self) -> list[str]:
+        """The models that have stored vectors, sorted."""
+        sv = t.search_vectors
+        with self._read() as conn:
+            return list(conn.execute(select(sv.c.model).distinct().order_by(sv.c.model)).scalars())
+
+    def delete_search_vectors(self, model: str | None = None) -> int:
+        """Delete the vectors of `model` (None: of every model). Returns how many."""
+        sv = t.search_vectors
+        query = delete(sv) if model is None else delete(sv).where(sv.c.model == model)
+        with self._tx() as conn:
+            return conn.execute(query).rowcount
+
+
+def _pack(vector: tuple[float, ...]) -> bytes:
+    return struct.pack(f"<{len(vector)}f", *vector)
+
+
+def _unpack(blob: bytes, dim: int) -> tuple[float, ...]:
+    if len(blob) != 4 * dim:
+        raise StoreError("Stored search vector has the wrong size")
+    return struct.unpack(f"<{dim}f", blob)
+
 
 def _version_info(row: Row[Any]) -> DefinitionVersionInfo:
     return DefinitionVersionInfo(
@@ -498,6 +669,17 @@ def _version_info(row: Row[Any]) -> DefinitionVersionInfo:
         logic_changed=row.logic_changed,
         verified_by=row.verified_by,
         verified_at=row.verified_at,
+    )
+
+
+def _former(row: Row[Any]) -> FormerId:
+    return FormerId(
+        former_id=row.former_id,
+        definition_id=row.definition_id,
+        renamed_to=row.renamed_to,
+        renamed_by=row.renamed_by,
+        renamed_at=_utc(row.renamed_at),
+        proposal_id=row.proposal_id,
     )
 
 
