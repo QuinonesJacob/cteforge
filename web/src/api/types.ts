@@ -186,7 +186,8 @@ export type Dialect =
   | "snowflake"
   | "bigquery"
   | "databricks"
-  | "clickhouse";
+  | "clickhouse"
+  | "mysql";
 export const DIALECTS: Dialect[] = [
   "duckdb",
   "postgres",
@@ -195,6 +196,7 @@ export const DIALECTS: Dialect[] = [
   "bigquery",
   "databricks",
   "clickhouse",
+  "mysql",
 ];
 
 export type DefinitionState = "draft" | "llm_annotated" | "verified";
