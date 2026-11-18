@@ -163,6 +163,21 @@ _SIDE_EFFECT_FUNCTIONS = frozenset(
         "query",
         "query_table",
         "getenv",
+        # MySQL (ADR 0028): server files, locks, stalls, replication waits, the common
+        # shell-running UDFs. SELECT ... INTO is refused as exp.Into (INTO OUTFILE /
+        # DUMPFILE does not even parse); executable comments are refused by parsing.
+        "load_file",
+        "sleep",
+        "benchmark",
+        "get_lock",
+        "release_lock",
+        "release_all_locks",
+        "master_pos_wait",
+        "source_pos_wait",
+        "wait_for_executed_gtid_set",
+        "wait_until_sql_thread_after_gtids",
+        "sys_exec",
+        "sys_eval",
     }
 )
 _SIDE_EFFECT_PREFIXES = ("system$",)  # Snowflake SYSTEM$CANCEL_QUERY, SYSTEM$ABORT_SESSION...

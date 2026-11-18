@@ -5,8 +5,8 @@
 > decision, update this file and the relevant ADR in the same commit.
 
 Status: pre-alpha. M1–M5 built and wired end to end (`cteforge demo` → `cteforge serve`: GUI, HTTP API, MCP over
-stdio and streamable HTTP); M6 connectors built; DuckDB, Postgres and ClickHouse are verified against real engines in
-CI; the cloud warehouses (Redshift, Snowflake, BigQuery, Databricks) are not (see §16).
+stdio and streamable HTTP); M6 connectors built; DuckDB, Postgres, ClickHouse and MySQL are verified against
+real engines in CI; the cloud warehouses (Redshift, Snowflake, BigQuery, Databricks) are not (see §16).
 
 ---
 
@@ -219,7 +219,7 @@ with cteforge as its own authorization server.
 ## 10. Warehouses
 
 Targets (free, permissive drivers): Postgres, Redshift (its own dialect, ADR 0022), Snowflake,
-BigQuery, Databricks, ClickHouse (ADR 0025), DuckDB. A team may connect several; each definition maps to one
+BigQuery, Databricks, ClickHouse (ADR 0025), MySQL 8 (ADR 0028; MariaDB untested), DuckDB. A team may connect several; each definition maps to one
 connection, and definitions on different connections are never combined in one query.
 DuckDB first (M1); the rest in M6.
 
@@ -235,6 +235,16 @@ are `database.table`. Common ClickHouse filter shapes on trace-like data are var
 arr)`), `ARRAY JOIN` names, `map['k']`, `JSONExtractString(...)`, `match(s, 're')`.
 Trusted SQL must not contain ClickHouse query parameters (`{x:String}`): cteforge runs
 SQL as written and uses that syntax for its own template placeholders (ADR 0025).
+
+MySQL uses PyMySQL (password auth, a named read-only user, verified TLS by default, charset
+utf8mb4). Every call is its own `START TRANSACTION READ ONLY` with a session
+`max_execution_time`, then rolled back; the server refuses multi-statement strings (the
+driver never enables them). Column types come from `information_schema.columns`
+(`column_type`: `tinyint(1)`, `int unsigned`, `enum(...)`); names are `database.table`.
+cteforge reads MySQL as under the default sql_mode; the connector refuses a session with
+NO_BACKSLASH_ESCAPES, ANSI_QUOTES or PIPES_AS_CONCAT. Trusted MySQL SQL must not contain
+executable comments (`/*! ... */`) or `MAX_EXECUTION_TIME` / `SET_VAR` hints: MySQL runs the
+former, which no check can see, and the latter would lift the statement timeout (ADR 0028).
 
 Used for: column types, compile checks (EXPLAIN / BigQuery dry run), running queries,
 and **nightly re-validation** of every definition to detect schema drift. Credentials stay
@@ -298,6 +308,14 @@ Revising a definition keeps its source dialect.
     `toStartOfInterval(x, INTERVAL 1 <unit>)`, or `date_trunc('<unit>', x)`; the result
     type follows ClickHouse (toStartOfDay → DateTime; Monday..Year → Date;
     toStartOfInterval keeps its input type).
+  - MySQL has no DATE_TRUNC. Grains are `DATE_FORMAT(x, '<period start>')` ('%Y-%m-%d',
+    '%Y-%m-01', '%Y-01-01', optionally + ' 00:00:00'); week is
+    `DATE_FORMAT(x - INTERVAL WEEKDAY(x) DAY, '%Y-%m-%d')`: **Monday** (WEEKDAY() is 0 on
+    Monday, per the MySQL docs); quarter `DATE_FORMAT(MAKEDATE(YEAR(x), 1) + INTERVAL
+    QUARTER(x) - 1 QUARTER, '%Y-%m-%d')`. The result stays 'YYYY-MM-DD' text; `DATE(x)` is a
+    cast, not a grain (ADR 0028). sqlglot's DATE_TRUNC transpiled *into* MySQL counts weeks
+    from 0000-01-01, a Sunday in MySQL's calendar, so transpiled weeks start on Sunday (the
+    opt-in live test checks both).
   Only the DuckDB start is checked against a warehouse here; the others come from vendor docs.
   Transpiling does not translate week starts, except that sqlglot rewrites BigQuery's
   Sunday week for DuckDB. Transpiled renders are labeled (ADR 0013).
@@ -317,10 +335,20 @@ Revising a definition keeps its source dialect.
   connector (DuckDB interrupt, Postgres and Redshift transaction-local `statement_timeout`,
   Snowflake
   `STATEMENT_TIMEOUT_IN_SECONDS`, BigQuery job timeout + cancel, Databricks
-  `STATEMENT_TIMEOUT`, ClickHouse `max_execution_time` per request; DuckDB's, Postgres's and ClickHouse's are
+  `STATEMENT_TIMEOUT`, ClickHouse `max_execution_time` per request, MySQL session
+  `max_execution_time` per call; DuckDB's, Postgres's, ClickHouse's and MySQL's are
   checked against real engines in CI). There is no cancel on client disconnect yet, and a wide
   result is still fetched in full by the connector (ClickHouse streams and stops after the
-  row limit).
+  row limit; MySQL fetches limit + 1 rows from an unbuffered cursor and discards the rest of
+  the stream).
+- MySQL (ADR 0028): `START TRANSACTION READ ONLY` does not stop `SELECT ... INTO OUTFILE` /
+  `DUMPFILE` or `LOAD_FILE()`. The read-only guard before any SQL runs refuses SELECT ... INTO
+  (INTO OUTFILE does not even parse), executable comments `/*! ... */` (MySQL runs their
+  content; checks would see a comment), `MAX_EXECUTION_TIME` / `SET_VAR` hints and MySQL
+  side-effect functions (LOAD_FILE, SLEEP, BENCHMARK, GET_LOCK, ...). The guarantee is the
+  grants: SELECT only, no FILE / PROCESS / SUPER / CREATE TEMPORARY TABLES. Rendered text
+  values are escaped for backslash-escape MySQL over a utf8mb4 connection; servers whose
+  sql_mode changes how literals or `"` / `||` read are refused.
 - ClickHouse (ADR 0025): a query may raise its own limits in a `SETTINGS` clause
   (`readonly = 2` allows changing settings other than `readonly`). Only the read-only
   user's settings profile can cap them (constraints such as `max_execution_time = 60 MAX
@@ -372,7 +400,7 @@ Revising a definition keeps its source dialect.
 | M3 | Store (SQLite/Postgres), proposals (§18), versions, permissions (incl. four-eyes), audit | done (Postgres untested in CI; SQLite tested) |
 | M4 | MCP server (§6) | done (stdio + streamable HTTP at `/mcp`; e2e-tested) |
 | M5 | HTTP API + GUI (import flow, library, revise, explore: recipes/compose/join map/tables/SQL, review queue) | done; GUI↔API contract e2e-tested |
-| M6 | Snowflake/BigQuery/Postgres/Databricks connectors, EXPLAIN/dry-run, statement timeouts, drift check | built; verified against real engines in CI (`.github/workflows/ci.yml`): DuckDB, Postgres 16 and ClickHouse 25.8 (service containers); ClickHouse 26.10 also locally. Redshift, Snowflake, BigQuery and Databricks (incl. their timeouts and read-only setup) are unit-tested against fake drivers only and unverified against real warehouses |
+| M6 | Snowflake/BigQuery/Postgres/Databricks connectors, EXPLAIN/dry-run, statement timeouts, drift check | built; verified against real engines in CI (`.github/workflows/ci.yml`): DuckDB, Postgres 16, ClickHouse 25.8 and MySQL 8.4 (service containers); ClickHouse 26.10 also locally. Redshift, Snowflake, BigQuery and Databricks (incl. their timeouts and read-only setup) are unit-tested against fake drivers only and unverified against real warehouses |
 
 ## 17. Composition (M2)
 

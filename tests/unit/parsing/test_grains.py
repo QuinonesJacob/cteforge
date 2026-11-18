@@ -16,6 +16,7 @@ MONTHLY = {
     Dialect.BIGQUERY: "SELECT DATETIME_TRUNC(o.created_at, MONTH) AS m FROM orders AS o",
     Dialect.DATABRICKS: "SELECT DATE_TRUNC('MONTH', o.created_at) AS m FROM orders AS o",
     Dialect.CLICKHOUSE: "SELECT toStartOfMonth(o.created_at) AS m FROM orders AS o",
+    Dialect.MYSQL: "SELECT DATE_FORMAT(o.created_at, '%Y-%m-01') AS m FROM orders AS o",
 }
 
 

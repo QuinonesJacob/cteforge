@@ -50,7 +50,8 @@ Exact rules (details in the module docstrings of assemble.py / checks.py):
   any non-read-only node (DML/DDL, data-modifying CTE, SELECT INTO, FOR UPDATE), a call to a
   denylisted side-effect function (`checks._SIDE_EFFECT_FUNCTIONS`: nextval, set_config,
   pg_terminate_backend, dblink, pg_read_file, query_to_xml / table_to_xml / schema_to_xml /
-  ts_stat (read a table by name or run a SQL string), ClickHouse joinGet, getenv, DuckDB query(), Snowflake SYSTEM$...;
+  ts_stat (read a table by name or run a SQL string), ClickHouse joinGet, getenv, DuckDB
+  query(), Snowflake SYSTEM$..., MySQL LOAD_FILE / SLEEP / BENCHMARK / GET_LOCK / ...;
   not exhaustive — warehouses still need read-only roles), more than one statement.
 - Table functions in FROM/JOIN anywhere in the final SELECT are raw reads (`raw_tables`,
   JoinUse side `name()`), except row generators (UNNEST, GENERATE_SERIES, range, ...).

@@ -1,0 +1,23 @@
+[
+  "it's",
+  "\\",
+  "\\'",
+  "a\\'b",
+  "end\\",
+  "\\\\'",
+  "nul\u0000x",
+  "line\nbreak\r\ttab",
+  "ctrl-z\u001a",
+  "backspace\b",
+  "vt\u000b ff\f",
+  "50%",
+  "under_score",
+  "\\%",
+  "\\_",
+  "\u2018single\u2019 \u02bcmodifier\u02bc \uff07fullwidth\uff07 \u201cdouble\u201d",
+  "\"dq\"",
+  "x' OR '1'='1",
+  "'; DROP TABLE shop.orders; -- ",
+  "/* c */ # h -- d",
+  "emoji \ud83d\ude00 and \u00e9"
+]

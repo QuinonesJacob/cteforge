@@ -5,9 +5,9 @@ Runnable sample data for demos and integration tests. Project root: ../CLAUDE.md
 ## What belongs here (authoritative)
 - `seed_warehouse.py` — builds examples/warehouse.duckdb from synthetic data (gitignored output).
 - `connections.example.yml` — warehouse connection profiles (ADR 0020): the `demo` DuckDB
-  profile (path relative to the file) plus commented Postgres/Redshift/ClickHouse/Snowflake/
+  profile (path relative to the file) plus commented Postgres/Redshift/ClickHouse/MySQL/Snowflake/
   BigQuery/Databricks templates; secrets only by env-var name (`secrets_env`). (The
-  ClickHouse trace example lives in tests/fixtures/clickhouse: it needs a ClickHouse server.)
+  ClickHouse trace and MySQL shop examples live in tests/fixtures/: they need a server.)
 - `queries/*.sql` — sample trusted queries.
 - `definitions/<name>.annotations.yml` — the analyst's annotations for `queries/<name>.sql`.
 - `definitions/<name>.yml` — definition files generated from them; regenerate with

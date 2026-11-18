@@ -15,7 +15,7 @@ from cteforge.domain.errors import AnnotationError, RenderError, VariableValueEr
 from cteforge.domain.issues import IssueCode, Severity
 from cteforge.domain.models import Annotation, Definition
 from cteforge.domain.variables import Grain, Role, VariableType
-from cteforge.parsing.analyze import analyze, find_grains, parse
+from cteforge.parsing.analyze import analyze, find_grains, generate, parse
 from cteforge.templating.render import render, render_tree
 from cteforge.templating.roundtrip import roundtrip_check
 from cteforge.templating.template import apply_annotations
@@ -53,6 +53,11 @@ SOURCES = {
         "SELECT toStartOfMonth(o.created_at) AS m, count() AS n FROM orders AS o "
         "WHERE o.created_at >= toDateTime('2026-01-01 00:00:00') GROUP BY 1"
     ),
+    # MySQL has no DATE_TRUNC: DATE_FORMAT with a period-start format (ADR 0028).
+    Dialect.MYSQL: (
+        "SELECT DATE_FORMAT(o.created_at, '%Y-%m-01') AS m, COUNT(*) AS n FROM orders AS o "
+        "WHERE o.created_at >= TIMESTAMP '2026-01-01' GROUP BY 1"
+    ),
 }
 
 # The truncation each dialect renders for each grain (native syntax, native week).
@@ -70,6 +75,17 @@ EXPECTED = {
         "MONTH": "toStartOfMonth(o.created_at)",
         "QUARTER": "toStartOfQuarter(o.created_at)",
         "YEAR": "toStartOfYear(o.created_at)",
+    },
+    # The DATE_FORMAT family, same 'YYYY-MM-DD' text result; week = Monday (ADR 0028).
+    Dialect.MYSQL: {
+        "DAY": "DATE_FORMAT(o.created_at, '%Y-%m-%d')",
+        "WEEK": "DATE_FORMAT(o.created_at - INTERVAL (WEEKDAY(o.created_at)) DAY, '%Y-%m-%d')",
+        "MONTH": "DATE_FORMAT(o.created_at, '%Y-%m-01')",
+        "QUARTER": (
+            "DATE_FORMAT(MAKEDATE(YEAR(o.created_at), 1) + "
+            "INTERVAL (QUARTER(o.created_at) - 1) QUARTER, '%Y-%m-%d')"
+        ),
+        "YEAR": "DATE_FORMAT(o.created_at, '%Y-01-01')",
     },
 }
 
@@ -132,7 +148,7 @@ def test_render_every_grain_natively(dialect, unit):
     result = render(definition, {"time_grain": unit.value})
     assert not result.transpiled and result.issues == []
     assert result.values == {"time_grain": unit.value}
-    assert expected(dialect, unit) in result.sql
+    assert expected(dialect, unit) in generate(parse(result.sql, dialect), dialect, pretty=False)
     # The rebuilt tree survives a sqlglot round trip: re-parsing the rendered SQL gives the
     # same tree and the requested unit back.
     tree, _, _ = render_tree(definition, {"time_grain": unit.value})

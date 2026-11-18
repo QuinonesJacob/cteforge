@@ -26,6 +26,19 @@ that conflicts.
   parameters; `EXPLAIN PLAN`; errors reduced to the last `DB::Exception:` message
   (`clickhouse.error_message`), then scrubbed; no HTTP session; the driver refuses to start
   if its `invalid_setting_action` is `drop`.
+- `mysql.py` — MySQL 8 via PyMySQL (ADR 0028). **Security review with the user pending: do
+  not commit before it is approved.** Password auth only, `user` required (option allowlist
+  host / port / database / user / ssl_ca / ssl_verify_cert / ssl_verify_identity /
+  ssl_disabled / connect_timeout / read_timeout; refuses local_infile, client_flag,
+  init_command, sql_mode, autocommit, read_default_file / read_default_group, unix_socket,
+  charset, ssl, client certs); charset fixed to utf8mb4; TLS verified by default (the
+  connector's own SSLContext); refuses a session whose sql_mode has NO_BACKSLASH_ESCAPES /
+  ANSI_QUOTES / PIPES_AS_CONCAT; every call `START TRANSACTION READ ONLY` + `SET SESSION
+  max_execution_time = %s` (int bound parameter), rolled back; one statement per call
+  (CLIENT.MULTI_STATEMENTS never set); unbuffered cursor, at most limit + 1 rows fetched;
+  column types from `information_schema.columns` (`column_type`) with bound parameters;
+  `EXPLAIN`; errors reduced to the server message without `'user'@'host'`
+  (`mysql.error_message`), then scrubbed; a dropped connection is reopened and re-checked.
 
 ## Hard rules
 - Credentials MUST come from environment variables or a profile file path passed in by the

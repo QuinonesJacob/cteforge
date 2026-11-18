@@ -186,7 +186,8 @@ written there: `secrets_env` names the environment variable that holds each one,
 only at connect time and never logged or returned (ADR 0020). Drivers other than DuckDB are
 extras: `pip install 'cteforge[postgres]'`, `[redshift]` (AWS `redshift_connector`; Redshift is
 its own dialect, ADR 0022), `[snowflake]`, `[bigquery]`, `[databricks]`, `[clickhouse]`
-(ClickHouse Inc.'s `clickhouse-connect`, HTTP/HTTPS; ADR 0025).
+(ClickHouse Inc.'s `clickhouse-connect`, HTTP/HTTPS; ADR 0025), `[mysql]` (PyMySQL; MySQL 8,
+MariaDB untested; ADR 0028).
 
 ```yaml
 profiles:
@@ -205,13 +206,19 @@ profiles:
     secrets_env: {password: CH_PASSWORD}
     # optional scan guards, sent with every query (unset by default):
     # options: {..., max_rows_to_read: 500000000, max_bytes_to_read: 50000000000}
+  shop_mysql:
+    dialect: mysql             # host, port, database, user, ssl_ca, ssl_verify_cert, ...
+    options: {host: mysql.internal, port: 3306, database: shop, user: cteforge_ro}
+    secrets_env: {password: MYSQL_PASSWORD}
+    # TLS is verified against the system trust store by default; for a private CA:
+    # options: {..., ssl_ca: /etc/ssl/mysql-ca.pem}
 ```
 
 Every statement is cut off after the profile's `statement_timeout_s` and fails with
 `query timed out after Ns` (DuckDB: interrupt; Postgres and Redshift: transaction-local
 `statement_timeout`; Snowflake: `STATEMENT_TIMEOUT_IN_SECONDS`; BigQuery: job timeout and
 cancel; Databricks: `STATEMENT_TIMEOUT` session configuration; ClickHouse: `max_execution_time`
-on every request).
+on every request; MySQL: session `max_execution_time` in every call's transaction).
 
 **Always connect as a dedicated read-only role.** cteforge refuses non-SELECT SQL, enforces
 row limits and uses read-only sessions where the warehouse has them, but grants are the real
@@ -223,6 +230,7 @@ guarantee:
 | Postgres | Every transaction is `BEGIN READ ONLY` and rolled back. Still use a role with only `USAGE` + `SELECT` (`CREATE ROLE cteforge_ro LOGIN; GRANT USAGE ON SCHEMA s TO cteforge_ro; GRANT SELECT ON ALL TABLES IN SCHEMA s TO cteforge_ro;`). |
 | Redshift | Every call is its own `BEGIN READ ONLY` transaction, rolled back. Still use a user with only `USAGE` + `SELECT` (`CREATE USER cteforge_ro PASSWORD '…'; GRANT USAGE ON SCHEMA s TO cteforge_ro; GRANT SELECT ON ALL TABLES IN SCHEMA s TO cteforge_ro;`; Spectrum: `GRANT USAGE ON SCHEMA <external schema>`), no superuser, not the cluster owner. Column types come from `SVV_COLUMNS`, which every user can read for all local tables unless the admin enables metadata security (`ALTER SYSTEM SET metadata_security = true`). |
 | ClickHouse | Every request carries `readonly = 2` (reads only; `readonly` itself can't be changed), `max_execution_time` and the optional scan guards; one statement per HTTP request. `readonly = 2` still lets a query's own `SETTINGS` clause raise other limits, so give the user a settings profile with constraints and only SELECT grants: `CREATE SETTINGS PROFILE cteforge_ro_profile SETTINGS readonly = 2 CONST, allow_ddl = 0 CONST, max_execution_time = 60 MAX 300, max_memory_usage = 10000000000 MAX 10000000000; CREATE USER cteforge_ro IDENTIFIED WITH sha256_password BY '…' SETTINGS PROFILE cteforge_ro_profile; GRANT SELECT ON agent_traces.* TO cteforge_ro;` No grants on table-function sources (`url`, `s3`, `remote`, …): those read outside the warehouse and are governed by grants, not readonly. Not `readonly = 1`: the connector's own per-request timeout would then be refused. |
+| MySQL | Every call is its own `START TRANSACTION READ ONLY`, rolled back; one statement per call (multi-statements are never enabled); TLS verified by default. READ ONLY does **not** stop `SELECT … INTO OUTFILE` or `LOAD_FILE()` (cteforge refuses them before anything runs), so the grants are the guarantee: `CREATE USER 'cteforge_ro'@'%' IDENTIFIED BY '…'; GRANT SELECT ON shop.* TO 'cteforge_ro'@'%';` and nothing else — no `FILE`, `PROCESS`, `SUPER`, `CREATE TEMPORARY TABLES` or write privileges. The user's `sql_mode` must not include `NO_BACKSLASH_ESCAPES`, `ANSI_QUOTES` or `PIPES_AS_CONCAT` (the connector refuses to start). MariaDB is untested. |
 | Snowflake | No read-only session mode: set `options.role` to a role with only USAGE on warehouse/database/schemas and SELECT on tables. One statement per call. |
 | BigQuery | Service account with `roles/bigquery.dataViewer` (datasets) + `roles/bigquery.jobUser` (project). Every job sets `maximum_bytes_billed` (default 10 GiB); EXPLAIN is a dry run. |
 | Databricks | No read-only session mode: a service principal with only `USE CATALOG`, `USE SCHEMA`, `SELECT` and CAN USE on the SQL warehouse. |
@@ -281,9 +289,10 @@ call the GUI makes.
 
 - Pre-alpha: APIs, the database schema and the file format may change.
 - Only **DuckDB** is tested against a real warehouse. The Postgres, Redshift, Snowflake,
-  BigQuery, Databricks and ClickHouse connectors (including their statement timeouts) are
+  BigQuery, Databricks, ClickHouse and MySQL connectors (including their statement timeouts) are
   unit-tested against fake drivers and still need validation on real warehouses
-  (ClickHouse has an opt-in live suite: `tests/integration/test_clickhouse_live.py`). The library store is
+  (ClickHouse and MySQL have opt-in live suites: `tests/integration/test_clickhouse_live.py`,
+  `tests/integration/test_mysql_live.py`). The library store is
   tested on SQLite; Postgres is untested in CI.
 - A query is not cancelled when the client disconnects; it runs until it finishes or hits
   its profile's `statement_timeout_s`.

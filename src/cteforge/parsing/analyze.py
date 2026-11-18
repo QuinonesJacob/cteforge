@@ -21,7 +21,9 @@ name (WITH RECURSIVE: every CTE is visible everywhere).
 
 Grain IDs are `<scope>.G<n>`: n counts date truncation nodes (DateTrunc, TimestampTrunc,
 DatetimeTrunc) in the same walk order, wherever they sit. `find_grains` is shared with
-templating, which rebuilds the named nodes for a `grain` variable (M1.5). A unit argument
+templating, which rebuilds the named nodes for a `grain` variable (M1.5). ClickHouse adds
+toStartOfWeek / toStartOfInterval (ADR 0025), MySQL DATE_FORMAT(x, '<period start>')
+(ADR 0028). A unit argument
 that is a column, not a unit keyword or string, is reported as `column <name>` (never a
 grain value): sqlglot keeps `cfg.month` as a Column, but reads a bare `month` as the unit
 keyword even where it is a column (DuckDB, Postgres, Databricks), so `analyze` finds those in
@@ -30,6 +32,7 @@ the SQL's tokens (`identifier_units`).
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -175,6 +178,127 @@ _ELEMENT_OPERATORS = {"HAS", "HAS ANY", "HAS ALL"}  # compared with the array's 
 CLICKHOUSE_WEEK_FUNC = "toStartOfWeek"
 CLICKHOUSE_INTERVAL_FUNC = "toStartOfInterval"
 CLICKHOUSE_NAME_KEY = "clickhouse_name"
+
+# ── MySQL (ADR 0028) ──
+# MySQL has no DATE_TRUNC. `DATE_FORMAT(x, f)` with a period-start format is a grain
+# candidate, MySQL only (other dialects' grain IDs never shift): '%Y-%m-%d' → day,
+# '%Y-%m-01' → month, '%Y-01-01' → year, each optionally followed by ' 00:00:00'; and the
+# day format over a period start: `x - INTERVAL WEEKDAY(x) DAY` → week (Monday),
+# `MAKEDATE(YEAR(x), 1) + INTERVAL QUARTER(x) - 1 QUARTER` → quarter (the shapes a grain
+# change renders, so rendered SQL reads back with its grain). sqlglot reads
+# DATE_FORMAT(x, f) as TimeToStr(TsOrDsToTimestamp(x), f) with f in Python strftime
+# notation, which for these formats is the same text. Other formats ('%Y-%m', '%x-%v')
+# are labels, not period starts; DATE(x) is a cast (like CAST(x AS DATE)), not a grain.
+MYSQL_PERIOD_FORMATS = {"%Y-%m-%d": "day", "%Y-%m-01": "month", "%Y-01-01": "year"}
+MYSQL_TIME_SUFFIX = " 00:00:00"
+
+
+@dataclass(frozen=True)
+class MySQLPeriod:
+    """A MySQL DATE_FORMAT grain candidate: its unit, the time suffix of its format
+    ('' or ' 00:00:00') and the value it truncates (a node of the tree)."""
+
+    unit: str
+    suffix: str
+    value: exp.Expression
+
+
+def _unit_is(node: exp.Expression, unit: str) -> bool:
+    return isinstance(node, exp.Var | exp.Literal) and node.name.upper() == unit
+
+
+def _mysql_week_start(node: exp.Expression) -> exp.Expression | None:
+    """x of `x - INTERVAL WEEKDAY(x) DAY` or `DATE_SUB(x, INTERVAL WEEKDAY(x) DAY)` (Monday
+    of x's week), else None."""
+    if isinstance(node, exp.Sub) and isinstance(node.expression, exp.Interval):
+        weekday, unit = node.expression.this, node.expression.args.get("unit")
+    elif isinstance(node, exp.DateSub):
+        weekday, unit = node.expression, node.args.get("unit")
+    else:
+        return None
+    if not _unit_is(unit, "DAY") or not (
+        isinstance(weekday, exp.Anonymous)
+        and weekday.name.upper() == "WEEKDAY"
+        and len(weekday.expressions) == 1
+    ):
+        return None
+    value = node.this
+    bare = value.this if isinstance(value, exp.Paren) else value
+    return bare if weekday.expressions[0] == bare else None
+
+
+def _mysql_quarter_start(node: exp.Expression) -> exp.Expression | None:
+    """x of `MAKEDATE(YEAR(x), 1) + INTERVAL QUARTER(x) - 1 QUARTER`, else None."""
+    if not isinstance(node, exp.Add) or not isinstance(node.expression, exp.Interval):
+        return None
+    makedate, interval = node.this, node.expression
+    count = interval.this
+    if not (
+        isinstance(makedate, exp.Anonymous)
+        and makedate.name.upper() == "MAKEDATE"
+        and len(makedate.expressions) == 2
+        and isinstance(makedate.expressions[0], exp.Year)
+        and makedate.expressions[1] == exp.Literal.number(1)
+        and _unit_is(interval.args.get("unit"), "QUARTER")
+        and isinstance(count, exp.Sub)
+        and isinstance(count.this, exp.Quarter)
+        and count.expression == exp.Literal.number(1)
+    ):
+        return None
+    year_arg = makedate.expressions[0].this
+    value = year_arg.this if isinstance(year_arg, exp.TsOrDsToDate) else year_arg
+    return value if count.this.this == value else None
+
+
+def mysql_period(node: exp.Expression) -> MySQLPeriod | None:
+    """The MySQL `DATE_FORMAT(x, '<period start>')` grain candidate at `node`, else None."""
+    if not isinstance(node, exp.TimeToStr) or not isinstance(node.this, exp.TsOrDsToTimestamp):
+        return None
+    fmt = node.args.get("format")
+    if not isinstance(fmt, exp.Literal) or not fmt.is_string:
+        return None
+    text = fmt.name
+    suffix = MYSQL_TIME_SUFFIX if text.endswith(MYSQL_TIME_SUFFIX) else ""
+    unit = MYSQL_PERIOD_FORMATS.get(text.removesuffix(suffix))
+    if unit is None:
+        return None
+    formatted = node.this.this
+    if unit == "day":
+        week = _mysql_week_start(formatted)
+        if week is not None:
+            return MySQLPeriod("week", suffix, week)
+        quarter = _mysql_quarter_start(formatted)
+        if quarter is not None:
+            return MySQLPeriod("quarter", suffix, quarter)
+    if any(_aligns_to_a_period(n) for n in formatted.walk()):
+        # The value is already some other period's start (e.g. a Sunday week start, or a
+        # date built from YEAR(x)): another grain would truncate that, not x.
+        return None
+    return MySQLPeriod(unit, suffix, formatted)
+
+
+# Calendar-part functions: a value computed with one is aligned to some period already.
+_PERIOD_PARTS = (
+    exp.Year,
+    exp.Quarter,
+    exp.Month,
+    exp.Week,
+    exp.WeekOfYear,
+    exp.Day,
+    exp.DayOfMonth,
+    exp.DayOfWeek,
+    exp.DayOfYear,
+    exp.LastDay,
+)
+_PERIOD_PART_NAMES = {"WEEKDAY", "MAKEDATE", "YEARWEEK", "DAYOFWEEK", "DAYOFMONTH"}
+
+
+def _aligns_to_a_period(node: exp.Expression) -> bool:
+    if isinstance(node, _PERIOD_PARTS):
+        return True
+    return isinstance(node, exp.Anonymous) and node.name.upper() in _PERIOD_PART_NAMES
+
+
 # ClickHouse conversions whose arguments after the first are options (scale, time zone,
 # mode), never values: `toDateTime64('2026-01-01 00:00:00', 3, 'UTC')` has one value.
 _CLICKHOUSE_VALUE_FIRST_FUNCS = {
@@ -347,13 +471,72 @@ def parse(sql: str, dialect: Dialect) -> exp.Expression:
         statements = [s for s in sqlglot.parse(sql, read=str(dialect)) if s is not None]
     except (ParseError, TokenError) as exc:
         raise SqlParseError(syntax_error_message(sql, dialect, exc)) from exc
+    if dialect is Dialect.MYSQL:
+        reject_mysql_hidden_sql(sql)
     if not statements:
         raise SqlParseError("No SQL statement found.")
     if len(statements) > 1:
         raise SqlParseError(
             f"Found {len(statements)} SQL statements separated by ';'. Use exactly one."
         )
+    if dialect is Dialect.MYSQL:
+        return _mysql_interval_counts(statements[0])
     return statements[0]
+
+
+def _mysql_interval_counts(tree: exp.Expression) -> exp.Expression:
+    """`INTERVAL WEEKDAY(ts) DAY` and `INTERVAL (WEEKDAY(ts)) DAY` are the same in MySQL,
+    and sqlglot writes every computed interval count in parentheses; reading the count
+    without them keeps same-query-back exact for MySQL-written SQL (ADR 0028). DATE_ADD /
+    DATE_SUB keep their count in `expression` (with `unit`) instead of an Interval."""
+    for node in list(tree.find_all(exp.Interval, *_MYSQL_DATE_DELTAS)):
+        key = "this" if isinstance(node, exp.Interval) else "expression"
+        count = node.args.get(key)
+        if key == "expression" and node.args.get("unit") is None:
+            continue
+        if isinstance(count, exp.Paren) and not count.comments:
+            node.set(key, count.this)
+    return tree
+
+
+_MYSQL_DATE_DELTAS = (exp.DateAdd, exp.DateSub, exp.TimestampAdd, exp.TimestampSub)
+
+
+# MySQL optimizer hints that change the statement's own limits or settings: MAX_EXECUTION_TIME
+# overrides the session's max_execution_time (the connector's statement timeout) and SET_VAR
+# sets any session variable for the statement (ADR 0028).
+_MYSQL_SETTING_HINTS = re.compile(r"\b(MAX_EXECUTION_TIME|SET_VAR)\b", re.IGNORECASE)
+
+
+def reject_mysql_hidden_sql(sql: str) -> None:
+    """Refuse MySQL text that the server would run differently from how cteforge reads it
+    (ADR 0028). Raises SqlParseError.
+
+    - Executable comments `/*! ... */` (and MariaDB's `/*M! ... */`): MySQL runs their
+      content as SQL, but sqlglot (like every other reader) sees a comment, so a read-only
+      check could not see e.g. `/*! INTO OUTFILE '...' */` or a hidden function call.
+    - Optimizer hints naming MAX_EXECUTION_TIME or SET_VAR: they would lift the
+      connector's statement timeout or change session settings for the statement.
+    Checked on sqlglot's MySQL tokens (comments inside string literals are text)."""
+    try:
+        tokens = sqlglot.tokenize(sql, read=str(Dialect.MYSQL))
+    except TokenError as exc:  # pragma: no cover - parse() already tokenized it
+        raise SqlParseError(syntax_error_message(sql, Dialect.MYSQL, exc)) from exc
+    for token in tokens:
+        hint = token.token_type is TokenType.HINT
+        for text in [*token.comments, *([token.text] if hint else [])]:
+            if text.startswith(("!", "M!")):
+                raise SqlParseError(
+                    "The SQL contains a MySQL executable comment (/*! ... */). MySQL runs "
+                    "the text inside it, which cteforge cannot check; write that SQL "
+                    "without the comment markers, or remove it."
+                )
+            if (hint or text.startswith("+")) and _MYSQL_SETTING_HINTS.search(text):
+                raise SqlParseError(
+                    "The SQL contains a MAX_EXECUTION_TIME or SET_VAR optimizer hint. The "
+                    "statement timeout and session settings come from the connection "
+                    "profile; remove the hint."
+                )
 
 
 _QUOTE_NAMES = {"'": "quote (')", '"': 'double quote (")', "`": "backtick (`)"}
@@ -404,13 +587,15 @@ def syntax_error_message(sql: str, dialect: Dialect, exc: ParseError | TokenErro
 
 # sqlglot's tokenizers for these read \' as an escaped quote (Redshift: like its
 # QUOTE_LITERAL, which doubles backslashes; ClickHouse: STRING_ESCAPES ' and \, as its
-# string-literal syntax documents).
+# string-literal syntax documents; MySQL: unless the server's sql_mode has
+# NO_BACKSLASH_ESCAPES, which the MySQL connector refuses — ADR 0028).
 _BACKSLASH_ESCAPES = {
     Dialect.REDSHIFT,
     Dialect.SNOWFLAKE,
     Dialect.BIGQUERY,
     Dialect.DATABRICKS,
     Dialect.CLICKHOUSE,
+    Dialect.MYSQL,
 }
 
 
@@ -471,10 +656,29 @@ def generate(tree: exp.Expression, dialect: Dialect, *, pretty: bool = True) -> 
     TimestampTrunc and would write `dateTrunc('MONTH', x)`; these are written back under
     the name the SQL used (kept in the node's meta), so trusted SQL keeps its functions
     and their return types, and date_trunc keeps its name and a lower-case unit
-    (ADR 0025). The tree itself is not changed."""
+    (ADR 0025). MySQL: a TIMESTAMP literal is written as a literal (ADR 0028). The tree
+    itself is not changed."""
     if dialect is Dialect.CLICKHOUSE:
         tree = tree.copy().transform(_clickhouse_native_name, copy=False)
+    elif dialect is Dialect.MYSQL:
+        tree = tree.copy().transform(_mysql_timestamp_literal, copy=False)
     return tree.sql(dialect=str(dialect), pretty=pretty)
+
+
+def _mysql_timestamp_literal(node: exp.Expression) -> exp.Expression:
+    """MySQL `TIMESTAMP '2026-01-01 10:00:00'` (a DATETIME literal) parses as a cast to
+    TIMESTAMP, which sqlglot writes as the function `TIMESTAMP('...')` — the same value, but
+    a different tree when read back. Written as the literal again (ADR 0028); the string
+    itself is still escaped by sqlglot's generator."""
+    if (
+        isinstance(node, exp.Cast)
+        and isinstance(node.this, exp.Literal)
+        and node.this.is_string
+        and node.to.this is exp.DataType.Type.TIMESTAMPTZ
+        and not node.to.expressions
+    ):
+        return exp.Introducer(this=exp.Var(this="TIMESTAMP"), expression=node.this)
+    return node
 
 
 def _clickhouse_native_name(node: exp.Expression) -> exp.Expression:
@@ -922,16 +1126,19 @@ class FoundGrain:
 
     id: str
     scope: str
-    node: exp.Expression  # DateTrunc / TimestampTrunc / DatetimeTrunc.
+    node: exp.Expression  # DateTrunc / TimestampTrunc / DatetimeTrunc (or `is_truncation`).
     unit: str  # Normalized lower-case unit (see `truncation_unit`).
     context: tuple[LiteralContext, ...]
 
 
 def is_truncation(node: exp.Expression, dialect: Dialect) -> bool:
-    """A grain candidate node: DateTrunc / TimestampTrunc / DatetimeTrunc, and in ClickHouse
-    also toStartOfWeek(...) and toStartOfInterval(...) (Anonymous in sqlglot)."""
+    """A grain candidate node: DateTrunc / TimestampTrunc / DatetimeTrunc, in ClickHouse
+    also toStartOfWeek(...) and toStartOfInterval(...) (Anonymous in sqlglot), in MySQL
+    DATE_FORMAT(x, '<period start>') (`mysql_period`)."""
     if isinstance(node, TRUNCATIONS):
         return True
+    if dialect is Dialect.MYSQL:
+        return mysql_period(node) is not None
     return (
         dialect is Dialect.CLICKHOUSE
         and isinstance(node, exp.Anonymous)
@@ -941,7 +1148,12 @@ def is_truncation(node: exp.Expression, dialect: Dialect) -> bool:
 
 
 def truncated_expression(node: exp.Expression) -> exp.Expression:
-    """The expression a truncation node truncates (first argument of a ClickHouse call)."""
+    """The expression a truncation node truncates (first argument of a ClickHouse call;
+    the value whose period start a MySQL DATE_FORMAT formats)."""
+    if isinstance(node, exp.TimeToStr):
+        period = mysql_period(node)
+        if period is not None:
+            return period.value
     return node.expressions[0] if isinstance(node, exp.Anonymous) else node.this
 
 
@@ -981,7 +1193,11 @@ def truncation_unit(node: exp.Expression, dialect: Dialect) -> str:
     native week, so that is "week"; any other explicit week start is "week(<day>)". A
     qualified column is "column <name>"; a bare column name needs the SQL's tokens
     (`identifier_units`), because sqlglot parses it as the unit keyword. ClickHouse: see
-    `_clickhouse_week_unit` / `_clickhouse_interval_unit`."""
+    `_clickhouse_week_unit` / `_clickhouse_interval_unit`. MySQL DATE_FORMAT: the unit of
+    its period start (`mysql_period`)."""
+    if isinstance(node, exp.TimeToStr):
+        period = mysql_period(node)
+        return period.unit if period is not None else ""
     if isinstance(node, exp.Anonymous):
         if node.name == CLICKHOUSE_WEEK_FUNC:
             return _clickhouse_week_unit(node, dialect)

@@ -11,3 +11,4 @@ class Dialect(StrEnum):
     BIGQUERY = "bigquery"
     DATABRICKS = "databricks"
     CLICKHOUSE = "clickhouse"
+    MYSQL = "mysql"

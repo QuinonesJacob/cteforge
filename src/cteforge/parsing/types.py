@@ -24,8 +24,22 @@ _CLICKHOUSE_TEXT_TYPES = {
     exp.DataType.Type.ENUM16,
     exp.DataType.Type.UUID,
 }
+# MySQL ENUM / SET columns compare with string literals (`status = 'paid'`); YEAR columns
+# with numbers (`y = 2026`). JSON / BLOB / BINARY / GEOMETRY have no variable type (ADR 0028).
+_MYSQL_TEXT_TYPES = {exp.DataType.Type.ENUM, exp.DataType.Type.SET}
+_MYSQL_NUMBER_TYPES = {exp.DataType.Type.YEAR}
 _NUMERIC_TYPES = exp.DataType.NUMERIC_TYPES
 _BOOL_TYPES = {exp.DataType.Type.BOOLEAN}
+
+
+def _mysql_flag(dtype: exp.DataType) -> bool:
+    """MySQL TINYINT(1): what BOOL / BOOLEAN columns are stored as (information_schema
+    reports `tinyint(1)`). It holds any TINYINT value, so it is a number and a boolean."""
+    if dtype.this is not exp.DataType.Type.TINYINT or len(dtype.expressions) != 1:
+        return False
+    width = dtype.expressions[0]
+    inner = width.this if isinstance(width, exp.DataTypeParam) else width
+    return isinstance(inner, exp.Literal) and inner.name == "1"
 
 
 def data_type(type_str: str, dialect: Dialect) -> exp.DataType | None:
@@ -78,6 +92,13 @@ def compatible_variable_types(type_str: str | None, dialect: Dialect) -> set[Var
         return {VariableType.DATE, VariableType.DATE_RANGE}
     if kind in _TEXT_TYPES or (dialect is Dialect.CLICKHOUSE and kind in _CLICKHOUSE_TEXT_TYPES):
         return {VariableType.TEXT, VariableType.TEXT_LIST}
+    if dialect is Dialect.MYSQL:
+        if kind in _MYSQL_TEXT_TYPES:
+            return {VariableType.TEXT, VariableType.TEXT_LIST}
+        if _mysql_flag(dtype):
+            return {VariableType.NUMBER, VariableType.BOOLEAN}
+        if kind in _MYSQL_NUMBER_TYPES:
+            return {VariableType.NUMBER}
     if kind in _NUMERIC_TYPES:
         return {VariableType.NUMBER}
     if kind in _BOOL_TYPES:

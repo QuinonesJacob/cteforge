@@ -19,7 +19,7 @@ from cteforge.domain.variables import (
     to_plain,
     validate_value,
 )
-from cteforge.parsing.analyze import find_grains, generate, parse
+from cteforge.parsing.analyze import FoundGrain, find_grains, generate, parse
 from cteforge.templating.literals import Replacement, build_replacements, build_truncation
 
 
@@ -156,6 +156,8 @@ def _apply_grains(
                     literal=left[0],
                 )
             )
+    changes: list[tuple[int, FoundGrain, Grain]] = []
+    order = {grain_id: n for n, grain_id in enumerate(found)}
     for spec in specs:
         value = typed[spec.name]
         assert isinstance(value, Grain)
@@ -170,7 +172,11 @@ def _apply_grains(
                     f"expected '{slot.original_text}'"
                 )
             if value.value != slot.original_text:
-                grain.node.replace(build_truncation(grain.node, value, source, target))
+                changes.append((order[grain_id], grain, value))
+    # Deepest first (reverse walk order: a node comes after its ancestors), so a rebuild
+    # that copies its argument (MySQL week / quarter) copies nested rebuilds too.
+    for _, grain, value in sorted(changes, key=lambda change: change[0], reverse=True):
+        grain.node.replace(build_truncation(grain.node, value, source, target))
     return issues
 
 

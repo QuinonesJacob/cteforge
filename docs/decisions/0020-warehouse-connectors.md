@@ -6,7 +6,8 @@ Status: accepted · 2026-11-16
 - Connectors: DuckDB (core), Postgres (`psycopg`), Redshift (`redshift_connector`; its own
   dialect since ADR 0022), Snowflake (`snowflake-connector-python`), BigQuery
   (`google-cloud-bigquery`), Databricks (`databricks-sql-connector`), ClickHouse
-  (`clickhouse-connect`, HTTP; ADR 0025). All Apache-2.0/BSD-style. Non-DuckDB drivers are optional
+  (`clickhouse-connect`, HTTP; ADR 0025), MySQL (`PyMySQL`, MIT; ADR 0028). All
+  Apache-2.0/BSD/MIT-style. Non-DuckDB drivers are optional
   extras (`cteforge[postgres]`, …), imported lazily; a missing driver raises WarehouseError
   with the install command.
 - Connections are named profiles (`connections.yml` or env), each with a dialect and
@@ -27,7 +28,8 @@ Status: accepted · 2026-11-16
   BigQuery sets `job_timeout_ms` (where the client supports it), waits at most that long
   in `job.result(timeout=...)` and cancels the job on timeout; Databricks passes the
   session configuration `STATEMENT_TIMEOUT`; ClickHouse sends `max_execution_time` with
-  every request (ADR 0025). A timed-out statement raises
+  every request (ADR 0025); MySQL sets the session `max_execution_time` in every READ ONLY
+  transaction (ADR 0028). A timed-out statement raises
   `WarehouseError("query timed out after Ns")`. Only the DuckDB timeout is exercised
   against a real engine; the others are unit-tested against fake drivers.
 - DuckDB error messages are scrubbed of host paths (database file and directory, home

@@ -33,6 +33,8 @@ from cteforge.parsing.analyze import (
     CLICKHOUSE_INTERVAL_FUNC,
     CLICKHOUSE_NAME_KEY,
     CLICKHOUSE_WEEK_FUNC,
+    mysql_period,
+    parse,
 )
 
 Replacement = exp.Expression | list[exp.Expression]
@@ -168,6 +170,50 @@ def _clickhouse_truncation(node: exp.Expression, grain: Grain) -> exp.Expression
     return rebuilt
 
 
+# MySQL's DATE_FORMAT family (ADR 0028): the period start of the grain, written as the
+# same 'YYYY-MM-DD' text the trusted SQL's DATE_FORMAT returns. Constant SQL (no values);
+# `_MYSQL_VALUE` stands for the truncated expression. Read with `parsing.analyze.parse`,
+# so the rebuilt node equals the rendered SQL parsed again. Week = Monday (WEEKDAY() is 0
+# on Monday; DESIGN §13).
+_MYSQL_VALUE = "cteforge_truncated_value"
+_MYSQL_PERIOD_SQL = {
+    Grain.DAY: "SELECT DATE_FORMAT(cteforge_truncated_value, '%Y-%m-%d')",
+    Grain.WEEK: (
+        "SELECT DATE_FORMAT(cteforge_truncated_value - INTERVAL "
+        "WEEKDAY(cteforge_truncated_value) DAY, '%Y-%m-%d')"
+    ),
+    Grain.MONTH: "SELECT DATE_FORMAT(cteforge_truncated_value, '%Y-%m-01')",
+    Grain.QUARTER: (
+        "SELECT DATE_FORMAT(MAKEDATE(YEAR(cteforge_truncated_value), 1) + INTERVAL "
+        "QUARTER(cteforge_truncated_value) - 1 QUARTER, '%Y-%m-%d')"
+    ),
+    Grain.YEAR: "SELECT DATE_FORMAT(cteforge_truncated_value, '%Y-01-01')",
+}
+# Operands that need no parentheses when the value is the left side of `- INTERVAL`.
+_MYSQL_ATOMS = (exp.Column, exp.Func, exp.Literal, exp.Paren)
+
+
+def _mysql_truncation(node: exp.Expression, grain: Grain) -> exp.Expression | None:
+    """MySQL DATE_FORMAT(x, '<period start>') rebuilt for `grain` in the same family (same
+    'YYYY-MM-DD[ 00:00:00]' text result, time suffix kept). Week and quarter use the value
+    twice; the first use is the original node (moved), the others copies. Render rebuilds
+    nested truncations first, so the copies carry them too. None for other nodes."""
+    period = mysql_period(node)
+    if period is None:
+        return None
+    suffix, value = period.suffix, period.value
+    rebuilt = parse(_MYSQL_PERIOD_SQL[grain], Dialect.MYSQL).selects[0]
+    uses = [c for c in rebuilt.find_all(exp.Column) if c.name == _MYSQL_VALUE]
+    for n, use in enumerate(uses):
+        replacement = value if n == 0 else value.copy()
+        if not isinstance(replacement, _MYSQL_ATOMS) and isinstance(use.parent, exp.Sub):
+            replacement = exp.Paren(this=replacement)
+        use.replace(replacement)
+    fmt = rebuilt.args["format"]
+    rebuilt.set("format", exp.Literal.string(fmt.name + suffix))
+    return rebuilt
+
+
 def build_truncation(
     node: exp.Expression, grain: Grain, source: Dialect, target: Dialect | None = None
 ) -> exp.Expression:
@@ -185,6 +231,10 @@ def build_truncation(
             )
     if source is Dialect.CLICKHOUSE:
         rebuilt = _clickhouse_truncation(node, grain)
+        if rebuilt is not None:
+            return rebuilt
+    if source is Dialect.MYSQL:
+        rebuilt = _mysql_truncation(node, grain)
         if rebuilt is not None:
             return rebuilt
     args = {k: v for k, v in node.args.items() if k != "unit"}

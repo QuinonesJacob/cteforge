@@ -21,8 +21,13 @@ transpiled renders carry a `transpiled` issue and lower trust, ADR 0013):
 - *.clickhouse.sql: a naive TIMESTAMP cast becomes `CAST(... AS Nullable(DateTime))`
   (sqlglot writes ClickHouse casts as Nullable; DateTime has second precision and reads the
   text in the server's time zone).
+- *.mysql.sql: DuckDB DATE_TRUNC becomes `DATE_ADD('0000-01-01 00:00:00', INTERVAL
+  (TIMESTAMPDIFF(unit, '0000-01-01 00:00:00', x)) unit)` (sqlglot's MySQL form; DATETIME-shaped
+  text instead of a timestamp; weeks would start on Sunday, ADR 0028). `strptime` becomes
+  `STR_TO_DATE`, which MySQL has.
 ClickHouse-sourced goldens (trace_tool_errors*.clickhouse.sql) are in
-test_clickhouse_templates.py.
+test_clickhouse_templates.py; MySQL-sourced ones (paid_revenue*.mysql.sql) in
+test_mysql_templates.py.
 """
 
 import os

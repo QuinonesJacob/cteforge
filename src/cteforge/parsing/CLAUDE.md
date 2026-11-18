@@ -13,8 +13,12 @@ Reads SQL and reports its structure. Pure. Project root: ../../../CLAUDE.md
   across a line break), `transpile` (one statement from a source to a target dialect),
   `generate` (tree → SQL text; EVERY SQL text cteforge writes goes through it: in ClickHouse
   it writes toStartOf* / toMonday back under their own names instead of sqlglot's
-  `dateTrunc`, and date_trunc / dateTrunc with the name written and a lower-case unit), `reject_query_parameters` (ClickHouse `{x:Type}` / `?` in trusted SQL →
-  SqlParseError), `is_truncation` / `truncated_expression`, `lambda_binding` /
+  `dateTrunc`, and date_trunc / dateTrunc with the name written and a lower-case unit; in
+  MySQL it writes a `TIMESTAMP '...'` literal as a literal, not the TIMESTAMP() function), `reject_query_parameters` (ClickHouse `{x:Type}` / `?` in trusted SQL →
+  SqlParseError), `reject_mysql_hidden_sql` (run by `parse` for MySQL: executable comments
+  `/*! ... */` / `/*M! ... */` and MAX_EXECUTION_TIME / SET_VAR hints → SqlParseError;
+  `parse` also reads MySQL `INTERVAL (expr) unit` like `INTERVAL expr unit`),
+  `mysql_period` / `MySQLPeriod` / `MYSQL_PERIOD_FORMATS` (MySQL grain candidates), `is_truncation` / `truncated_expression`, `lambda_binding` /
   `array_join_binding` (ClickHouse element bindings), `CLICKHOUSE_*` names, `scopes`, `find_literals` / `FoundLiteral`, `wrapper_sql`, `find_grains` /
   `FoundGrain`, `truncation_unit`, `identifier_units`, `COLUMN_UNIT_PREFIX` and
   `TRUNCATIONS`, shared with templating so both sides
@@ -25,6 +29,8 @@ Reads SQL and reports its structure. Pure. Project root: ../../../CLAUDE.md
   SimpleAggregateFunction(f, T) unwrap to T (Nullable is a flag in sqlglot); FixedString /
   Enum8 / Enum16 / UUID are text in ClickHouse only; Array / Map / Tuple / JSON / Nested
   have no variable type. `element_type` gives an Array's element / a Map's value type.
+  MySQL only (ADR 0028): TINYINT(1) → number + boolean, ENUM / SET → text, YEAR → number;
+  JSON / BLOB / BINARY / GEOMETRY / spatial → none (UNSIGNED types are numbers in sqlglot).
 
 If something does not clearly fit one of the above, it does not belong here.
 "Not forbidden" is not the same as "allowed."
@@ -97,7 +103,12 @@ If something does not clearly fit one of the above, it does not belong here.
   ClickHouse toStartOfDay / Month / ... / toMonday / dateTrunc) gets `<scope>.G<n>`; in
   ClickHouse also the Anonymous `toStartOfWeek(x[, mode[, tz]])` (even / no mode →
   `week(sunday)`, odd → `week`) and `toStartOfInterval(x, INTERVAL n unit[, ...])` (`unit`
-  when n = 1 without origin, else e.g. `'15' minute`). n counts truncations in the same walk as literal IDs,
+  when n = 1 without origin, else e.g. `'15' minute`); in MySQL `DATE_FORMAT(x, f)` with
+  f = '%Y-%m-%d' / '%Y-%m-01' / '%Y-01-01' (+ optional ' 00:00:00') → day / month / year,
+  and the day format over `x - INTERVAL WEEKDAY(x) DAY` / `DATE_SUB(x, INTERVAL WEEKDAY(x)
+  DAY)` → week or `MAKEDATE(YEAR(x), 1) + INTERVAL QUARTER(x) - 1 QUARTER` → quarter
+  (`mysql_period`; `truncated_expression` is x; DATE(x), label formats and values already
+  aligned with a calendar-part function — YEAR, WEEKDAY, MAKEDATE, ... — are not candidates). n counts truncations in the same walk as literal IDs,
   wherever they sit (SELECT list, filters, nested). `GrainCandidate`: `unit` (lower case,
   abbreviations spelled out: `MM` → month, `Q` → quarter; BigQuery `WEEK` / `WEEK(SUNDAY)`
   → `week`, other week starts → `week(<day>)`, `ISOWEEK` → `isoweek`), `column_sql` (the

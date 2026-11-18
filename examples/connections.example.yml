@@ -25,6 +25,11 @@ profiles:
   #   options: {host: ch.internal, port: 8443, secure: true, database: agent_traces, user: cteforge_ro}
   #   secrets_env: {password: CH_PASSWORD}   # user with a readonly=2 settings profile (README)
   #
+  # shop_mysql:
+  #   dialect: mysql             # pip install 'cteforge[mysql]'; MySQL 8 (ADR 0028)
+  #   options: {host: mysql.internal, port: 3306, database: shop, user: cteforge_ro}
+  #   secrets_env: {password: MYSQL_PASSWORD}  # user with SELECT only, no FILE privilege (README)
+  #
   # snowflake_prod:
   #   dialect: snowflake         # pip install 'cteforge[snowflake]'
   #   options: {account: myorg-myacct, user: CTEFORGE_RO, warehouse: ANALYTICS_WH, database: ANALYTICS, role: READ_ONLY}

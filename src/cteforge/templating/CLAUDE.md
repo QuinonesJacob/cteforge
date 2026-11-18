@@ -67,7 +67,9 @@ If something does not clearly fit one of the above, it does not belong here.
   written `TIMESTAMP WITH TIME ZONE`. From ClickHouse, DateTime / DateTime64 with a time zone
   transpile as TIMESTAMPTZ and without one as a naive timestamp (their parameters are
   ClickHouse-only). Text values are escaped by sqlglot's generator for the target
-  (Redshift and ClickHouse double backslashes, since they read `\'` as an escape). Only variable slots are adjusted; the analyst's other
+  (Redshift, ClickHouse and MySQL double backslashes, since they read `\'` as an escape;
+  MySQL also writes NUL / Ctrl-Z / control characters as `\0` `\Z` `\n` ...; ADR 0028).
+  MySQL placeholders are `:name`. Only variable slots are adjusted; the analyst's other
   casts transpile as sqlglot does.
 - **Grain** (M1.5, ADR 0011). An annotation of type grain lists grain IDs
   (`<scope>.G<n>`), one place each. Every unit must be one of day/week/month/quarter/year
@@ -84,7 +86,12 @@ If something does not clearly fit one of the above, it does not belong here.
   ClickHouse rebuilds in the SQL's own family (`literals._clickhouse_truncation`):
   toStartOf* / toMonday / toStartOfWeek → the grain's toStartOfDay / toMonday /
   toStartOfMonth / toStartOfQuarter / toStartOfYear (a TimestampTrunc named in meta, time
-  zone kept), toStartOfInterval → toStartOfInterval with the new unit, date_trunc generic. Week =
+  zone kept), toStartOfInterval → toStartOfInterval with the new unit, date_trunc generic. MySQL
+  rebuilds in the DATE_FORMAT family (`literals._mysql_truncation`, ADR 0028): day / month /
+  year change the format, week = `DATE_FORMAT(x - INTERVAL WEEKDAY(x) DAY, '%Y-%m-%d')`,
+  quarter = `DATE_FORMAT(MAKEDATE(YEAR(x), 1) + INTERVAL QUARTER(x) - 1 QUARTER, ...)`, the
+  time suffix kept; x appears twice there (second a copy), so `render._apply_grains`
+  rebuilds nested truncations first (reverse walk order, every dialect). Week =
   the dialect's native week (DESIGN §13). Databricks `TRUNC(date, fmt)` has no day format, so
   grain `day` raises RenderError there. A changeable grain whose truncations carry
   `or_branch` / `case_condition` / `negated` / `outer_join_on` needs a description. There is
@@ -114,6 +121,10 @@ If something does not clearly fit one of the above, it does not belong here.
 - Snowflake `TRUNC(ts, 'MONTH')` (DateTrunc) is written back as `DATE_TRUNC('MONTH', ts)`, which
   parses as TimestampTrunc, so same-query-back reports a difference for that spelling. This
   happens with or without a grain variable; `DATE_TRUNC` round-trips.
+- MySQL (from other dialects): DATE_TRUNC becomes `DATE_ADD('0000-01-01 00:00:00',
+  INTERVAL (TIMESTAMPDIFF(unit, '0000-01-01 00:00:00', x)) unit)` (DATETIME-shaped text;
+  weeks then start on Sunday, MySQL's weekday of 0000-01-01). MySQL definitions rendered
+  elsewhere keep WEEKDAY / MAKEDATE, which most targets lack (ADR 0028).
 - Week start is not translated when transpiling, except BigQuery → DuckDB (sqlglot shifts
   by a day). Other pairs keep `WEEK`, so the start day can change (DESIGN §13).
 Transpiled renders always carry a `transpiled` issue and lower trust (ADR 0013).

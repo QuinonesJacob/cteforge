@@ -1,0 +1,39 @@
+# Annotations for paid_revenue.sql (MySQL, ADR 0028). Literal and grain IDs come from:
+# cteforge parse (QueryAnalysis.literals / .grains) with dialect mysql.
+id: paid_revenue_by_channel
+title: Paid revenue by sales channel
+meaning: >-
+  Revenue and number of paid or shipped orders per period and sales channel, for customers
+  in one country, excluding test orders.
+keywords: [revenue, orders, sales channel, country, shop, monthly revenue]
+use_when: Questions about paid revenue or order counts per channel over a period.
+dont_use_when: Refunds, order margins or customer counts.
+grain: one row per period (see time_grain) per channel
+variables:
+  - name: period
+    type: date_range
+    role: changeable
+    literals: [main.L1, main.L2]
+    description: Order creation time range (end exclusive).
+  - name: statuses
+    type: text_list
+    role: changeable
+    literals: [main.L3, main.L4]
+    description: Order statuses counted as paid.
+  - name: country
+    type: text
+    role: changeable
+    literals: [main.L5]
+    description: Customer country (ISO 3166 alpha-2).
+  - name: min_amount
+    type: number
+    role: changeable
+    literals: [main.L7]
+    description: Smallest order amount counted.
+  - name: time_grain
+    type: grain
+    role: changeable
+    literals: [main.G1, main.G2]
+    description: >-
+      Period each row covers, as 'YYYY-MM-DD' text of its first day. MySQL weeks start on
+      Monday (WEEKDAY()).
