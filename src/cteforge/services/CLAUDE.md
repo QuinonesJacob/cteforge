@@ -170,7 +170,8 @@ modules or the core):
   files/library.py: `export_library(ctx, user, directory, *, prune=False)` → written paths;
   `import_library(ctx, user, directory, *, profile=None)` → list[ProposalOutcome] (every
   changed file becomes a proposal; unchanged files are skipped; every definition proposal
-  is built and checked before any is stored; each submitted proposal is audited at once).
+  is built and checked before any is stored; each submitted proposal is audited at once;
+  a new definition's id must pass `_library.check_id_available`, so a former id is refused).
 
 ## Permissions and audit per use-case (contract)
 Roles: viewer < contributor < approver < admin (ADR 0018); agents never verify (ADR 0007).

@@ -76,6 +76,8 @@ def _definition_proposal(
     current = ctx.store.get_definition(d.id)
     if current is not None and _same(current, d):
         return None
+    if current is None:
+        _library.check_id_available(ctx, d.id)  # not another definition's former id (ADR 0024)
     _apply.check_owner(user, d.owner, None if current is None else current.owner)
     profile_name, warehouse = _apply.warehouse_for(ctx, profile or d.profile)
     meta: dict[str, Any] = d.model_dump(exclude=_UNVERSIONED) | {

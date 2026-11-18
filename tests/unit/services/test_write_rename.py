@@ -28,6 +28,7 @@ from cteforge.domain.proposals import ProposalKind, ProposalStatus
 from cteforge.domain.users import ActorKind, User, UserRole
 from cteforge.services import describe, review
 from cteforge.services.context import AppConfig, AppContext, open_context, set_team_mode
+from cteforge.services.library_io import export_library, import_library
 from cteforge.services.propose import propose_definition, rename_definition, revise_definition
 from cteforge.services.propose_other import propose_recipe
 from cteforge.services.revalidate import revalidate
@@ -314,3 +315,16 @@ def test_viewer_may_not_propose_a_rename(library: AppContext) -> None:
     with pytest.raises(PermissionDeniedError):
         rename_definition(library, viewer, id=OLD, new_id=NEW)
     assert describe.definition_references(library, viewer, OLD).id == OLD
+
+
+def test_library_import_cannot_create_a_definition_at_a_former_id(
+    library: AppContext, tmp_path: Path
+) -> None:
+    ctx = library
+    export_library(ctx, ALICE, tmp_path)
+    rename_definition(ctx, ALICE, id=OLD, new_id=NEW)
+    # The exported file still says `id: realization_rate` (the former id): importing it
+    # would create a second definition that agents' old-id lookups do not point at.
+    with pytest.raises(PolicyError, match=f"'{OLD}' is a former ID of definition '{NEW}'"):
+        import_library(ctx, ALICE, tmp_path)
+    assert ctx.store.latest_version(OLD) is None
