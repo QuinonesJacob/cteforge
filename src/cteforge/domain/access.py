@@ -154,6 +154,8 @@ class TokenInfo(BaseModel):
     tool_mode: ToolMode = ToolMode.FOLLOW_ROLE
     include: frozenset[Tool] = frozenset()
     exclude: frozenset[Tool] = frozenset()
+    # The token that minted this one for its own user (revoking it revokes this one).
+    parent_token_id: str | None = None
 
     def usable_at(self, now: dt.datetime) -> bool:
         """Not revoked and not expired at `now`."""

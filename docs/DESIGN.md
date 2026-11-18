@@ -199,8 +199,10 @@ with cteforge as its own authorization server.
   `verify` for an agent whose role is not admin. A revoked or expired token, or a
   deactivated user, gets the same generic 401 on the next call. People generate their own
   tokens (Settings → My tokens, `cteforge token create`); a human admin generates tokens for
-  any user; agents never receive a token from any surface; a token never creates a token
-  of its own user with tools it does not hold itself.
+  any user (so `manage_user` is effectively full admin power); agents never receive a token
+  from any surface. A token never creates a token of its own user with tools it does not
+  hold itself, that outlives it, or that follows the role when it is itself `only`; such a
+  token records its parent, and revoking a token revokes everything minted from it.
 - **Admin agents** (agent kind + admin role) may create users (no token returned), change
   role / tools / active of non-admin users, revoke non-admin users' tokens, create and
   edit roles other than admin, approve / reject and verify (four-eyes, no exemption).
@@ -335,9 +337,11 @@ Revising a definition keeps its source dialect.
   values or hashes. Unknown, revoked or expired tokens and deactivated users all get the
   same generic 401. Tool access is enforced in services for every surface, and MCP hides
   tools a token cannot use. A token's tools never exceed its user's role, and a token
-  cannot create a broader token for its own user (no self-escalation through a narrow token
-  someone handed to an agent). Agents never see tokens; admin agents cannot touch admin
-  users or the admin role.
+  cannot create a broader, longer-lived or role-following token for its own user (no
+  self-escalation or persistence through a narrow, short-lived token someone handed to an
+  agent); revoking a token revokes the tokens it minted. A `compile_and_run` final SELECT
+  over raw tables needs `check_and_run` too, so it is no way around that tool. Agents
+  never see tokens; admin agents cannot touch admin users or the admin role.
 - Credentials: environment/profile only, never logged, never returned over MCP/HTTP.
   Database URLs are printed with the password redacted (`postgresql+psycopg://user:***@host/db`).
   Warehouse error messages are scrubbed of connection details; DuckDB's also of host
@@ -378,7 +382,8 @@ and optionally a final SELECT written by the agent over those aliases.
   into one top-level WITH, renaming them `<alias>__<cte>` to avoid collisions, and adds the
   definition's final SELECT as a CTE named `<alias>`. Order follows dependencies.
 - The final SELECT must be a single read-only SELECT that references only the aliases (and,
-  with a lower label, raw tables). Without one, a single definition is returned as-is.
+  with a lower label, raw tables — which also needs the `check_and_run` tool, ADR 0027).
+  Without one, a single definition is returned as-is.
 - Checks: every alias resolves; join conditions between aliases use declared `join_keys`
   (else an `unknown_join` issue); joining definitions of different grain without
   aggregation raises a `fan_out_risk` warning.

@@ -131,6 +131,12 @@ export function UsersTable({ users, roles, catalog, me, busy, canEdit, canMint, 
                             defaults={(role?.defaults ?? []).filter((t) => roleTools(role, u.kind).includes(t))}
                             busy={busy === u.name}
                             submitLabel={`Generate token for ${u.name}`}
+                            note={
+                              <p className="muted small">
+                                Generating tokens for other users (admins included) is what manage_user allows: it is
+                                equivalent to full admin access, so keep tokens that hold it with people and short-lived.
+                              </p>
+                            }
                             onSubmit={(b) => {
                               onGenerate(u.name, b);
                               setMinting(null);

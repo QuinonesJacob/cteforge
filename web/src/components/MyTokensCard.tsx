@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { createToken, listTokens, revokeToken } from "../api/endpoints";
 import { getToken } from "../api/token";
-import type { CreateTokenRequest, NewToken, TokenCard, ToolInfo, User } from "../api/types";
+import type { CreateTokenRequest, NewToken, TokenCard, ToolInfo, ToolName, User } from "../api/types";
 import { canMintOwnToken } from "../lib/roles";
 import { useToast } from "../state/ToastContext";
 import { useAsync } from "../state/useAsync";
@@ -85,9 +85,11 @@ export function MyTokensCard({ user, catalog }: { user: User; catalog: ToolInfo[
           key={formKey}
           idPrefix="my-token"
           catalog={catalog}
-          allowed={user.role_allowed ?? user.tools ?? []}
+          allowed={sessionAllowed(user)}
+          ceiling={user.role_allowed ?? user.tools ?? []}
           defaults={user.role_defaults ?? user.tools ?? []}
           busy={busy === "create"}
+          session={user.token_id ? { expiresAt: user.token_expires_at, mode: user.token_mode } : undefined}
           onSubmit={(b) => void create(b)}
           onCancel={() => setCreating(false)}
         />
@@ -107,4 +109,13 @@ export function MyTokensCard({ user, catalog }: { user: User; catalog: ToolInfo[
       )}
     </section>
   );
+}
+
+/** What a token of your own may get from this session: your role's Allowed tools, and,
+ * when you signed in with a token, only those it holds itself (ADR 0027: no escalation). */
+function sessionAllowed(user: User): ToolName[] {
+  const role = user.role_allowed ?? user.tools ?? [];
+  if (!user.token_id || !user.tools) return role;
+  const held = new Set(user.tools);
+  return role.filter((t) => held.has(t));
 }

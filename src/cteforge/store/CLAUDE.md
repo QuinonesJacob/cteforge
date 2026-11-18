@@ -12,7 +12,8 @@ Project root: ../../../CLAUDE.md
   random never-matched value for new users and after migration; ADR 0027), `roles` (name PK, description,
   allowed/defaults JSON tool lists, review_all, builtin, updated_at), `tokens` (id PK,
   user_name FK, name, prefix, token_sha256 unique, created_at/by, last_used_at,
-  expires_at, revoked_at, tool_mode, include_tools/exclude_tools JSON), `settings`
+  expires_at, revoked_at, tool_mode, include_tools/exclude_tools JSON, parent_token_id —
+  the token that minted it), `settings`
   (key/value),
   `search_vectors` (PK definition_id + version + model; dim, doc_sha256, vector as
   little-endian float32 bytes, created_at — derived data for meaning search, ADR 0023;
@@ -22,7 +23,8 @@ Project root: ../../../CLAUDE.md
 - `store.py` — the `Store` class (public API below). Nothing else is imported by services.
 
 Schema version (`tables.STORE_SCHEMA_VERSION`) is 2. `init_schema` runs `create_all`, adds
-`users.active` to an older table (explicit, idempotent `ALTER TABLE`, static DDL), on a
+`users.active` and `tokens.parent_token_id` (+ its index) to older tables (explicit,
+idempotent `ALTER TABLE`, static DDL), on a
 version-1 database migrates each user's `token_sha256` to a `default` token (follow_role)
 for users with no token rows, then bumps the version; seeds missing built-in roles
 (`domain.access.BUILTIN_ROLES`, edits kept); refuses a newer version. A failed first open
@@ -91,7 +93,8 @@ class Store:
     def add_token(self, info: TokenInfo, token_sha256: str) -> TokenInfo  # unknown user / dup -> StoreError
     def get_token(self, id: str) -> TokenInfo | None
     def list_tokens(self, user_name: str | None = None) -> list[TokenInfo]   # oldest first, revoked included
-    def revoke_token(self, id: str, at: datetime) -> TokenInfo            # first revoked_at kept
+    def revoke_token(self, id: str, at: datetime) -> TokenInfo
+        # the token + every descendant (parent_token_id chain), one transaction; first revoked_at kept
     def set_token_tools(self, id, mode, include, exclude) -> TokenInfo
     def user_by_token_hash(self, token_sha256: str, now: datetime) -> tuple[User, TokenInfo] | None
         # None: unknown hash, revoked, expired at `now`, or user inactive (checked in SQL and again in Python)

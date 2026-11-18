@@ -645,3 +645,30 @@ def test_recipes_joins_and_tables(rr, check_error) -> None:
     # Drafts are listed only on request, as in search and the MCP tools.
     drafts = rr.get("/recipes", "vic", params={"include_drafts": "true"}).json()
     assert {r["id"] for r in recipes} <= {r["id"] for r in drafts}
+
+
+def test_run_with_a_raw_final_select_needs_check_and_run(rr, check_error) -> None:
+    """Regression (security review, poc3): a token allowed compile_and_run but not
+    check_and_run ran raw SQL through /run's final `select`."""
+    api = rr
+    made = api.post(
+        "/me/tokens",
+        "vic",
+        {"name": "bot", "tool_mode": "only", "include": ["search", "compile_and_run"]},
+    )
+    headers = {"Authorization": f"Bearer {made.json()['token']}"}
+    check_error(
+        api.client.post("/api/v1/check", headers=headers, json={"sql": "SELECT 1"}),
+        403,
+        "PermissionDeniedError",
+    )
+    body = {
+        "uses": {"rr": {"id": "realization_rate"}},
+        "values": {"rr": Q3_APAC},
+        "select": "SELECT a.account_id, (SELECT COUNT(*) FROM rr) AS n FROM accounts AS a",
+    }
+    refused = api.client.post("/api/v1/run", headers=headers, json=body)
+    check_error(refused, 403, "PermissionDeniedError")
+    assert "check_and_run" in refused.json()["error"]["message"]
+    ok = api.client.post("/api/v1/run", headers=headers, json=body | {"select": "SELECT * FROM rr"})
+    assert ok.status_code == 200 and ok.json()["ran"] is True

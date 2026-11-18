@@ -728,3 +728,22 @@ async def test_admin_agent_manages_users_and_roles_without_tokens(ctx: AppContex
     assert "support_bot" in {r["name"] for r in overview["roles"]}
     assert ctx.store.list_tokens("helper") == []
     assert not any(n.startswith("token") for n in TOOL_NAMES)  # no tool returns a token
+
+
+@pytest.mark.anyio
+async def test_compile_and_run_final_select_over_raw_tables_needs_check_and_run(
+    ctx: AppContext,
+) -> None:
+    narrow = AGENT.model_copy(update={"tools": frozenset({Tool.SEARCH, Tool.COMPILE_AND_RUN})})
+    args = {
+        "uses": {"rr": {"id": "realization_rate"}},
+        "values": {"rr": Q3_APAC},
+        "select": "SELECT a.name, (SELECT COUNT(*) FROM rr) AS n FROM accounts AS a",
+    }
+    async with client(ctx, narrow) as session:
+        body, err = error(await session.call_tool("compile_and_run", args))
+        aliases_only = await session.call_tool(
+            "compile_and_run", args | {"select": "SELECT * FROM rr"}
+        )
+    assert err["type"] == "PermissionDeniedError" and "check_and_run" in body
+    assert ok(aliases_only)["ran"] is True

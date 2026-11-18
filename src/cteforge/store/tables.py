@@ -152,6 +152,9 @@ tokens = Table(
     Column("tool_mode", String(_ENUM), nullable=False),
     Column("include_tools", Text, nullable=False),  # JSON list of tool names
     Column("exclude_tools", Text, nullable=False),  # JSON list of tool names
+    # The token that minted this one for its own user; revoking a token revokes its
+    # descendants. Added to existing tables by an explicit ALTER (Store._ensure_columns).
+    Column("parent_token_id", String(64), nullable=True, index=True),
 )
 
 settings = Table(

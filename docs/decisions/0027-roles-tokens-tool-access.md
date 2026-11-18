@@ -157,9 +157,33 @@ deactivation, tokens); granting the admin role; editing the admin role.
   rename → `revise_definition`; own tokens (list, mint, revoke, set tools) need no tool.
   Recipe and join proposals are approved with `review_proposal` + `review_all` (they have
   no owner). Built-in roles cannot be deleted (they can be edited).
-- No self-escalation: a token may not mint, or reconfigure, a token of its own user with
-  tools the calling token does not hold itself (a narrow token handed to an agent cannot be
-  turned into a broad one). A human with `manage_user` may mint for any user.
+- No self-escalation or persistence through self-service (security review): when a call
+  authenticated by a token mints or reconfigures a token of its OWN user,
+  - the new token's tools must be ones the calling token holds (a narrow token handed to an
+    agent cannot be turned into a broad one);
+  - a calling token with an expiry only mints tokens that expire no later (a 1-hour token
+    cannot leave a permanent one behind);
+  - an `only` calling token cannot create, or switch a token to, `follow_role` (which
+    would gain the role's future defaults);
+  - the new token records the calling token as `parent_token_id` (store column, added to
+    existing version-2 databases by an idempotent `ALTER TABLE`), and revoking a token
+    revokes all its descendants in one transaction. A parent's expiry is not cascaded
+    beyond the expiry cap above. Consequence: to replace a token, generate the new one
+    from another session (or the CLI, which has no token) before revoking the old one.
+  The acting user carries the calling token's id, expiry and mode (`GET /me` shows them;
+  None for the CLI, auth-off HTTP and stdio without `CTEFORGE_TOKEN`, which are a person
+  at the machine and unrestricted). Tokens minted for OTHER users are neither capped nor
+  linked.
+- `manage_user` is effectively root for a human: it mints tokens for any user (admins
+  included) and creates admin users, so a token holding it is as powerful as the admin
+  role. This is by design (ADR 0027: human admins manage access); give it only to admins
+  and keep such tokens short-lived. Agents holding it are limited as above (no tokens, no
+  admin users).
+- A `compile_and_run` final `select` that reads raw tables (or table functions) is
+  exploratory SQL: it needs the `check_and_run` tool as well (PermissionDeniedError,
+  recorded as a rejected compile_and_run), so a token without `check_and_run` cannot run
+  arbitrary SQL through `select`. A `select` over the aliases only needs
+  `compile_and_run`.
 - `create_user` by a human admin over the API/CLI still returns a `default` token once
   (convenience); over MCP (`manage_user create`) and for agent callers it never does.
 - An MCP call to a hidden tool is refused before the tool runs and audited as an `admin`

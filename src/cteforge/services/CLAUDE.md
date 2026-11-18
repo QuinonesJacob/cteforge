@@ -41,7 +41,8 @@ Support modules (shared by use-cases; not use-cases themselves):
   role's allowed tools, or defaults; deactivated → refused; created as a human admin only
   while the store has no users and `create=True` (CLI, auth-off HTTP), never for stdio MCP),
   `stdio_user` (CTEFORGE_TOKEN's user and tools, else CTEFORGE_USER with role defaults),
-  `resolve_user` (HTTP). `require(user, tool, target=None)` / `permitted`: tool membership
+  `resolve_user` (HTTP). An authenticated User also carries `token_id`,
+  `token_expires_at`, `token_mode` of the calling token (None without one). `require(user, tool, target=None)` / `permitted`: tool membership
   (REVIEW_PROPOSAL / VERIFY consult the target via can_approve / can_verify).
   `user_tools(user)` (what MCP shows), `refuse_tool(ctx, user, name)` (audits an MCP call
   to a hidden tool: admin, op=tool_refused, rejected; returns the PermissionDeniedError).
@@ -178,8 +179,10 @@ modules or the core):
   `update_role` (admin role: Allowed and review_all fixed; shrinking allowed trims
   defaults), `delete_role` (custom, unused); tokens: `list_tokens(ctx, user, name=None)`,
   `create_token(ctx, user, owner=None, *, name, expires_at, tool_mode, include, exclude)`
-  → NewToken (never for an agent caller; within the owner's role; self-service never
-  beyond the calling token's own tools), `revoke_token(ctx, user, token_id, owner=None)`,
+  → NewToken (never for an agent caller; within the owner's role; self-service through a
+  token never beyond that token's tools, expiry or `only` mode, and linked to it as
+  `parent_token_id`), `revoke_token(ctx, user, token_id, owner=None)` (cascades to
+  descendants),
   `set_token_tools(...)` → TokenCard; `get_settings` / `set_settings(mode)` /
   `set_default_connection(ctx, user, name | None)` (unknown profile → NotFoundError; blank
   clears) → TeamSettings (mode, default_connection as stored, effective_default_connection,
@@ -208,7 +211,7 @@ several calls) and whether a failed write fails the call (closed) or is only log
 | search | search | search | best effort |
 | get_definition, definition_history, search_document, definition_references | get_definition | get_definition (op) | best effort |
 | parse_query | parse_query (a build tool) | parse_query (SQL as SHA-256 only) | best effort |
-| compile_and_run | compile_and_run | compile_and_run | closed: written before rows return |
+| compile_and_run | compile_and_run; a final SELECT that reads raw tables (or table functions) also check_and_run (exploratory SQL) | compile_and_run | closed: written before rows return |
 | check_and_run | check_and_run | check_and_run | closed: written before rows return |
 | revalidate(ids) / revalidate() | compile_and_run / review_proposal with review_all (whole library) | revalidate | closed |
 | propose_definition | propose_definition; owner rule (`_apply.check_owner`: any owner needs review_all) | propose (op) | closed |
@@ -230,8 +233,9 @@ several calls) and whether a failed write fails the call (closed) or is only log
 | create_role, update_role, delete_role | manage_role; `can_edit_role` (agents never the admin role) | admin (op) | closed |
 | me | none (the caller's own access) | none | — |
 | list_tokens | own: none; another user's: list_users | admin (op=list_tokens) | best effort |
-| create_token | never an agent caller; own: none (no escalation beyond the calling token); another user's: manage_user | admin (op; token id + prefix, never the value) | closed |
-| revoke_token, set_token_tools | own: none (set_tools: no escalation); another user's: manage_user + `can_manage_user` | admin (op) | closed |
+| create_token | never an agent caller; own: none, but a token-authenticated caller only within its own tools, expiry (none/later refused) and mode (`only` never mints `follow_role`), and the new token gets `parent_token_id`; another user's: manage_user (root-equivalent for humans) | admin (op; token id + prefix, never the value) | closed |
+| revoke_token | own: none; another user's: manage_user + `can_manage_user`; revokes every descendant too | admin (op) | closed |
+| set_token_tools | own: none (within the calling token's tools; `only` never switches to `follow_role`); another user's: manage_user + `can_manage_user` | admin (op) | closed |
 | MCP call to a hidden tool (`auth.refuse_tool`) | — (refused) | admin (op=tool_refused, rejected) | best effort |
 | get_settings, set_settings, set_default_connection | manage_settings | admin (op) | closed (get: best effort) |
 | rebuild_search_index | manage_settings; meaning search off → PolicyError | admin (op=rebuild_search_index) | closed |

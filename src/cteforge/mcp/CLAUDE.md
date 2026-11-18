@@ -39,6 +39,8 @@ of the same name (domain/access.py); `review_proposal` also to callers holding `
 Annotations: reads `readOnlyHint: true`; proposals `readOnlyHint: false`,
 `destructiveHint: false`; review_proposal / manage_user / manage_role
 `destructiveHint: true`.
+- `compile_and_run` with a `select` that reads raw tables needs `check_and_run` too
+  (services/run.py; refused otherwise); its description says so.
 - `list_proposals(status=pending)` → ProposalView list. `review_proposal(action: approve |
   reject | verify, id?, comment, definition_id?, version?)` → ReviewResult (approve → the
   ProposalOutcome; reject → the ProposalView (comment required); verify with `id` →

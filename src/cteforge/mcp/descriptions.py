@@ -113,7 +113,8 @@ label the result. The preferred way to get data.
 `values_used` in the result shows every value that was applied.
 - `select` (optional): one small read-only SELECT over the aliases to combine or reshape \
 them. Join aliases only on their declared join keys; joins that are not known lower the \
-label to exploratory.
+label to exploratory. A `select` that reads raw tables (not only the aliases) is \
+exploratory SQL: it needs the `check_and_run` tool too, and is refused without it.
 - Or `recipe_id` (+ optional `values` overrides) instead of `uses` and `select`.
 - `run=false` compiles and labels without running. `limit` caps returned rows.
 - `dialect` (rare): with `run=false`, compile the SQL for another warehouse dialect than \

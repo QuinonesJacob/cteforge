@@ -15,7 +15,12 @@ id and its 12-character display prefix are). Rules:
   `create_user` called by an agent returns no token.
 - A human mints their own tokens; a human with manage_user mints for anyone.
 - No escalation: a token may not mint (or reconfigure) a token of its own user with tools
-  the calling token does not hold itself.
+  the calling token does not hold itself, nor outlive it (a calling token with an expiry
+  only mints tokens expiring no later), nor turn an `only` list into `follow_role` (which
+  would gain new role defaults later). A token minted by a token for its own user records
+  it as `parent_token_id`; revoking a token revokes its descendants. (Tokens minted for
+  OTHER users are not linked: that needs manage_user, which is effectively full admin
+  power for a human — it can create admins and mint for anyone — by design, ADR 0027.)
 - A token's tools are always within its user's role (`Allowed`); asking for more is a
   PolicyError (change the role instead).
 - Revoke: one's own; a human admin any; an agent admin only non-admin users' tokens.
@@ -184,6 +189,11 @@ def _check_token_spec(
         exclude=exclude,
     )
     if actor.name == owner.name:
+        if actor.token_mode is ToolMode.ONLY and mode is ToolMode.FOLLOW_ROLE:
+            raise PolicyError(
+                "This token has a fixed tool list ('only these'); it may not give a token "
+                "'follow role' tools, which grow with the role. Choose 'only these'."
+            )
         wanted = effective_tools(role, probe, owner.kind)
         missing = sorted_tools(wanted - tools_of(actor))
         if missing:
@@ -192,6 +202,20 @@ def _check_token_spec(
                 f"({[t.value for t in missing]}); sign in with a token that has them"
             )
     return probe
+
+
+def _within_caller_expiry(actor: User, expires_at: dt.datetime | None) -> None:
+    """A token that expires may only mint tokens (for its own user) that expire no later:
+    a short-lived token must not leave a longer-lived one behind."""
+    limit = actor.token_expires_at
+    if limit is None:
+        return
+    if expires_at is None or expires_at > limit:
+        raise PolicyError(
+            f"This token expires at {limit.isoformat(timespec='minutes')}; a token it "
+            "generates must expire no later. Give an earlier expiry, or sign in with a "
+            "token that does not expire."
+        )
 
 
 def _mint(
@@ -204,6 +228,7 @@ def _mint(
     mode: ToolMode = ToolMode.FOLLOW_ROLE,
     include: frozenset[Tool] = frozenset(),
     exclude: frozenset[Tool] = frozenset(),
+    parent_token_id: str | None = None,
 ) -> tuple[TokenInfo, str]:
     token = new_token()
     info = TokenInfo(
@@ -217,6 +242,7 @@ def _mint(
         tool_mode=mode,
         include=include,
         exclude=exclude,
+        parent_token_id=parent_token_id,
     )
     return ctx.store.add_token(info, hash_token(token)), token
 
@@ -390,6 +416,9 @@ def me(ctx: AppContext, user: User) -> MeCard:
         review_all=reviews_all(user),
         role_allowed=sorted_tools(allowed),
         role_defaults=sorted_tools(defaults),
+        token_id=user.token_id,
+        token_expires_at=user.token_expires_at,
+        token_mode=user.token_mode.value if user.token_mode is not None else None,
     )
 
 
@@ -614,6 +643,10 @@ def create_token(
                 raise PolicyError("expires_at must be in the future")
         include_set, exclude_set = _tools(include), _tools(exclude)
         _check_token_spec(ctx, user, owner, mode, include_set, exclude_set)
+        parent = None
+        if owner.name == user.name and user.token_id is not None:
+            _within_caller_expiry(user, expires_at)
+            parent = user.token_id
         info, token = _mint(
             ctx,
             user.name,
@@ -623,6 +656,7 @@ def create_token(
             mode=mode,
             include=include_set,
             exclude=exclude_set,
+            parent_token_id=parent,
         )
         extra |= {"token_id": info.id, "prefix": info.prefix}
         card = _card(ctx, owner, info)
@@ -633,8 +667,8 @@ def create_token(
 def revoke_token(
     ctx: AppContext, user: User, token_id: str, owner_name: str | None = None
 ) -> TokenCard:
-    """Revoke a token (effective on its next call). Own tokens; a human admin any; an
-    agent admin only non-admin users'."""
+    """Revoke a token (effective on its next call) and every token minted from it. Own
+    tokens; a human admin any; an agent admin only non-admin users'."""
     owner_name = owner_name or user.name
     fields = _fields("revoke_token", name=owner_name, token_id=token_id)
     with _audit.audit_failures(ctx, user, AuditKind.ADMIN, **fields):

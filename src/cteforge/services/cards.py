@@ -681,6 +681,7 @@ class TokenCard(BaseModel):
     exclude: list[Tool] = Field(default_factory=list)
     tools: list[Tool] = Field(default_factory=list)  # effective (role ∩ token, kind rule)
     state: TokenState = "active"
+    parent_token_id: str | None = None  # the token that minted it (revoking it cascades)
 
 
 def token_card(info: TokenInfo, tools: Iterable[Tool], now: dt.datetime) -> TokenCard:
@@ -705,6 +706,7 @@ def token_card(info: TokenInfo, tools: Iterable[Tool], now: dt.datetime) -> Toke
         exclude=sorted_tools(info.exclude),
         tools=sorted_tools(frozenset(tools)) if state == "active" else [],
         state=state,
+        parent_token_id=info.parent_token_id,
     )
 
 
@@ -744,3 +746,8 @@ class MeCard(BaseModel):
     review_all: bool = False
     role_allowed: list[Tool] = Field(default_factory=list)
     role_defaults: list[Tool] = Field(default_factory=list)
+    # The token this session uses (None: CLI, auth off, stdio without a token). A token
+    # only mints tokens of its user that expire no later and, if `only`, are `only` too.
+    token_id: str | None = None
+    token_expires_at: dt.datetime | None = None
+    token_mode: str | None = None

@@ -42,6 +42,7 @@ export function TokenList({ tokens, label, busy = null, onRevoke, currentPrefix 
                 {currentPrefix && t.prefix && t.prefix === currentPrefix && t.state === "active" && (
                   <span className="tag">this session</span>
                 )}
+                {t.parent_token_id && <ParentNote tokens={tokens} parentId={t.parent_token_id} />}
               </td>
               <td className="mono small">{t.prefix ? `${t.prefix}…` : <span className="muted">legacy</span>}</td>
               <td className="small">
@@ -73,5 +74,17 @@ export function TokenList({ tokens, label, busy = null, onRevoke, currentPrefix 
         </tbody>
       </table>
     </div>
+  );
+}
+
+/** "created by token cfg_pat_abcd…": revoking that token revokes this one too. */
+function ParentNote({ tokens, parentId }: { tokens: TokenCard[]; parentId: string }) {
+  const parent = tokens.find((t) => t.id === parentId);
+  const label = parent ? (parent.prefix ? `${parent.prefix}…` : parent.name) : "another token";
+  return (
+    <span className="muted small" title="Revoking that token revokes this one too.">
+      {" "}
+      (created by token {label})
+    </span>
   );
 }

@@ -94,7 +94,15 @@ def authenticate(ctx: AppContext, token: str | None) -> User:
             ctx.store.touch_token(info.id, now, min_interval=LAST_USED_INTERVAL)
         except StoreError as exc:  # Best effort: never fail a call over bookkeeping.
             _log.warning("Could not record token use (%s)", type(exc).__name__)
-    return user.model_copy(update={"tools": tools, "review_all": review_all})
+    return user.model_copy(
+        update={
+            "tools": tools,
+            "review_all": review_all,
+            "token_id": info.id,
+            "token_expires_at": info.expires_at,
+            "token_mode": info.tool_mode,
+        }
+    )
 
 
 def local_user(ctx: AppContext, *, create: bool = True, defaults_only: bool = False) -> User:

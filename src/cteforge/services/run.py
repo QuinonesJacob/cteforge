@@ -34,7 +34,10 @@ Choices made here (documented contract):
 - Raw tables in a final SELECT (DESIGN §8, §17): reading a base table directly is new
   logic, not "built from verified parts", even when every join is known. The label is then
   assessed as raw SQL (`new_logic_on_known_joins` at best, capped further by the
-  definitions' states), so strict mode refuses it.
+  definitions' states), so strict mode refuses it. Permission (ADR 0027): such a final
+  SELECT is exploratory SQL, so it also needs the check_and_run tool (PermissionDenied,
+  audited, before anything renders to the warehouse); without raw tables compile_and_run
+  alone suffices.
 - Provenance: `RunOutcome.used` lists each definition version with its state and, when
   verified, `verified_by` / `verified_at` (DESIGN §8).
 - Row limit: `limit` clamped to 1..profile.max_rows; the warehouse enforces it again.
@@ -88,6 +91,7 @@ from cteforge.domain.errors import (
     AuditError,
     CteforgeError,
     NotFoundError,
+    PermissionDeniedError,
     PolicyError,
     RenderError,
     SqlParseError,
@@ -106,7 +110,7 @@ from cteforge.domain.users import User
 from cteforge.domain.variables import Role
 from cteforge.parsing.analyze import JoinInfo, analyze, parse
 from cteforge.services import _audit, _library
-from cteforge.services.auth import require
+from cteforge.services.auth import permitted, require
 from cteforge.services.cards import (
     RunOutcome,
     UsedDefinition,
@@ -160,6 +164,19 @@ _RUN_TOOLS = {
     AuditKind.COMPILE_AND_RUN: Tool.COMPILE_AND_RUN,
     AuditKind.CHECK_AND_RUN: Tool.CHECK_AND_RUN,
 }
+
+
+def _require_exploratory(user: User, raw: Iterable[str]) -> None:
+    """A final SELECT that reads raw tables (or table functions) is exploratory SQL: it
+    needs check_and_run as well as compile_and_run (ADR 0027), or a token without
+    check_and_run could run any SQL through `select`. Raised before anything reaches the
+    warehouse; compile_and_run's own handler records the refusal (outcome rejected)."""
+    if not permitted(user, Tool.CHECK_AND_RUN):
+        raise PermissionDeniedError(
+            f"The final SELECT reads raw table(s) {sorted(raw)} directly: that is "
+            f"exploratory SQL and needs the check_and_run tool, which user '{user.name}' "
+            "does not hold. Select only from the definitions' aliases."
+        )
 
 
 def _require(ctx: AppContext, user: User, kind: AuditKind, question: str | None) -> None:
@@ -737,6 +754,8 @@ def _compile_and_run(
             )
 
     composed = compose(parts, final, target)
+    if final is not None and composed.raw_tables:
+        _require_exploratory(user, composed.raw_tables)
     issues += composed.issues
     joins_known = True
     if final is not None:

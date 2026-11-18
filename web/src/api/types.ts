@@ -68,6 +68,11 @@ export interface User {
   review_all?: boolean;
   role_allowed?: ToolName[];
   role_defaults?: ToolName[];
+  /** The token this session signed in with (null: auth off). A token only generates tokens
+   * for its own user that expire no later and, when `only`, are `only` too (ADR 0027). */
+  token_id?: string | null;
+  token_expires_at?: string | null;
+  token_mode?: ToolMode | null;
 }
 
 export type TokenState = "active" | "revoked" | "expired";
@@ -90,6 +95,8 @@ export interface TokenCard {
   /** Effective tools now (empty unless active). */
   tools: ToolName[];
   state: TokenState;
+  /** The token that generated this one for its own user; revoking it revokes this one. */
+  parent_token_id?: string | null;
 }
 
 /** POST /me/tokens, POST /users/{name}/tokens: `token` is shown once. */

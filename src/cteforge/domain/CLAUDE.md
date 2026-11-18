@@ -16,14 +16,16 @@ cteforge. Project root: ../../../CLAUDE.md
 - `issues.py` — Issue, IssueCode, Severity: structured problems/warnings (ADR 0015).
   IssueCode is append-only; add new codes at the end of their group with Edit.
 - `users.py` — User (`role` = a role NAME; `active`; the acting user's resolved `tools` /
-  `review_all`, None = its built-in role's), UserRole (the built-in role names), ActorKind
+  `review_all`, None = its built-in role's; the calling token's `token_id`,
+  `token_expires_at`, `token_mode`, None without one), UserRole (the built-in role names), ActorKind
   (ADR 0018, 0027). No tokens or hashes here.
 - `access.py` — ADR 0027: the `Tool` catalog (one name per operation; MCP tools use the
   same names), `ToolGroup` + `TOOL_GROUPS` (use/build/review/admin), `ALL_TOOLS`,
   `ADMIN_ONLY_TOOLS`, `tool_group`, `sorted_tools` (catalog order), `ToolMode`
   (follow_role | only), `Role` (name Ident ≤ 32, description, allowed, defaults ⊆
   allowed, review_all, builtin), `TokenInfo` (token metadata: id, user_name, name, prefix,
-  created/last-used/expiry/revoked times, tool_mode, include, exclude; `usable_at`; never
+  created/last-used/expiry/revoked times, tool_mode, include, exclude, parent_token_id;
+  `usable_at`; never
   the token or its hash), `BUILTIN_ROLES` (viewer, contributor, approver, admin) and
   `ADMIN_ROLE`. How roles and tokens combine is policy: trust/approval.py.
 - `proposals.py` — Proposal, ProposalKind (incl. `rename_definition`, ADR 0024),

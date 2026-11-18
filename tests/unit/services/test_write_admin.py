@@ -8,7 +8,7 @@ from collections.abc import Iterator
 import pytest
 from sqlalchemy import select
 
-from cteforge.domain.access import Tool
+from cteforge.domain.access import Tool, ToolMode
 from cteforge.domain.audit import AuditKind, AuditOutcome
 from cteforge.domain.connections import WarehouseProfile
 from cteforge.domain.dialects import Dialect
@@ -161,14 +161,51 @@ def test_no_escalation_through_self_service(ctx: AppContext, root: User) -> None
     """A narrow token may not mint (or widen) a token of its own user beyond itself."""
     narrow = admin.create_token(ctx, root, name="narrow", tool_mode="only", include=["search"])
     as_narrow = authenticate(ctx, narrow.token)
+    assert as_narrow.token_id == narrow.info.id and as_narrow.token_mode is ToolMode.ONLY
+    with pytest.raises(PolicyError, match="only these"):
+        admin.create_token(ctx, as_narrow, name="wide")  # follow_role would grow
     with pytest.raises(PermissionDeniedError, match="does not hold"):
-        admin.create_token(ctx, as_narrow, name="wide")
+        admin.create_token(ctx, as_narrow, name="wide", tool_mode="only", include=["verify"])
     with pytest.raises(PermissionDeniedError):
         admin.create_token(ctx, as_narrow, "someone", name="x")  # no manage_user either
     small = admin.create_token(ctx, as_narrow, name="same", tool_mode="only", include=["search"])
     assert small.info.tools == [Tool.SEARCH]
-    with pytest.raises(PermissionDeniedError, match="does not hold"):
+    assert small.info.parent_token_id == narrow.info.id
+    with pytest.raises(PolicyError, match="only these"):
         admin.set_token_tools(ctx, as_narrow, small.info.id, tool_mode="follow_role")
+    with pytest.raises(PermissionDeniedError, match="does not hold"):
+        admin.set_token_tools(
+            ctx, as_narrow, small.info.id, tool_mode="only", include=["search", "verify"]
+        )
+
+
+def test_a_token_mints_nothing_that_outlives_it(ctx: AppContext, root: User) -> None:
+    hour = FIXED + dt.timedelta(hours=1)
+    short = admin.create_token(ctx, root, name="short", expires_at=hour)
+    as_short = authenticate(ctx, short.token)
+    assert as_short.token_expires_at == hour
+    with pytest.raises(PolicyError, match="expire no later"):
+        admin.create_token(ctx, as_short, name="forever")
+    with pytest.raises(PolicyError, match="expire no later"):
+        admin.create_token(ctx, as_short, name="x", expires_at=hour + dt.timedelta(seconds=1))
+    child = admin.create_token(ctx, as_short, name="child", expires_at=hour)
+    grandchild = admin.create_token(
+        ctx, authenticate(ctx, child.token), name="grandchild", expires_at=hour
+    )
+    assert grandchild.info.parent_token_id == child.info.id
+    # Minting for ANOTHER user (manage_user) is not limited or linked: root-equivalent.
+    admin.create_user(ctx, root, "vic", "viewer")
+    other = admin.create_token(ctx, as_short, "vic", name="for vic")
+    assert other.info.expires_at is None and other.info.parent_token_id is None
+    # Revoking the root of the family revokes every descendant, in one call.
+    admin.revoke_token(ctx, root, short.info.id)
+    for token in (short, child, grandchild):
+        with pytest.raises(PermissionDeniedError):
+            authenticate(ctx, token.token)
+    assert authenticate(ctx, other.token).name == "vic"
+    # The CLI / local user has no token: no expiry cap, no parent.
+    free = admin.create_token(ctx, root, name="cli")
+    assert free.info.parent_token_id is None and free.info.expires_at is None
 
 
 def test_agents_never_get_or_mint_tokens(ctx: AppContext, root: User) -> None:

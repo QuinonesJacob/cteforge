@@ -15,7 +15,7 @@ from enum import StrEnum
 
 from pydantic import BaseModel, ConfigDict
 
-from cteforge.domain.access import Tool
+from cteforge.domain.access import Tool, ToolMode
 
 
 class UserRole(StrEnum):
@@ -43,6 +43,11 @@ class User(BaseModel):
     # Effective access of the acting user (services/auth); None = the built-in role's.
     tools: frozenset[Tool] | None = None
     review_all: bool | None = None
+    # The token this call authenticated with (services/auth); None for the CLI, auth-off
+    # HTTP and stdio without CTEFORGE_TOKEN. Bounds what that token may mint (ADR 0027).
+    token_id: str | None = None
+    token_expires_at: dt.datetime | None = None
+    token_mode: ToolMode | None = None
 
     @property
     def is_agent(self) -> bool:

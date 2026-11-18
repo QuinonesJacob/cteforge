@@ -105,7 +105,14 @@ If something does not clearly fit one of the above, it does not belong here.
   the end of that day, UTC; `lib/tools.ts` `expiryFromDate`), mode follow_role | only, a
   `ToolChecklist` limited to the role's Allowed and starting at its defaults
   (`tokenToolsRequest`: follow_role sends include = checked − defaults, exclude = defaults
-  − checked; only sends include = checked). Pickers use `GET /tools` (`ToolInfo {name,
+  − checked; only sends include = checked). Signed in with a token (`/me` `token_id`,
+  `token_expires_at`, `token_mode`), My tokens offers only tools that token holds
+  (`ceiling` = the role's Allowed, so unoffered defaults are excluded), caps the expiry at
+  the token's own (`expiryWithin`; the date input's `max`), disables "follow the role" for
+  an `only` session, and says the new token is tied to the session's (the server links it
+  as `parent_token_id` and revokes it with its parent; `TokenList` shows "created by token
+  <prefix>"). Generating for another user (Users) shows that `manage_user` is equivalent to
+  full admin access. Pickers use `GET /tools` (`ToolInfo {name,
   group, admin_only}`) grouped use/build/review/admin. Admin sections are mounted only when
   the token holds their tool, so others never call those routes: team mode and default
   connection with manage_settings; Users (`GET /users` → UserView with tokens' metadata —

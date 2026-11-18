@@ -84,11 +84,15 @@ export function tokenToolsRequest(
   checked: Iterable<ToolName>,
   defaults: ToolName[],
   allowed: ToolName[],
+  /** The role's whole Allowed list when `allowed` is narrower (a token session offers only
+   * its own tools): role defaults outside `allowed` are then excluded explicitly. */
+  ceiling: ToolName[] = allowed,
 ): { tool_mode: "follow_role" | "only"; include: ToolName[]; exclude: ToolName[] } {
   const ok = new Set(allowed);
   const picked = new Set([...checked].filter((t) => ok.has(t)));
   if (mode === "only") return { tool_mode: "only", include: sortTools(picked), exclude: [] };
-  const base = new Set(defaults.filter((t) => ok.has(t)));
+  const inRole = new Set(ceiling);
+  const base = new Set(defaults.filter((t) => inRole.has(t)));
   return {
     tool_mode: "follow_role",
     include: sortTools([...picked].filter((t) => !base.has(t))),
@@ -104,6 +108,23 @@ export function expiryFromDate(date: string): string | null {
   if (!date) return null;
   if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return null;
   return `${date}T23:59:59Z`;
+}
+
+/**
+ * The expiry to send when the session's own token expires at `cap` (ADR 0027: a token only
+ * generates tokens for its user that expire no later): the end of `date` (UTC), but never
+ * after `cap`; no date → `cap` itself. Without a cap this is `expiryFromDate`.
+ */
+export function expiryWithin(date: string, cap?: string | null): string | null {
+  const chosen = expiryFromDate(date);
+  if (!cap) return chosen;
+  if (!chosen) return cap;
+  return Date.parse(chosen) > Date.parse(cap) ? cap : chosen;
+}
+
+/** The UTC calendar date (YYYY-MM-DD) of an ISO timestamp, for a date input's `max`. */
+export function utcDate(iso: string): string {
+  return new Date(iso).toISOString().slice(0, 10);
 }
 
 /** Role form rules: admin's Allowed is fixed (every tool); admin-only tools only for admin;

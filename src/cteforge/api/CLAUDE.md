@@ -28,7 +28,7 @@ If something does not clearly fit one of the above, it does not belong here.
 
 ## Routes (all under /api/v1, JSON)
 GET /me → MeCard {name, role, kind, active, created_at, tools, review_all, role_allowed,
-role_defaults} · GET /tools → ToolInfo[] {name, group, admin_only} · GET /profiles (name, dialect, `default` = the effective default connection; only these) ·
+role_defaults, token_id, token_expires_at, token_mode (the session's token; null without)} · GET /tools → ToolInfo[] {name, group, admin_only} · GET /profiles (name, dialect, `default` = the effective default connection; only these) ·
 GET /definitions?q=&include_drafts=&limit= · GET /definitions/{id}?version=&include_source= (adds `source_sql` + `annotations`, for revising) ·
 GET /definitions/{id}/history · GET /definitions/{id}/references → DefinitionReferences
 (recipes, pending proposals, former_ids, outside_warning; ADR 0024) ·

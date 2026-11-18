@@ -296,3 +296,59 @@ def test_newer_schema_is_refused(tmp_path: Path) -> None:
         )
     with pytest.raises(StoreError, match="newer"):
         Store(url).init_schema()
+
+
+def test_revoking_a_token_revokes_its_descendants(store: Store, ann: User) -> None:
+    store.add_token(token("p"), "p" * 64)
+    store.add_token(token("c", parent_token_id="p"), "c" * 64)
+    store.add_token(token("g", parent_token_id="c"), "g" * 64)
+    store.add_token(token("s"), "s" * 64)  # unrelated sibling
+    assert store.get_token("c").parent_token_id == "p"
+    store.revoke_token("c", T0)
+    assert store.get_token("p").revoked_at is None
+    assert store.get_token("g").revoked_at == T0
+    store.revoke_token("p", T0 + dt.timedelta(hours=1))
+    assert store.get_token("p").revoked_at == T0 + dt.timedelta(hours=1)
+    assert store.get_token("c").revoked_at == T0  # first time kept
+    assert store.get_token("s").revoked_at is None
+    for h in ("p", "c", "g"):
+        assert store.user_by_token_hash(h * 64, T0 + dt.timedelta(hours=2)) is None
+
+
+def test_v2_tokens_table_gains_parent_token_id(tmp_path: Path) -> None:
+    """A version-2 database written before `parent_token_id` existed gets the column."""
+    url = f"sqlite:///{tmp_path / 'v2.db'}"
+    engine = create_engine(url)
+    with engine.begin() as conn:
+        t.metadata.create_all(conn)
+        conn.exec_driver_sql("DROP INDEX ix_tokens_parent_token_id")
+        conn.exec_driver_sql("ALTER TABLE tokens DROP COLUMN parent_token_id")
+        conn.execute(insert(t.schema_meta).values(key="schema_version", value="2"))
+        conn.execute(
+            insert(t.users).values(
+                name="ann",
+                role="viewer",
+                kind="human",
+                token_sha256="0" * 64,
+                created_at=T0,
+                active=True,
+            )
+        )
+        conn.exec_driver_sql(
+            "INSERT INTO tokens (id, user_name, name, prefix, token_sha256, created_at, "
+            "created_by, tool_mode, include_tools, exclude_tools) VALUES "
+            f"('old', 'ann', 'default', '', '{'a' * 64}', '2026-11-16 09:00:00', 'ann', "
+            "'follow_role', '[]', '[]')"
+        )
+        columns = {c["name"] for c in inspect(conn).get_columns("tokens")}
+        assert "parent_token_id" not in columns
+    engine.dispose()
+    store = Store(url)
+    store.init_schema()
+    store.init_schema()  # idempotent
+    assert store.get_token("old").parent_token_id is None
+    store.add_token(token("new", parent_token_id="old"), "b" * 64)
+    store.revoke_token("old", T0)
+    assert store.get_token("new").revoked_at == T0
+    with store._read() as conn:  # noqa: SLF001
+        assert "parent_token_id" in {c["name"] for c in inspect(conn).get_columns("tokens")}

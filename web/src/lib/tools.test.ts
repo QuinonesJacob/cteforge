@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { ADMIN_ONLY_TOOLS, ALL_TOOLS, BUILTIN_ROLE_TOOLS, cleanRole, expiryFromDate, groupCatalog, sortTools, tokenToolsRequest, toolSummary } from "./tools";
+import { ADMIN_ONLY_TOOLS, ALL_TOOLS, BUILTIN_ROLE_TOOLS, cleanRole, expiryFromDate, expiryWithin, groupCatalog, utcDate, sortTools, tokenToolsRequest, toolSummary } from "./tools";
 
 describe("tool catalog", () => {
   it("mirrors domain/access.py: 20 tools in four groups, admin-only tools in admin", () => {
@@ -71,5 +71,29 @@ describe("role form rules", () => {
       allowed: ["search", "verify"],
       defaults: ["verify"],
     });
+  });
+});
+
+describe("expiryWithin (a token generates nothing that outlives it)", () => {
+  it("is expiryFromDate without a cap", () => {
+    expect(expiryWithin("2027-01-31", null)).toBe("2027-01-31T23:59:59Z");
+    expect(expiryWithin("", undefined)).toBeNull();
+  });
+  it("never goes past the session token's expiry", () => {
+    const cap = "2027-01-31T10:00:00Z";
+    expect(expiryWithin("2027-01-31", cap)).toBe(cap);
+    expect(expiryWithin("2027-02-15", cap)).toBe(cap);
+    expect(expiryWithin("", cap)).toBe(cap);
+    expect(expiryWithin("2027-01-20", cap)).toBe("2027-01-20T23:59:59Z");
+  });
+  it("utcDate gives the date input bound", () => {
+    expect(utcDate("2027-01-31T23:30:00Z")).toBe("2027-01-31");
+  });
+});
+
+describe("tokenToolsRequest with a session narrower than the role", () => {
+  it("excludes role defaults the session cannot offer", () => {
+    const body = tokenToolsRequest("follow_role", ["search"], ["search", "check_and_run"], ["search"], ["search", "check_and_run"]);
+    expect(body).toEqual({ tool_mode: "follow_role", include: [], exclude: ["check_and_run"] });
   });
 });

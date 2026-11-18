@@ -90,11 +90,20 @@ class _NewerSchema(StoreError):
     """The database was written by a newer cteforge."""
 
 
-def _ensure_users_active(conn: Connection) -> None:
-    """Version-1 `users` tables lack `active`: add it (idempotent; static DDL)."""
-    columns = {c["name"] for c in inspect(conn).get_columns("users")}
-    if "active" not in columns:
+def _ensure_columns(conn: Connection) -> None:
+    """Columns added after their table first shipped (idempotent; static DDL only):
+    `users.active` (version-1 databases) and `tokens.parent_token_id` (version-2 databases
+    written before it existed)."""
+    inspector = inspect(conn)
+    users = {c["name"] for c in inspector.get_columns("users")}
+    if "active" not in users:
         conn.execute(text("ALTER TABLE users ADD COLUMN active BOOLEAN NOT NULL DEFAULT TRUE"))
+    tokens = {c["name"] for c in inspector.get_columns("tokens")}
+    if "parent_token_id" not in tokens:
+        conn.execute(text("ALTER TABLE tokens ADD COLUMN parent_token_id VARCHAR(64)"))
+        conn.execute(
+            text("CREATE INDEX IF NOT EXISTS ix_tokens_parent_token_id ON tokens (parent_token_id)")
+        )
 
 
 def _migrate_v1_tokens(conn: Connection, now: dt.datetime) -> None:
@@ -215,7 +224,7 @@ class Store:
                     f"Database schema version {row.value} is newer than this cteforge "
                     f"supports ({t.STORE_SCHEMA_VERSION}); upgrade cteforge"
                 )
-            _ensure_users_active(conn)
+            _ensure_columns(conn)
             if row is None:
                 conn.execute(
                     insert(t.schema_meta).values(
@@ -732,14 +741,26 @@ class Store:
         return [_token(row) for row in rows]
 
     def revoke_token(self, id: str, at: dt.datetime) -> TokenInfo:
-        """Mark revoked at `at` (an already revoked token keeps its first time)."""
+        """Mark the token and every token minted from it (children, their children, …)
+        revoked at `at`, in one transaction (an already revoked token keeps its first
+        time). Returns the token `id`."""
+        tk = t.tokens
         with self._tx() as conn:
-            found = conn.execute(select(t.tokens.c.id).where(t.tokens.c.id == id)).first()
+            found = conn.execute(select(tk.c.id).where(tk.c.id == id)).first()
             if found is None:
                 raise StoreError(f"Token '{id}' does not exist")
+            family, frontier = {id}, {id}
+            while frontier:
+                children = set(
+                    conn.execute(
+                        select(tk.c.id).where(tk.c.parent_token_id.in_(sorted(frontier)))
+                    ).scalars()
+                )
+                frontier = children - family
+                family |= frontier
             conn.execute(
-                update(t.tokens)
-                .where(t.tokens.c.id == id, t.tokens.c.revoked_at.is_(None))
+                update(tk)
+                .where(tk.c.id.in_(sorted(family)), tk.c.revoked_at.is_(None))
                 .values(revoked_at=_utc(at))
             )
         return self._token_or_error(id)
@@ -984,6 +1005,7 @@ def _token_values(info: TokenInfo) -> dict[str, Any]:
         "tool_mode": info.tool_mode.value,
         "include_tools": _tools_json(info.include),
         "exclude_tools": _tools_json(info.exclude),
+        "parent_token_id": info.parent_token_id,
     }
 
 
@@ -1004,4 +1026,5 @@ def _token(row: Row[Any]) -> TokenInfo:
         tool_mode=ToolMode(row.tool_mode),
         include=_tools_from(row.include_tools),
         exclude=_tools_from(row.exclude_tools),
+        parent_token_id=row.parent_token_id,
     )

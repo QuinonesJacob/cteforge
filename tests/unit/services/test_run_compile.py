@@ -559,3 +559,38 @@ def test_no_default_issue_when_every_changeable_variable_is_given(ctx: AppContex
     )
     assert not [i for i in out.issues if i.code is IssueCode.DEFAULT_VALUE_USED]
     assert out.values_used["rr"]["period"] == Q3_APAC["period"]
+
+
+# ── tool access (ADR 0027) ───────────────────────────────────────────────────────────
+
+
+def test_final_select_over_raw_tables_needs_check_and_run(ctx: AppContext) -> None:
+    """Regression (security review): a token with compile_and_run but not check_and_run
+    could run any SQL through the final `select`."""
+    from cteforge.domain.access import Tool
+    from cteforge.domain.errors import PermissionDeniedError
+
+    add(ctx, rr_verified())
+    narrow = AGENT.model_copy(update={"tools": frozenset({Tool.SEARCH, Tool.COMPILE_AND_RUN})})
+    uses = {"rr": {"id": "realization_rate"}}
+    for select in (
+        "SELECT a.name, (SELECT COUNT(*) FROM rr) AS n FROM accounts AS a",
+        "SELECT rr.region, a.name FROM rr JOIN accounts AS a ON a.region = rr.region",
+        "SELECT * FROM read_csv('x.csv')",  # table functions are raw reads too
+    ):
+        with pytest.raises(PermissionDeniedError, match="check_and_run"):
+            compile_and_run(ctx, narrow, uses=uses, select=select)
+        event = ctx.audit.list_events(limit=1)[0]
+        assert event.kind is AuditKind.COMPILE_AND_RUN
+        assert event.outcome is AuditOutcome.REJECTED
+    # Over the aliases only, compile_and_run alone suffices.
+    out = compile_and_run(ctx, narrow, uses=uses, select="SELECT region FROM rr")
+    assert out.ran and out.row_count > 0
+    # With check_and_run too (built-in viewer), the raw read runs, labeled exploratory.
+    out = compile_and_run(
+        ctx,
+        AGENT,
+        uses=uses,
+        select="SELECT a.name, (SELECT COUNT(*) FROM rr) AS n FROM accounts AS a",
+    )
+    assert out.ran and out.label is TrustLabel.EXPLORATORY

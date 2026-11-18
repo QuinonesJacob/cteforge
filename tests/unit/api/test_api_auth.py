@@ -145,16 +145,60 @@ def test_new_token_works_and_revoking_the_old_one_stops_it(api, check_error) -> 
     assert response.status_code == 201
     new = response.json()["token"]
     assert new != old and new.startswith("cfg_pat_")
+    [default] = [t for t in api.get("/me/tokens", "vic").json() if t["name"] == "default"]
+    assert response.json()["info"]["parent_token_id"] == default["id"]  # minted by it
     headers = {"Authorization": f"Bearer {new}"}
     assert api.client.get("/api/v1/me", headers=headers).json()["name"] == "vic"
-    [default] = [t for t in api.get("/me/tokens", "vic").json() if t["name"] == "default"]
+    # A token minted by a token is revoked with it (security review: no persistence).
     api.client.delete(f"/api/v1/me/tokens/{default['id']}", headers=headers)
-    check_error(
-        api.client.get("/api/v1/me", headers={"Authorization": f"Bearer {old}"}),
-        401,
-        "Unauthorized",
-    )
-    assert api.client.get("/api/v1/me", headers=headers).status_code == 200
+    for token in (old, new):
+        check_error(
+            api.client.get("/api/v1/me", headers={"Authorization": f"Bearer {token}"}),
+            401,
+            "Unauthorized",
+        )
+    # One generated outside any token (the CLI, or an admin for this user) is independent.
+    made = api.post("/users/alice/tokens", "root", {"name": "laptop"}).json()
+    assert made["info"]["parent_token_id"] is None
+    [alice_default] = [t for t in api.get("/me/tokens", "alice").json() if t["name"] == "default"]
+    api.delete(f"/me/tokens/{alice_default['id']}", "alice")
+    laptop = {"Authorization": f"Bearer {made['token']}"}
+    assert api.client.get("/api/v1/me", headers=laptop).status_code == 200
+
+
+def test_poc1_a_short_lived_narrow_token_cannot_leave_a_lasting_one(api, check_error) -> None:
+    """Regression (security review, poc1): an agent's 1-hour `only: [search]` token minted
+    a token without expiry for its own user that survived revoking the original."""
+    import datetime as dt
+
+    hour = (dt.datetime.now(dt.UTC) + dt.timedelta(hours=1)).isoformat()
+    made = api.post(
+        "/users/alice/tokens",
+        "root",
+        {"name": "short", "expires_at": hour, "tool_mode": "only", "include": ["search"]},
+    ).json()
+    short = {"Authorization": f"Bearer {made['token']}"}
+    me = api.client.get("/api/v1/me", headers=short).json()
+    assert me["token_id"] == made["info"]["id"] and me["token_mode"] == "only"
+    assert me["token_expires_at"] is not None
+
+    def mint(body: dict) -> object:
+        return api.client.post("/api/v1/me/tokens", headers=short, json=body)
+
+    only_search = {"tool_mode": "only", "include": ["search"]}
+    check_error(mint({"name": "forever"} | only_search), 409, "PolicyError")
+    later = (dt.datetime.now(dt.UTC) + dt.timedelta(days=30)).isoformat()
+    check_error(mint({"name": "later", "expires_at": later} | only_search), 409, "PolicyError")
+    check_error(mint({"name": "grows", "expires_at": hour}), 409, "PolicyError")  # follow_role
+    soon = (dt.datetime.now(dt.UTC) + dt.timedelta(minutes=30)).isoformat()
+    child = mint({"name": "child", "expires_at": soon} | only_search)
+    assert child.status_code == 201
+    child_headers = {"Authorization": f"Bearer {child.json()['token']}"}
+    # Revoking the original revokes what it minted.
+    assert api.delete(f"/users/alice/tokens/{made['info']['id']}", "root").status_code == 200
+    check_error(api.client.get("/api/v1/me", headers=child_headers), 401, "Unauthorized")
+    states = {t["name"]: t["state"] for t in api.get("/me/tokens", "alice").json()}
+    assert states["short"] == states["child"] == "revoked"
 
 
 def test_factory_without_ctx_opens_and_closes_context(

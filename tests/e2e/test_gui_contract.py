@@ -26,7 +26,16 @@ from cteforge.services.context import AppConfig, open_context
 # ── Field sets from web/src/api/types.ts (required + optional fields the API always sends) ──
 USER = {"name", "role", "kind", "created_at"}
 # ADR 0027: GET /me (MeCard), users, roles, tokens, the tool catalog.
-ME = USER | {"active", "tools", "review_all", "role_allowed", "role_defaults"}
+ME = USER | {
+    "active",
+    "tools",
+    "review_all",
+    "role_allowed",
+    "role_defaults",
+    "token_id",
+    "token_expires_at",
+    "token_mode",
+}
 TOOL_INFO = {"name", "group", "admin_only"}
 TOKEN_CARD = {
     "id",
@@ -43,6 +52,7 @@ TOKEN_CARD = {
     "exclude",
     "tools",
     "state",
+    "parent_token_id",
 }
 USER_VIEW = USER | {"active", "tokens"}
 ROLE_CARD = {"name", "description", "allowed", "defaults", "review_all", "builtin", "users"}
