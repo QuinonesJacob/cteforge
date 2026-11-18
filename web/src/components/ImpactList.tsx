@@ -1,24 +1,24 @@
+import { Link } from "react-router-dom";
 import type { ProposalImpact } from "../api/types";
-import { impactCount, impactRecipes, plural } from "../lib/format";
+import { impactIds, plural } from "../lib/format";
 
+/** "Used by" (ADR 0026): the composed definitions a change to this definition reaches. */
 export function ImpactList({ impact }: { impact: ProposalImpact | undefined }) {
-  const recipes = impactRecipes(impact);
-  const count = impactCount(impact);
-  if (count === 0) return <p className="muted">No saved recipes use this definition.</p>;
+  const ids = impactIds(impact);
+  if (ids.length === 0) return <p className="muted">No composed definitions use this definition.</p>;
   return (
     <div>
       <p>
-        Affects <strong>{plural(count, "recipe")}</strong>.
+        Used by <strong>{plural(ids.length, "composed definition")}</strong>: those following the latest version get
+        this change.
       </p>
-      {recipes.length > 0 && (
-        <ul className="chips">
-          {recipes.map((r) => (
-            <li key={r} className="chip mono">
-              {r}
-            </li>
-          ))}
-        </ul>
-      )}
+      <ul className="chips">
+        {ids.map((id) => (
+          <li key={id} className="chip mono">
+            <Link to={`/definitions/${encodeURIComponent(id)}`}>{id}</Link>
+          </li>
+        ))}
+      </ul>
     </div>
   );
 }

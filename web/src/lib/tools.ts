@@ -4,8 +4,8 @@
 import type { BuiltinRole, ToolGroup, ToolInfo, ToolName } from "../api/types";
 
 export const TOOL_GROUPS: Record<ToolGroup, ToolName[]> = {
-  use: ["search", "get_definition", "compile_and_run", "check_and_run", "describe_tables", "list_joins", "list_recipes"],
-  build: ["parse_query", "propose_definition", "revise_definition", "propose_join", "propose_recipe"],
+  use: ["search", "get_definition", "compile_and_run", "check_and_run", "describe_tables", "list_joins"],
+  build: ["parse_query", "propose_definition", "revise_definition", "propose_join"],
   review: ["list_proposals", "review_proposal", "verify"],
   admin: ["view_audit", "list_users", "manage_user", "manage_role", "manage_settings"],
 };
@@ -60,7 +60,7 @@ export function groupCatalog(catalog: ToolInfo[] | null | undefined): { group: T
   );
 }
 
-/** "Use 7/7 · Build 5/5 · Review 3/3 · Admin 0/5": how much of each group a list covers. */
+/** "Use 6/6 · Build 4/4 · Review 3/3 · Admin 0/5": how much of each group a list covers. */
 export function toolSummary(tools: ToolName[]): string {
   const set = new Set(tools);
   return GROUP_ORDER.map((g) => {

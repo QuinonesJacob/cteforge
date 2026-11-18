@@ -1,17 +1,19 @@
-"""Use-cases: browse the library's recipes, the join map and the tables it reads.
+"""Use-cases: browse the join map and the tables the library reads.
 
-DESIGN §3, §6. They let an agent (or the GUI) discover what it would otherwise learn only
-by trial and error: saved recipes to run by id, the join-map keys that keep a result's
-trust label, and the columns (with types from the warehouse) of the tables the library
-reads. Each needs the tool of its name (ADR 0027). Audit: AuditKind.GET_DEFINITION with
-`extra.op` (`list_recipes`, `list_joins`, `describe_tables`), best effort: they return no
-result rows.
+DESIGN §3, §6, ADR 0026. They let an agent (or the GUI) discover what it would otherwise
+learn only by trial and error: the join-map keys that keep a result's trust label, and the
+columns (with types from the warehouse) of the tables the library reads. Each needs the
+tool of its name (ADR 0027). Audit: AuditKind.GET_DEFINITION with `extra.op`
+(`list_joins`, `describe_tables`), best effort: they return no result rows.
 
-Visibility follows search (`_library.usable_states`): by default recipes and join edges in
-a state agents may use in the team mode (verified; in open mode also llm_annotated);
-`include_drafts` lists every state. Column names and types are schema facts (the same
-`parse_query` reports), never data values. Units of raw columns are not recorded by
-the warehouse; `units` lists the ones the library's variables declare for a column.
+Join edges (ADR 0026) come with `known` (counts for trust labels: mined from a definition,
+added or confirmed by a person), `confirmed` (a person approved it, or it was mined from
+a verified definition), `sources` (the definitions it was mined from), relationship, traps,
+notes and the last relationship evidence; `pending_proposals` only for callers holding
+list_proposals. Definitions for describe_tables follow search visibility
+(`_library.usable_states`). Column names and types are schema facts (the same
+`parse_query` reports), never data values. Units of raw columns are not recorded by the
+warehouse; `units` lists the ones the library's variables declare for a column.
 """
 
 from __future__ import annotations
@@ -21,11 +23,11 @@ from collections.abc import Sequence
 from cteforge.domain.access import Tool
 from cteforge.domain.audit import AuditKind
 from cteforge.domain.errors import PolicyError, WarehouseError
-from cteforge.domain.models import DefinitionState, JoinEdge, Recipe
+from cteforge.domain.models import DefinitionState
 from cteforge.domain.users import User
 from cteforge.services import _audit, _library
 from cteforge.services.auth import require
-from cteforge.services.cards import ColumnCard, TableCard
+from cteforge.services.cards import ColumnCard, JoinCard, TableCard
 from cteforge.services.context import AppContext, team_mode
 
 MAX_TABLES = 50  # describe_tables answers for at most this many tables per call.
@@ -44,52 +46,33 @@ def _states(ctx: AppContext, include_drafts: bool) -> frozenset[DefinitionState]
     return _library.visible_states(team_mode(ctx), include_drafts)
 
 
-def _words(text: str) -> set[str]:
-    return {w for w in "".join(c if c.isalnum() else " " for c in text.lower()).split() if w}
-
-
-def list_recipes(
-    ctx: AppContext, user: User, *, query: str = "", include_drafts: bool = False
-) -> list[Recipe]:
-    """Saved recipes (latest versions), by id; run one with compile_and_run(recipe_id=...).
-    `query`: keep only recipes whose id, title, description or definition ids contain
-    every word of it (case-insensitive substrings)."""
-    _require(ctx, user, "list_recipes")
-    states = _states(ctx, include_drafts)
-    wanted = _words(query)
-    recipes = []
-    for recipe in ctx.store.list_recipes():
-        if recipe.state not in states:
-            continue
-        text = " ".join(
-            [recipe.id, recipe.title, recipe.description, *(r.id for r in recipe.uses.values())]
-        )
-        if all(w in text.lower() for w in wanted):
-            recipes.append(recipe)
-    _record(ctx, user, "list_recipes", count=len(recipes), include_drafts=include_drafts)
-    return recipes
-
-
 def list_joins(
-    ctx: AppContext, user: User, *, table: str | None = None, include_drafts: bool = False
-) -> list[JoinEdge]:
-    """Join-map edges (DESIGN §3), optionally only those touching `table` (a qualified
-    name matches its unqualified form and back, as joins are matched). Joining on these
-    keys keeps a result's label at new_logic_on_known_joins or better."""
+    ctx: AppContext,
+    user: User,
+    *,
+    table: str | None = None,
+    known_only: bool = False,
+    definition: str | None = None,
+) -> list[JoinCard]:
+    """Join-map edges (DESIGN §3, ADR 0026), optionally only those touching `table` (a
+    qualified name matches its unqualified form and back, as joins are matched), only
+    known ones, or only those mined from `definition`. Joining on known keys keeps a
+    result's label at new_logic_on_known_joins or better."""
     _require(ctx, user, "list_joins")
-    states = _states(ctx, include_drafts)
     edges = [
         e
         for e in ctx.store.list_joins()
-        if e.state in states
+        if (not known_only or e.is_known())
+        and (definition is None or definition in e.sources)
         and (
             table is None
             or _library.same_table(table, e.left_table)
             or _library.same_table(table, e.right_table)
         )
     ]
-    _record(ctx, user, "list_joins", table=table, count=len(edges))
-    return edges
+    cards = _library.join_cards(ctx, user, edges)
+    _record(ctx, user, "list_joins", table=table, count=len(cards))
+    return cards
 
 
 def _known_tables(ctx: AppContext, states: frozenset[DefinitionState]) -> list[str]:
@@ -99,9 +82,8 @@ def _known_tables(ctx: AppContext, states: frozenset[DefinitionState]) -> list[s
         for table in found.tables if found is not None else ():
             names.setdefault(table.lower(), table)
     for edge in ctx.store.list_joins():
-        if edge.state in states:
-            for table in (edge.left_table, edge.right_table):
-                names.setdefault(table.lower(), table)
+        for table in (edge.left_table, edge.right_table):
+            names.setdefault(table.lower(), table)
     return sorted(names.values(), key=str.lower)
 
 
@@ -132,7 +114,7 @@ def describe_tables(
         for latest in ctx.store.list_definitions()
         if (found := _library.newest_in_states(ctx, latest, states)) is not None
     ]
-    edges = [e for e in ctx.store.list_joins() if e.state in states]
+    edges = ctx.store.list_joins()
     cards = []
     for name in names:
         columns: dict[str, str] = {}

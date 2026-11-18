@@ -67,16 +67,27 @@ export function DefinitionEditPanel({ def, onApplied, onRenamed }: Props) {
 
   return (
     <div className="stack">
-      <section className="card" aria-label="Change SQL or variables">
-        <h2>SQL and variables</h2>
-        <p className="muted small">
-          Change the trusted SQL, its dialect or which values are variables. Opens the import builder with this
-          definition's SQL and variables filled in; every check runs again.
-        </p>
-        <Link className="btn" to={`/import?revise=${encodeURIComponent(def.id)}`}>
-          Change SQL or variables…
-        </Link>
-      </section>
+      {def.composed ? (
+        <section className="card" aria-label="Change parts">
+          <h2>Parts and final SELECT</h2>
+          <p className="muted small">
+            A composed definition is built from other definitions (ADR 0026). Agents change its parts, final SELECT or
+            fixed values with <code>revise_definition</code> (a composition); people review those proposals here. The
+            description can be edited below.
+          </p>
+        </section>
+      ) : (
+        <section className="card" aria-label="Change SQL or variables">
+          <h2>SQL and variables</h2>
+          <p className="muted small">
+            Change the trusted SQL, its dialect or which values are variables. Opens the import builder with this
+            definition's SQL and variables filled in; every check runs again.
+          </p>
+          <Link className="btn" to={`/import?revise=${encodeURIComponent(def.id)}`}>
+            Change SQL or variables…
+          </Link>
+        </section>
+      )}
       <section className="card" aria-label="Edit description">
         <h2>Description</h2>
         <p className="muted small">

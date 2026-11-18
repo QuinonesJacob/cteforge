@@ -46,12 +46,20 @@ class IssueCode(StrEnum):
     RUN_FAILED = "run_failed"
     UNUSED_ALIAS = "unused_alias"
     MATCHES_DEFINITION = "matches_definition"  # check_and_run SQL is a definition's original.
+    # ADR 0026: composed definitions.
+    COMPOSITION_INVALID = "composition_invalid"  # A composition can't be resolved/composed.
+    COMPOSITION_CYCLE = "composition_cycle"  # A part uses (also through nesting) itself.
+    PART_NOT_USABLE = "part_not_usable"  # A floating part has no usable version.
+    PART_SUPERSEDED = "part_superseded"  # A pinned part has newer versions.
     # Proposals / review / revalidation
     STALE_BASE_VERSION = "stale_base_version"
     PERMISSION_DENIED = "permission_denied"
     NOT_FOUND = "not_found"
     DRIFT = "drift"
-    RECIPE_INVALID = "recipe_invalid"  # A proposed recipe can't be rendered or composed.
+    RECIPE_INVALID = "recipe_invalid"  # Legacy (ADR 0026 removed recipes); stored only.
+    # ADR 0026: a relationship claim the warehouse data contradicts (a side called "one"
+    # has duplicate keys).
+    RELATIONSHIP_CONTRADICTED = "relationship_contradicted"
     # Settings
     # The admin's default connection names a profile that is no longer configured.
     DEFAULT_CONNECTION_MISSING = "default_connection_missing"

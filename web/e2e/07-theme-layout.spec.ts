@@ -67,7 +67,7 @@ test.describe("at 375px wide", () => {
     expect(await hasHorizontalScroll(page)).toBe(false);
     await screenshot(page, "07-definition-run-375");
 
-    for (const path of ["/review", "/audit", "/import", "/settings", "/explore", "/explore?tab=tables"]) {
+    for (const path of ["/joins", "/?review=mine", "/audit", "/import", "/settings"]) {
       await page.goto(path);
       await expect(page.getByRole("heading", { level: 1 })).toBeVisible();
       await page.waitForLoadState("networkidle");

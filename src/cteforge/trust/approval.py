@@ -183,6 +183,20 @@ def can_auto_apply(mode: TeamMode, target: Definition | None, checks: list[Issue
     return target is None or target.state is not DefinitionState.VERIFIED
 
 
+def join_may_auto_apply(action: str, author_kind: ActorKind) -> bool:
+    """ADR 0026: an edge an AGENT adds (one no definition contains) never auto-applies,
+    in any mode; it waits for a person, so an agent cannot raise trust labels by declaring
+    joins. Annotations and people's additions follow `can_auto_apply`."""
+    return not (action == "add" and author_kind is ActorKind.AGENT)
+
+
+def confirms_join(decider_kind: ActorKind, *, auto: bool) -> bool:
+    """Whether a decision makes a join edge confirmed (and so known): a PERSON approving
+    it. Auto-apply is not an approval, and an admin agent's approval does not confirm
+    (ADR 0026: joins become known only through definitions or people)."""
+    return decider_kind is ActorKind.HUMAN and not auto
+
+
 # ── Users, roles and tokens (ADR 0027: admin agents) ─────────────────────────────────
 
 

@@ -85,7 +85,7 @@ describe("ImportPage", () => {
     const idInput = screen.getByLabelText(/^ID/) as HTMLInputElement;
     expect(idInput).toHaveValue("closed_deals");
     expect(idInput.readOnly).toBe(true);
-    expect(screen.getByText("Filled in from the title. Agents and recipes use this name.")).toBeInTheDocument();
+    expect(screen.getByText("Filled in from the title. Agents and composed definitions use this name.")).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "Edit ID" }));
     expect(idInput.readOnly).toBe(false);
     await user.type(idInput, "_x");

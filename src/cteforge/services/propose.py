@@ -18,6 +18,13 @@ definition_references`) for the reviewer. Applying it is `_apply.apply_proposal`
 
 Owner rule: `owner` may be set only to the proposer, or left empty, unless the user is an
 approver or admin. A human proposer owns a new definition by default; an agent's has none.
+
+Composed definitions (ADR 0026): `propose_definition` / `revise_definition` take EITHER
+`sql` OR `composition` ({uses: alias → {id, version?}, select?, fixed?}; never both). A
+composition needs no annotations for its parts (their variables become `<alias>.<var>`);
+`annotations` may annotate literals of its final SELECT. Checks: services/_compose.py
+`checked_composition`. Revising only the annotations of a composed definition re-checks it
+with its current parts.
 """
 
 from __future__ import annotations
@@ -32,7 +39,14 @@ from cteforge.domain.audit import AuditKind
 from cteforge.domain.dialects import Dialect
 from cteforge.domain.errors import CodecError, PolicyError
 from cteforge.domain.issues import Issue
-from cteforge.domain.models import Annotation, Definition, DefinitionState, Ident
+from cteforge.domain.models import (
+    Annotation,
+    Composition,
+    Definition,
+    DefinitionRef,
+    DefinitionState,
+    Ident,
+)
 from cteforge.domain.proposals import ProposalKind
 from cteforge.domain.users import ActorKind, User
 from cteforge.services import _apply, _audit, _library
@@ -67,6 +81,39 @@ class DefinitionMetadata(BaseModel):
         return {k: getattr(self, k) for k in self.model_fields_set}
 
 
+class CompositionInput(BaseModel):
+    """The `composition` argument (ADR 0026): parts by alias, the final SELECT over the
+    aliases (optional with exactly one part), and values the definition always sets on
+    its parts (`fixed`: alias → variable → value)."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    uses: dict[str, DefinitionRef]
+    select: str | None = None
+    fixed: dict[str, dict[str, Any]] = {}
+
+
+def _composition(
+    raw: Mapping[str, Any] | CompositionInput,
+) -> tuple[Composition, str | None]:
+    """(Composition, final SELECT) from the caller's input; CodecError when invalid."""
+    try:
+        given = (
+            raw if isinstance(raw, CompositionInput) else CompositionInput.model_validate(dict(raw))
+        )
+        return Composition(uses=given.uses, fixed=given.fixed), given.select
+    except ValidationError as exc:
+        raise CodecError(f"Invalid composition: {_apply.validation_detail(exc)}") from None
+
+
+def _one_body(sql: str | None, composition: object | None) -> None:
+    if (sql is None) == (composition is None):
+        raise PolicyError(
+            "Give exactly one of `sql` (a trusted query) or `composition` (parts + final "
+            "SELECT), not both."
+        )
+
+
 def _metadata(raw: Mapping[str, Any] | DefinitionMetadata | None) -> DefinitionMetadata:
     if raw is None:
         return DefinitionMetadata()
@@ -82,14 +129,16 @@ def propose_definition(
     ctx: AppContext,
     user: User,
     *,
-    sql: str,
+    sql: str | None = None,
+    composition: Mapping[str, Any] | CompositionInput | None = None,
     dialect: Dialect | str | None = None,
     metadata: Mapping[str, Any] | DefinitionMetadata,
-    annotations: Sequence[Annotation | Mapping[str, Any]],
+    annotations: Sequence[Annotation | Mapping[str, Any]] = (),
     profile: str | None = None,
     summary: str = "",
 ) -> ProposalOutcome:
-    """Propose a new definition from a trusted query + annotations.
+    """Propose a new definition from a trusted query + annotations, or from a composition
+    of other definitions (exactly one of `sql` / `composition`; ADR 0026).
 
     metadata: id, title (required), meaning, keywords, use_when, dont_use_when, grain,
     join_keys, owner, profile. The warehouse profile is `profile`, else metadata.profile,
@@ -100,6 +149,7 @@ def propose_definition(
     """
     with _audit.audit_failures(ctx, user, AuditKind.PROPOSE, extra={"op": _OP_NEW}):
         require(user, Tool.PROPOSE_DEFINITION)
+        _one_body(sql, composition)
         meta = _metadata(metadata)
         if meta.id is None or not (meta.title or "").strip():
             raise CodecError("metadata needs at least 'id' and 'title'")
@@ -113,13 +163,27 @@ def propose_definition(
         source_dialect = _library.resolve_dialect(ctx, dialect, profile or meta.profile)
         profile_name, warehouse = _apply.warehouse_for(ctx, profile or meta.profile)
         fields = meta.given() | {"owner": owner, "profile": profile_name, "version": 1}
-        definition, issues = _apply.checked_definition(
-            sql,
-            source_dialect,
-            _apply.parse_annotations(annotations),
-            fields,
-            warehouse,
-        )
+        if composition is not None:
+            parts, select = _composition(composition)
+            definition, issues = _apply.checked_composition(
+                ctx,
+                user,
+                parts,
+                select,
+                source_dialect,
+                _apply.parse_annotations(annotations),
+                fields,
+                warehouse,
+            )
+        else:
+            assert sql is not None
+            definition, issues = _apply.checked_definition(
+                sql,
+                source_dialect,
+                _apply.parse_annotations(annotations),
+                fields,
+                warehouse,
+            )
         proposal = _apply.new_proposal(
             ctx,
             user,
@@ -141,6 +205,7 @@ def revise_definition(
     id: str,
     base_version: int,
     sql: str | None = None,
+    composition: Mapping[str, Any] | CompositionInput | None = None,
     dialect: Dialect | str | None = None,
     metadata: Mapping[str, Any] | DefinitionMetadata | None = None,
     annotations: Sequence[Annotation | Mapping[str, Any]] | None = None,
@@ -152,6 +217,9 @@ def revise_definition(
 
     - `sql` given: new SQL (in `dialect`, default the source dialect) with `annotations`
       (default: the current ones, whose literal IDs must still exist). Checks re-run.
+    - `composition` given (never with `sql`): new parts / final SELECT / fixed values
+      (ADR 0026), with `annotations` of the final SELECT (default: the current ones when
+      the definition is composed). Checks re-run.
     - only `annotations`: the trusted SQL is reconstructed by rendering the current version
       with its original values in its source dialect, then the checks re-run.
     - only `metadata`: template and variables are kept, nothing re-runs; the state is kept
@@ -160,7 +228,13 @@ def revise_definition(
     Raises NotFoundError, StaleVersionError (with a stale_base_version issue on `.issues`).
     """
     if new_id is not None:
-        if sql is not None or annotations is not None or metadata or dialect is not None:
+        if (
+            sql is not None
+            or composition is not None
+            or annotations is not None
+            or metadata
+            or dialect is not None
+        ):
             raise PolicyError(
                 "A rename is its own proposal: pass only new_id (and summary), then revise "
                 "the definition under its new ID."
@@ -182,16 +256,43 @@ def revise_definition(
             raise PolicyError(
                 "metadata.id can't change the ID; propose a rename instead (new_id, ADR 0024)"
             )
-        if sql is None and annotations is None and not meta.given():
-            raise PolicyError("Nothing to revise: pass sql, annotations or metadata")
+        if sql is not None and composition is not None:
+            _one_body(sql, composition)
+        if sql is None and composition is None and annotations is None and not meta.given():
+            raise PolicyError("Nothing to revise: pass sql, composition, annotations or metadata")
         new_dialect = None if dialect is None else _library.parse_dialect(dialect)
         if sql is None and new_dialect is not None and new_dialect is not current.source_dialect:
             raise PolicyError("Changing the dialect needs the SQL in that dialect (pass sql)")
         given = meta.given()
         _apply.check_owner(user, given.get("owner", current.owner), current.owner)
         merged = current.model_dump() | given | {"version": base_version + 1}
-        if sql is None and annotations is None:
+        if sql is None and composition is None and annotations is None:
             revised, issues = _metadata_only(current, merged)
+        elif composition is not None or (sql is None and current.composition is not None):
+            if composition is not None:
+                parts, select = _composition(composition)
+            else:
+                assert current.composition is not None
+                parts = current.composition
+                select = _library.original_sql(current) or None
+            keep_annotations = annotations is None and current.composition is not None
+            anns = (
+                _apply.parse_annotations(annotations)
+                if annotations is not None
+                else (_library.annotations_of(current) if keep_annotations else [])
+            )
+            profile_name, warehouse = _apply.warehouse_for(ctx, merged.get("profile"))
+            merged["profile"] = profile_name
+            revised, issues = _apply.checked_composition(
+                ctx,
+                user,
+                parts,
+                select,
+                new_dialect or current.source_dialect,
+                anns,
+                merged,
+                warehouse,
+            )
         else:
             source_sql = sql if sql is not None else _library.original_sql(current)
             source_dialect = new_dialect or current.source_dialect

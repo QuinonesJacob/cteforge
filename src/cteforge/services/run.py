@@ -2,11 +2,12 @@
 
 DESIGN §6, §8, §11, §17; ADR 0005, 0007, 0008, 0013. Each needs the tool of its name (ADR 0027).
 
-compile_and_run flow: resolve `uses` (or a recipe) → load each definition → pick the
-warehouse profile and target dialect → render each definition (templating) → compose with
-the optional final SELECT → check the final SELECT's joins against the join map → trust
-label (trust.assess) → refuse if not usable → tag the SQL (ADR 0008) → EXPLAIN → run →
-audit → RunOutcome.
+compile_and_run flow: resolve `uses` → load each definition → pick the warehouse profile
+and target dialect → render each definition (templating; a composed definition through
+services/_compose.py: its parts rendered and composed, recursively) → compose with the
+optional final SELECT → check the final SELECT's joins against the join map → trust label
+(trust.assess) → refuse if not usable → tag the SQL (ADR 0008) → EXPLAIN → run → audit →
+RunOutcome.
 
 Choices made here (documented contract):
 - Versions: a pinned version is used as is (a pinned draft is refused by trust). A floating
@@ -19,25 +20,31 @@ Choices made here (documented contract):
   SQL is only compiled for that dialect (DESIGN §12, ADR 0013: definitions in another
   source dialect are transpiled and labeled `transpiled`), without EXPLAIN, with a
   `checks_incomplete` warning naming why. With `run=False` and no warehouse configured at
-  all, SQL is compiled for `dialect` (or the recipe's / the definitions' common source
-  dialect) without EXPLAIN, with a `checks_incomplete` warning.
-- A recipe's own final SELECT is used; passing `select` with `recipe_id` is refused, as is a
-  recipe whose dialect differs from the target. Values given with a recipe override the
-  recipe's values per variable. A draft recipe is refused (`draft_not_usable`).
+  all, SQL is compiled for `dialect` (or the definitions' common source dialect) without
+  EXPLAIN, with a `checks_incomplete` warning.
+- Composed definitions (ADR 0026) run by id like any other: `uses={"r": {"id": "<id>"}}`;
+  their variables are `<alias>.<var>` (`values={"r": {"orders.period": ...}}`, or per
+  part `{"r": {"orders": {"period": ...}}}`). Trust: their parts' states count like
+  definitions'; a composed definition no person verified caps the label at
+  built_from_verified_parts and its final SELECT's joins are judged like an agent's
+  (trust.labels `composed_states`). A floating part with no usable version makes the run
+  unusable (`part_not_usable`).
 - Final-SELECT joins: alias↔alias joins are known when compose says so (declared
-  join_keys). A join with a raw-table side is known only when a JoinEdge in the store
-  matches it (`_library.matching_edge`: same two tables, case-insensitive, an unqualified
-  name matching a qualified one by its last part; exactly the same key pairs, in either
-  orientation). A raw table read outside
-  any known join also makes joins unknown. Unknown → `unknown_join` warning, and the trust
-  label falls to `exploratory`. Join-map edges in state draft never count as known.
+  join_keys). A join with a raw-table side is known only when a KNOWN JoinEdge matches it
+  (`_library.matching_edge`: same two tables, case-insensitive, an unqualified name
+  matching a qualified one by its last part; exactly the same key pairs, in either
+  orientation; `_library.known_edges`: mined from a definition, added or confirmed by a
+  person — an edge an agent added counts only once a person approved it, ADR 0026). A raw
+  table read outside any known join also makes joins unknown. Unknown → `unknown_join`
+  warning, and the trust label falls to `exploratory`.
 - Raw tables in a final SELECT (DESIGN §8, §17): reading a base table directly is new
   logic, not "built from verified parts", even when every join is known. The label is then
   assessed as raw SQL (`new_logic_on_known_joins` at best, capped further by the
   definitions' states), so strict mode refuses it. Permission (ADR 0027): such a final
   SELECT is exploratory SQL, so it also needs the check_and_run tool (PermissionDenied,
-  audited, before anything renders to the warehouse); without raw tables compile_and_run
-  alone suffices.
+  audited, before anything reaches the warehouse) — also when it is the stored final
+  SELECT of a composed definition used (verified or not, nested too; ADR 0026,
+  `_compose.Compiled.reads_raw`); without raw tables compile_and_run alone suffices.
 - Provenance: `RunOutcome.used` lists each definition version with its state and, when
   verified, `verified_by` / `verified_at` (DESIGN §8).
 - Row limit: `limit` clamped to 1..profile.max_rows; the warehouse enforces it again.
@@ -82,7 +89,7 @@ from typing import Any
 from pydantic import ValidationError
 
 from cteforge.audit.tag import new_compile_id, sql_tag, tag_sql
-from cteforge.compose.assemble import ComposedQuery, Part, compose
+from cteforge.compose.assemble import Part, compose
 from cteforge.compose.checks import ensure_query
 from cteforge.domain.access import Tool
 from cteforge.domain.audit import AuditKind, AuditOutcome
@@ -90,8 +97,6 @@ from cteforge.domain.dialects import Dialect
 from cteforge.domain.errors import (
     AuditError,
     CteforgeError,
-    NotFoundError,
-    PermissionDeniedError,
     PolicyError,
     RenderError,
     SqlParseError,
@@ -101,16 +106,14 @@ from cteforge.domain.issues import Issue, IssueCode, Severity
 from cteforge.domain.models import (
     Definition,
     DefinitionRef,
-    DefinitionState,
     JoinEdge,
     TeamMode,
     TrustLabel,
 )
 from cteforge.domain.users import User
-from cteforge.domain.variables import Role
 from cteforge.parsing.analyze import JoinInfo, analyze, parse
-from cteforge.services import _audit, _library
-from cteforge.services.auth import permitted, require
+from cteforge.services import _audit, _compose, _library
+from cteforge.services.auth import require
 from cteforge.services.cards import (
     RunOutcome,
     UsedDefinition,
@@ -119,7 +122,6 @@ from cteforge.services.cards import (
     used_definition,
 )
 from cteforge.services.context import AppContext, team_mode
-from cteforge.templating.render import render
 from cteforge.trust.labels import TrustInputs, TrustResult, assess
 
 
@@ -138,6 +140,8 @@ def _definition_matches(ctx: AppContext, tree: Any, dialect: Dialect) -> list[Is
     for latest in ctx.store.list_definitions():
         definition = _library.newest_in_states(ctx, latest, states)
         if definition is None or definition.source_dialect is not dialect:
+            continue
+        if definition.composition is not None:  # composed: no original query of its own
             continue
         try:
             original = parse(_library.original_sql(definition), dialect)
@@ -166,19 +170,6 @@ _RUN_TOOLS = {
 }
 
 
-def _require_exploratory(user: User, raw: Iterable[str]) -> None:
-    """A final SELECT that reads raw tables (or table functions) is exploratory SQL: it
-    needs check_and_run as well as compile_and_run (ADR 0027), or a token without
-    check_and_run could run any SQL through `select`. Raised before anything reaches the
-    warehouse; compile_and_run's own handler records the refusal (outcome rejected)."""
-    if not permitted(user, Tool.CHECK_AND_RUN):
-        raise PermissionDeniedError(
-            f"The final SELECT reads raw table(s) {sorted(raw)} directly: that is "
-            f"exploratory SQL and needs the check_and_run tool, which user '{user.name}' "
-            "does not hold. Select only from the definitions' aliases."
-        )
-
-
 def _require(ctx: AppContext, user: User, kind: AuditKind, question: str | None) -> None:
     with _audit.audit_failures(ctx, user, kind, question=question):
         require(user, _RUN_TOOLS[kind])
@@ -205,8 +196,8 @@ def _cap_bytes(rows: list[list[Any]], budget: int) -> tuple[list[list[Any]], boo
 
 
 def _known_edges(ctx: AppContext) -> list[JoinEdge]:
-    """Join-map edges that count as known: every edge except drafts."""
-    return [e for e in ctx.store.list_joins() if e.state is not DefinitionState.DRAFT]
+    """Join-map edges that count as known (ADR 0026; `_library.known_edges`)."""
+    return _library.known_edges(ctx)
 
 
 def _unconnected(tables: list[str], known_pairs: list[tuple[str, str]]) -> list[list[str]]:
@@ -267,45 +258,7 @@ def _through(join: JoinInfo) -> str:
 
 
 def _describe_keys(keys: Iterable[tuple[str, str]]) -> str:
-    return " AND ".join(f"{a} = {b}" for a, b in keys) or "no equality keys"
-
-
-def _final_select_joins(
-    composed: ComposedQuery, aliases: set[str], edges: list[JoinEdge]
-) -> tuple[bool, list[Issue]]:
-    """(joins_known, unknown_join issues for raw-table joins). Alias↔alias joins were
-    already checked by compose (it reports their unknown_join issues itself)."""
-    known = True
-    issues: list[Issue] = []
-    covered: set[str] = set()
-    for join in composed.joins:
-        left, right = join.left.lower(), join.right.lower()
-        if left in aliases and right in aliases:
-            known = known and join.known
-            continue
-        if _library.matching_edge(join.left, join.right, join.keys, edges) is None:
-            known = False
-            issues.append(
-                _warning(
-                    IssueCode.UNKNOWN_JOIN,
-                    f"Join between '{join.left}' and '{join.right}' "
-                    f"({_describe_keys(join.keys)}) is not in the join map. Check the "
-                    "relationship before trusting the result, or propose the join.",
-                )
-            )
-        else:
-            covered |= {left, right}
-    loose = [t for t in composed.raw_tables if not any(_library.same_table(t, c) for c in covered)]
-    if loose:
-        known = False
-        issues.append(
-            _warning(
-                IssueCode.UNKNOWN_JOIN,
-                f"The final SELECT reads table(s) {loose} outside any known join; the "
-                "result is not built only from the definitions.",
-            )
-        )
-    return known, issues
+    return _library.describe_keys(keys)
 
 
 # ── Loading ──────────────────────────────────────────────────────────────────────────
@@ -337,55 +290,24 @@ class _Request:
     refs: dict[str, DefinitionRef]
     values: dict[str, dict[str, Any]]
     select: str | None
-    select_dialect: Dialect | None = None
-    recipe: str | None = None
     blocking: list[Issue] = field(default_factory=list)
 
 
 def _request(
-    ctx: AppContext,
     uses: Mapping[str, Any] | None,
-    recipe_id: str | None,
     values: Mapping[str, Any],
     select: str | None,
 ) -> _Request:
-    if (uses is None) == (recipe_id is None):
-        raise PolicyError("Give either `uses` (alias → definition) or `recipe_id`, not both.")
+    if not uses:
+        raise RenderError("`uses` must name at least one definition (alias → {id, version?}).")
     for alias, given in values.items():
         if not isinstance(given, Mapping):
             raise RenderError(f"values['{alias}'] must be an object of variable → value")
-    if recipe_id is not None:
-        if select is not None:
-            raise PolicyError("A recipe carries its own final SELECT; do not pass `select`.")
-        recipe = ctx.store.get_recipe(recipe_id)
-        if recipe is None:
-            raise NotFoundError(f"Recipe '{recipe_id}' does not exist")
-        merged = {alias: dict(v) for alias, v in recipe.values.items()}
-        for alias, given in values.items():
-            merged.setdefault(alias, {}).update(given)
-        request = _Request(
-            refs=dict(recipe.uses),
-            values=merged,
-            select=recipe.select,
-            select_dialect=recipe.dialect,
-            recipe=f"{recipe.id}@{recipe.version}",
-        )
-        if recipe.state is DefinitionState.DRAFT:
-            request.blocking.append(
-                _error(
-                    IssueCode.DRAFT_NOT_USABLE,
-                    f"Recipe '{recipe.id}' is a draft and can't be used until it is approved.",
-                )
-            )
-    else:
-        assert uses is not None
-        if not uses:
-            raise RenderError("`uses` must name at least one definition.")
-        request = _Request(
-            refs={alias: _ref(alias, spec) for alias, spec in uses.items()},
-            values={alias: dict(v) for alias, v in values.items()},
-            select=select,
-        )
+    request = _Request(
+        refs={alias: _ref(alias, spec) for alias, spec in uses.items()},
+        values={alias: dict(v) for alias, v in values.items()},
+        select=select,
+    )
     unknown = sorted(set(request.values) - set(request.refs))
     if unknown:
         raise RenderError(
@@ -399,7 +321,6 @@ def _target(
     definitions: dict[str, Definition],
     profile: str | None,
     dialect: Dialect | None,
-    select_dialect: Dialect | None,
     run: bool,
 ) -> tuple[str | None, Dialect, str | None]:
     """(profile name or None, target dialect, why EXPLAIN is skipped or None). See the
@@ -432,37 +353,12 @@ def _target(
             name, target = None, dialect
     elif dialect is not None:
         target = dialect
-    elif select_dialect is not None:
-        target = select_dialect
     else:
         sources = sorted({d.source_dialect for d in definitions.values()})
         if len(sources) != 1:
             raise PolicyError(f"The definitions have different dialects {sources}; pass `dialect`.")
         target = sources[0]
-    if select_dialect is not None and select_dialect is not target:
-        raise PolicyError(
-            f"The recipe's SELECT is written in {select_dialect} but the target is {target}."
-        )
     return name, target, unchecked
-
-
-def _defaults_used(alias: str, definition: Definition, given: Mapping[str, Any]) -> list[Issue]:
-    """An info issue per changeable variable the caller left out: it silently keeps the
-    trusted query's original value, which is rarely what a new question means."""
-    return [
-        Issue(
-            code=IssueCode.DEFAULT_VALUE_USED,
-            severity=Severity.INFO,
-            message=(
-                f"'{alias}.{v.name}' was not given, so the original value "
-                f"{json.dumps(json_safe(v.original_value))} was used. Pass it in `values` "
-                "if the question needs another one."
-            ),
-            variable=v.name,
-        )
-        for v in definition.variables
-        if v.role is Role.CHANGEABLE and v.name not in given
-    ]
 
 
 # ── Execution (shared) ───────────────────────────────────────────────────────────────
@@ -652,7 +548,6 @@ def compile_and_run(
     user: User,
     *,
     uses: Mapping[str, Any] | None = None,
-    recipe_id: str | None = None,
     values: Mapping[str, Mapping[str, Any]] | None = None,
     select: str | None = None,
     dialect: Dialect | str | None = None,
@@ -663,8 +558,10 @@ def compile_and_run(
 ) -> RunOutcome:
     """Render definitions by reference (+ optional final SELECT), label, check, run.
 
-    `uses`: alias → {"id", "version"?} (or a DefinitionRef, or just the id string).
-    `values`: alias → variable → value in each variable's input format. Raises
+    `uses`: alias → {"id", "version"?} (or a DefinitionRef, or just the id string); a
+    composed definition is used like any other (ADR 0026).
+    `values`: alias → variable → value in each variable's input format (a composed
+    definition's variables are `<part alias>.<var>`). Raises
     NotFoundError, RenderError, VariableValueError, SqlParseError, PolicyError for input
     the call cannot work with; trust refusals and warehouse failures come back as a
     RunOutcome with issues.
@@ -675,7 +572,7 @@ def compile_and_run(
     try:
         target = None if dialect is None else _library.parse_dialect(dialect)
         return _compile_and_run(
-            ctx, user, uses, recipe_id, given, select, target, profile, run, limit, question
+            ctx, user, uses, given, select, target, profile, run, limit, question
         )
     except AuditError:
         raise  # The audit write itself failed; nothing more can be recorded.
@@ -689,7 +586,7 @@ def compile_and_run(
             outcome=_audit.failure_outcome(exc),
             question=question,
             values=json_safe(given),
-            extra={"recipe": recipe_id, "aliases": sorted(uses or {})},
+            extra={"aliases": sorted(uses or {})},
         )
         raise
 
@@ -698,7 +595,6 @@ def _compile_and_run(
     ctx: AppContext,
     user: User,
     uses: Mapping[str, Any] | None,
-    recipe_id: str | None,
     values: dict[str, Any],
     select: str | None,
     dialect: Dialect | None,
@@ -709,28 +605,29 @@ def _compile_and_run(
 ) -> RunOutcome:
     kind = AuditKind.COMPILE_AND_RUN
     mode = team_mode(ctx)
-    request = _request(ctx, uses, recipe_id, values, select)
+    request = _request(uses, values, select)
     definitions = {alias: _load(ctx, ref, mode) for alias, ref in request.refs.items()}
-    used = list(dict.fromkeys(f"{d.id}@{d.version}" for d in definitions.values()))
-    by_ref = {f"{d.id}@{d.version}": used_definition(d) for d in definitions.values()}
-    used_cards = list(by_ref.values())
-    profile_name, target, unchecked = _target(
-        ctx, definitions, profile, dialect, request.select_dialect, run
-    )
-    extra: dict[str, Any] = {"recipe": request.recipe, "aliases": sorted(definitions)}
+    profile_name, target, unchecked = _target(ctx, definitions, profile, dialect, run)
+    extra: dict[str, Any] = {"aliases": sorted(definitions)}
 
     parts: list[Part] = []
     issues: list[Issue] = []
     plain: dict[str, Any] = {}
+    compiled: list[_compose.Compiled] = []
     for alias, definition in definitions.items():
-        rendered = render(definition, request.values.get(alias, {}), target)
+        result = _compose.compile_definition(
+            ctx, definition, request.values.get(alias, {}), target, mode=mode, prefix=f"{alias}."
+        )
+        compiled.append(result)
         try:
-            parts.append(Part(alias=alias, definition=definition, sql=rendered.sql))
+            parts.append(Part(alias=alias, definition=definition, sql=result.sql))
         except ValidationError:
             raise RenderError(f"Alias '{alias}' must be lower_snake_case.") from None
-        issues += rendered.issues
-        plain[alias] = rendered.values
-        issues += _defaults_used(alias, definition, request.values.get(alias, {}))
+        issues += result.issues
+        plain[alias] = result.values
+    used_defs = list({f"{d.id}@{d.version}": d for c in compiled for d in c.used}.values())
+    used = [f"{d.id}@{d.version}" for d in used_defs]
+    used_cards = [used_definition(d) for d in used_defs]
 
     final = request.select if request.select and request.select.strip() else None
     if final is not None:
@@ -754,19 +651,29 @@ def _compile_and_run(
             )
 
     composed = compose(parts, final, target)
-    if final is not None and composed.raw_tables:
-        _require_exploratory(user, composed.raw_tables)
+    # ADR 0027: a final SELECT over raw tables is exploratory SQL and also needs
+    # check_and_run — the agent's own select, and the stored final SELECT of any composed
+    # definition used (verified or not, at any depth; ADR 0026). Before the warehouse.
+    reads_raw = [t for c in compiled for t in c.reads_raw]
+    if final is not None:
+        reads_raw += composed.raw_tables
+    if reads_raw:
+        _compose.require_exploratory(user, reads_raw)
     issues += composed.issues
-    joins_known = True
+    joins_known = all(c.joins_known for c in compiled)
+    raw_tables = [t for c in compiled for t in c.raw_tables]
     if final is not None:
         edges = _known_edges(ctx) if (composed.joins or composed.raw_tables) else []
-        joins_known, join_issues = _final_select_joins(composed, set(definitions), edges)
+        select_known, join_issues = _library.final_select_joins(composed, set(definitions), edges)
+        joins_known = joins_known and select_known
         issues += join_issues
+        raw_tables += list(composed.raw_tables)
 
-    raw_tables = list(composed.raw_tables) if final is not None else []
+    raw_tables = list(dict.fromkeys(raw_tables))
     trust = assess(
         TrustInputs(
-            definition_states=[d.state for d in definitions.values()],
+            definition_states=[d.state for c in compiled for d in c.sql_definitions],
+            composed_states=[d.state for c in compiled for d in c.composed_definitions],
             # A final SELECT that reads base tables is agent-written logic over raw data,
             # not only a combination of the definitions (DESIGN §8, §17).
             raw_sql=bool(raw_tables),
@@ -781,12 +688,12 @@ def _compile_and_run(
             update={
                 "reasons": [
                     *trust.reasons,
-                    f"The final SELECT reads raw table(s) {raw_tables} directly, not only "
+                    f"A final SELECT reads raw table(s) {raw_tables} directly, not only "
                     "the definitions.",
                 ]
             }
         )
-    blocking = [*trust.blocking, *request.blocking]
+    blocking = [*trust.blocking, *request.blocking, *(b for c in compiled for b in c.blocking)]
     if blocking:
         return _refused(
             ctx,
@@ -796,7 +703,7 @@ def _compile_and_run(
             dialect=target,
             label=trust.label,
             reasons=trust.reasons,
-            issues=[*issues, *blocking],
+            issues=[*issues, *(b for b in blocking if b not in issues)],
             definitions=used,
             question=question,
             values=plain,

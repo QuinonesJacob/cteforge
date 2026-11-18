@@ -55,10 +55,10 @@ test("a person generates a token in My tokens, signs in with it, and revokes it"
   await mine.getByLabel("Token name").fill("e2e laptop");
   await mine.getByLabel("Only these tools").check();
   const use = mine.getByRole("group", { name: "Token tools: Use", exact: true });
-  for (const tool of ["get definition", "compile and run", "check and run", "describe tables", "list joins", "list recipes"])
+  for (const tool of ["get definition", "compile and run", "check and run", "describe tables", "list joins"])
     await use.getByLabel(tool).uncheck();
   const build = mine.getByRole("group", { name: "Token tools: Build", exact: true });
-  for (const tool of ["parse query", "propose definition", "revise definition", "propose join", "propose recipe"])
+  for (const tool of ["parse query", "propose definition", "revise definition", "propose join"])
     await build.getByLabel(tool).uncheck();
   // Admin tools are not offered: the approver role does not allow them.
   await expect(mine.getByLabel("manage user")).toHaveCount(0);
@@ -79,7 +79,9 @@ test("a person generates a token in My tokens, signs in with it, and revokes it"
   await page.evaluate(() => sessionStorage.clear());
   await signIn(page, token, "/settings");
   await expect(page.getByRole("link", { name: "Import", exact: true })).toHaveCount(0);
-  await expect(page.getByRole("link", { name: "Review", exact: true })).toBeVisible();
+  // ADR 0026: no list_joins → no Join map; list_proposals → the Library carries the badge.
+  await expect(page.getByRole("link", { name: "Join map", exact: true })).toHaveCount(0);
+  await expect(page.getByRole("link", { name: /^Library/ })).toBeVisible();
   const row = section(page, "My tokens").getByRole("row", { name: /e2e laptop/ });
   await expect(row.getByText("this session")).toBeVisible();
   await screenshot(page, "10-my-tokens");
@@ -102,7 +104,7 @@ test("admin creates an agent, generates its token in Settings → Users, and rev
 
   const table = users.getByRole("region", { name: "Users" });
   const row = table.getByRole("row", { name: /support-bot/ }).first();
-  await expect(row).toContainText("Use 3/7"); // the role allows 3 use tools
+  await expect(row).toContainText("Use 3/6"); // the role allows 3 use tools
   await row.getByRole("button", { name: /tokens of support-bot/ }).click();
   await users.getByRole("button", { name: "Generate token for support-bot" }).click();
   await users.getByLabel("Token name").fill("ci");

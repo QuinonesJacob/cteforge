@@ -122,7 +122,8 @@ async def test_lists_the_tools_with_sane_schemas(ctx: AppContext) -> None:
     async with client(ctx, AGENT) as session:
         tools = (await session.list_tools()).tools
     by_name = {t.name: t for t in tools}
-    assert len(TOOL_NAMES) == 17
+    assert len(TOOL_NAMES) == 15  # ADR 0026: no propose_recipe / list_recipes
+    assert not {"propose_recipe", "list_recipes"} & set(TOOL_NAMES)
     # A contributor agent: use + build tools, list_proposals and review_proposal (owners
     # approve what they own); no admin tools (ADR 0027).
     assert set(by_name) == set(TOOL_NAMES) - {"list_users", "manage_user", "manage_role"}
@@ -131,29 +132,24 @@ async def test_lists_the_tools_with_sane_schemas(ctx: AppContext) -> None:
         assert tool.inputSchema["type"] == "object"
         assert tool.outputSchema is not None and tool.outputSchema["type"] == "object"
     run = by_name["compile_and_run"].inputSchema
-    assert {"uses", "values", "select", "recipe_id", "run", "limit"} <= set(run["properties"])
+    assert {"uses", "values", "select", "run", "limit"} <= set(run["properties"])
+    assert "recipe_id" not in run["properties"]
     assert "mcp_context" not in run["properties"]
     parse_schema = by_name["parse_query"].inputSchema
     assert parse_schema["required"] == ["sql"]  # dialect: the connection's when omitted
     assert "team's default connection" in json.dumps(parse_schema["properties"]["dialect"])
     propose = by_name["propose_definition"].inputSchema
-    assert {"sql", "metadata", "annotations"} <= set(propose["required"])
-    assert "dialect" in propose["properties"] and "dialect" not in propose["required"]
-    recipe_tool = by_name["propose_recipe"].inputSchema
-    ref = recipe_tool["properties"]["recipe"].get("$ref") or json.dumps(
-        recipe_tool["properties"]["recipe"]
-    )
-    recipe_schema = recipe_tool["$defs"][ref.rsplit("/", 1)[-1]]
-    assert set(recipe_schema["properties"]) == {
-        "id",
-        "title",
-        "description",
-        "uses",
-        "values",
-        "select",
-        "dialect",
-    }  # version, state and schema_version are set by cteforge, not by the caller
-    assert recipe_schema["additionalProperties"] is False
+    assert propose["required"] == ["metadata"]  # sql OR composition; annotations optional
+    assert {"sql", "composition", "annotations", "dialect"} <= set(propose["properties"])
+    assert "composition" in by_name["revise_definition"].inputSchema["properties"]
+    join_schema = by_name["propose_join"].inputSchema
+    assert {"action", "id", "notes", "relationship"} <= set(join_schema["properties"])
+    assert "add" in json.dumps(join_schema["properties"]["action"])
+    assert by_name["propose_join"].annotations.readOnlyHint is False
+    assert by_name["list_joins"].annotations.readOnlyHint is True
+    # Agents are told to try a composition with compile_and_run first, then propose it.
+    assert "compile_and_run" in descriptions.PROPOSE_DEFINITION
+    assert "composition" in descriptions.INSTRUCTIONS
     assert by_name["search"].annotations.readOnlyHint is True
     assert by_name["propose_definition"].annotations.readOnlyHint is False
     assert by_name["list_proposals"].annotations.readOnlyHint is True
@@ -215,14 +211,19 @@ async def test_get_definition_can_include_the_search_document(ctx: AppContext) -
 
 
 @pytest.mark.anyio
-async def test_discovery_tools_list_joins_tables_and_recipes(ctx: AppContext) -> None:
+async def test_discovery_tools_list_joins_and_tables(ctx: AppContext) -> None:
     async with client(ctx, AGENT) as session:
         joins = ok(await session.call_tool("list_joins", {"table": "deals"}))["result"]
+        known = ok(await session.call_tool("list_joins", {"known_only": True}))["result"]
         tables = ok(await session.call_tool("describe_tables", {"tables": ["deals"]}))["result"]
-        recipes = ok(await session.call_tool("list_recipes", {}))["result"]
+        gone = await session.call_tool("list_recipes", {})
     assert joins and all("deals" in (j["left_table"], j["right_table"]) for j in joins)
+    edge = joins[0]
+    assert edge["known"] and edge["sources"] == ["realization_rate"]
+    assert {"relationship", "traps", "notes", "confirmed", "join_type"} <= set(edge)
+    assert len(known) == len(ctx.store.list_joins())
     assert tables[0]["found"] and "amount" in {c["name"] for c in tables[0]["columns"]}
-    assert recipes == []
+    assert gone.isError and "Unknown tool: list_recipes" in gone.content[0].text
 
 
 @pytest.mark.anyio
@@ -355,28 +356,62 @@ async def test_revise_with_new_id_renames_and_the_old_id_names_the_new_one(
 
 
 @pytest.mark.anyio
-async def test_propose_join_and_recipe(ctx: AppContext) -> None:
-    recipe = {
-        "id": "apac_q3",
-        "title": "APAC Q3 2025 realization",
-        "uses": {"rr": {"id": "realization_rate"}},
-        "values": {"rr": Q3_APAC},
-        "dialect": "duckdb",
-    }
-    join = {
+async def test_propose_join_and_composed_definition(ctx: AppContext) -> None:
+    annotate = {
+        "action": "annotate",
         "left_table": "deals",
         "right_table": "invoices",
         "keys": [{"left": "deal_id", "right": "deal_id"}],
         "relationship": "one_to_many",
         "traps": ["fan-out: one deal has many invoices"],
     }
+    add = {
+        "action": "add",
+        "left_table": "accounts",
+        "right_table": "invoices",
+        "keys": [{"left": "account_id", "right": "account_id"}],
+    }
+    composition = {
+        "uses": {"rr": {"id": "realization_rate"}},
+        "select": "SELECT rr.region, rr.realization_rate FROM rr",
+        "fixed": {"rr": {"regions": ["APAC"]}},
+    }
+    metadata = {"id": "apac_rr", "title": "APAC realization"}
     async with client(ctx, AGENT) as session:
-        joined = ok(await session.call_tool("propose_join", join))
-        saved = ok(await session.call_tool("propose_recipe", {"recipe": recipe}))
-        rerun = ok(await session.call_tool("compile_and_run", {"recipe_id": "apac_q3"}))
+        joined = ok(await session.call_tool("propose_join", annotate))
+        added = ok(await session.call_tool("propose_join", add))
+        tried = ok(
+            await session.call_tool(
+                "compile_and_run",
+                {"uses": composition["uses"], "select": composition["select"], "run": False},
+            )
+        )
+        saved = ok(
+            await session.call_tool(
+                "propose_definition",
+                {"composition": composition, "metadata": metadata, "dialect": "duckdb"},
+            )
+        )
+        rerun = ok(
+            await session.call_tool(
+                "compile_and_run",
+                {
+                    "uses": {"a": {"id": "apac_rr"}},
+                    "values": {"a": {"rr.period": Q3_APAC["period"]}},
+                },
+            )
+        )
+        card = ok(await session.call_tool("get_definition", {"id": "apac_rr"}))
+        gone = await session.call_tool("propose_recipe", {"recipe": {}})
     assert joined["proposal"]["kind"] == "new_join" and joined["auto_applied"]
-    assert saved["proposal"]["kind"] == "new_recipe" and saved["auto_applied"]
-    assert rerun["row_count"] == 3
+    assert joined["proposal"]["payload"]["evidence"]["observed"] == "one_to_many"
+    assert not added["auto_applied"]  # an agent's new edge waits for a person (ADR 0026)
+    assert tried["usable"] and "WITH" in tried["sql"]
+    assert saved["proposal"]["kind"] == "new_definition" and saved["auto_applied"]
+    assert rerun["row_count"] == 3 and rerun["label"] == TrustLabel.LLM_ANNOTATED.value
+    assert card["composed"] and card["composition"]["fixed"] == {"rr": {"regions": ["APAC"]}}
+    assert "rr.period" in [v["name"] for v in card["variables"]]
+    assert gone.isError and "Unknown tool: propose_recipe" in gone.content[0].text
 
 
 # ── Permissions and errors ───────────────────────────────────────────────────────────

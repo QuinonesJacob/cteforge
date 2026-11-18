@@ -99,7 +99,7 @@ def test_references_and_rename(rr, check_error) -> None:
     refs = rr.get("/definitions/realization_rate/references", "vic")
     assert refs.status_code == 200
     body = refs.json()
-    assert (body["id"], body["recipes"], body["proposals"]) == ("realization_rate", [], [])
+    assert (body["id"], body["used_by"], body["proposals"]) == ("realization_rate", [], [])
     assert body["outside_warning"]
     check_error(rr.get("/definitions/nope/references", "vic"), 404, "NotFoundError")
     path = "/proposals/definitions/realization_rate/rename"
@@ -283,41 +283,93 @@ def test_revise_definition(rr, check_error) -> None:
 
 
 def test_propose_join(rr, check_error) -> None:
-    body = {
+    # ADR 0026: the mined edge is annotated; an agent's new edge waits for a person.
+    annotate = {
+        "action": "annotate",
         "left_table": "deals",
         "right_table": "accounts",
         "keys": [{"left": "account_id", "right": "account_id"}],
-        "join_type": "inner",
         "relationship": "many_to_one",
         "summary": "deals → accounts",
     }
-    response = rr.post("/proposals/joins", "bot", body)
+    response = rr.post("/proposals/joins", "bot", annotate)
     assert response.status_code == 200, response.text
-    assert response.json()["proposal"]["kind"] == "new_join"
-    pair = rr.post("/proposals/joins", "bot", body | {"keys": [["account_id", "account_id"]]})
-    assert pair.status_code == 200
+    body = response.json()
+    assert body["proposal"]["kind"] == "new_join" and body["auto_applied"] is True
+    assert body["proposal"]["payload"]["evidence"]["consistent"] is True
+    by_id = {"action": "annotate", "id": "accounts__deals__account_id=account_id", "notes": "n"}
+    assert rr.post("/proposals/joins", "bot", by_id).json()["auto_applied"] is True
+    add = {
+        "action": "add",
+        "left_table": "accounts",
+        "right_table": "invoices",
+        "keys": [["account_id", "account_id"]],
+    }
+    added = rr.post("/proposals/joins", "bot", add)
+    assert added.status_code == 200 and added.json()["auto_applied"] is False
     check_error(
-        rr.post("/proposals/joins", "bot", body | {"join_type": "sideways"}), 422, "CodecError"
+        rr.post("/proposals/joins", "bot", add | {"join_type": "sideways"}), 422, "CodecError"
+    )
+    check_error(
+        rr.post("/proposals/joins", "bot", add | {"action": "drop"}), 422, "RequestValidationError"
+    )
+    check_error(rr.post("/proposals/joins", "bot", by_id | {"id": "nope"}), 404, "NotFoundError")
+    check_error(rr.post("/proposals/joins", "vic", by_id), 403, "PermissionDeniedError")
+    assert rr.post("/proposals/recipes", "bot", {"recipe": {}}).status_code in (404, 405)
+
+
+def test_propose_composed_definition(rr, check_error) -> None:
+    body = {
+        "composition": {
+            "uses": {"rr": {"id": "realization_rate"}},
+            "select": "SELECT rr.region, rr.realization_rate FROM rr",
+            "fixed": {"rr": {"regions": ["EMEA"]}},
+        },
+        "dialect": "duckdb",
+        "metadata": {"id": "rr_emea", "title": "RR EMEA"},
+        "summary": "EMEA",
+    }
+    response = rr.post("/proposals/definitions", "bot", body)
+    assert response.status_code == 200, response.text
+    assert response.json()["auto_applied"] is True
+    card = rr.get("/definitions/rr_emea", "vic").json()
+    assert card["composed"] is True and card["composition"]["compiled_sql"]
+    assert [p["alias"] for p in card["composition"]["parts"]] == ["rr"]
+    assert "rr.period" in [v["name"] for v in card["variables"]]
+    assert "rr.regions" not in card["composition"]["open_variables"]
+    used = rr.get("/definitions/realization_rate", "vic").json()["used_by"]
+    assert [u["definition_id"] for u in used] == ["rr_emea"]
+    run = rr.post(
+        "/run",
+        "vic",
+        {"uses": {"r": {"id": "rr_emea"}}, "values": {"r": {"rr.period": Q3_APAC["period"]}}},
+    )
+    assert run.status_code == 200 and run.json()["ran"] is True
+    check_error(
+        rr.post("/proposals/definitions", "bot", body | {"sql": "SELECT 1"}), 409, "PolicyError"
+    )
+    check_error(
+        rr.post("/run", "vic", {"recipe_id": "x", "uses": {}}), 422, "RequestValidationError"
     )
 
 
-def test_propose_recipe(rr, check_error) -> None:
-    recipe = {
-        "id": "rr_emea",
-        "title": "RR EMEA",
-        "uses": {"rr": {"id": "realization_rate"}},
-        "values": {"rr": {"regions": ["EMEA"]}},
-        "dialect": "duckdb",
-    }
-    response = rr.post("/proposals/recipes", "bot", {"recipe": recipe, "summary": "EMEA"})
-    assert response.status_code == 200, response.text
-    assert response.json()["proposal"]["kind"] == "new_recipe"
-    assert response.json()["issues"] == []
-    check_error(rr.post("/proposals/recipes", "bot", {"recipe": {"id": "x"}}), 422, "CodecError")
-    for reserved in ({"state": "verified"}, {"version": 9}, {"schema_version": 2}):
-        refused = rr.post("/proposals/recipes", "bot", {"recipe": recipe | reserved})
-        check_error(refused, 422, "CodecError")
-        assert "cannot be set by a proposal" in refused.json()["error"]["message"]
+def test_library_page(rr, check_error) -> None:
+    pending = _pending_revision(rr)
+    page = rr.get("/library", "ann").json()
+    assert page["proposals_visible"] is True and page["pending_count"] == 1
+    (row,) = page["rows"]
+    assert row["id"] == "realization_rate" and [p["id"] for p in row["pending"]] == [pending]
+    assert row["created_by_kind"] == "human" and row["needs_my_review"] is True
+    mine = rr.get("/library", "ann", params={"needs_my_review": "true"}).json()
+    assert [r["id"] for r in mine["rows"]] == ["realization_rate"]
+    none = rr.get("/library", "ann", params=[("trust", "verified")]).json()
+    assert none["rows"] == [] and none["total"] == 1
+    agents = rr.get("/library", "ann", params=[("created_by", "agent")]).json()
+    assert agents["rows"] == []
+    check_error(
+        rr.get("/library", "vic", params={"needs_my_review": "true"}), 403, "PermissionDeniedError"
+    )
+    check_error(rr.client.get("/api/v1/library"), 401, "Unauthorized")
 
 
 def test_list_get_and_count_proposals(rr, check_error) -> None:
@@ -619,37 +671,27 @@ def test_unknown_api_path_is_json_404(api, check_error) -> None:
     check_error(api.get("/nope", "vic"), 404, "HTTPError")
 
 
-# ── discovery: recipes, join map, tables ─────────────────────────────────────────────
+# ── discovery: join map, tables ───────────────────────────────────────────────────────
 
 
-def test_recipes_joins_and_tables(rr, check_error) -> None:
-    recipe = {
-        "recipe": {
-            "id": "apac_q3_rr",
-            "title": "APAC realization",
-            "uses": {"rr": {"id": "realization_rate"}},
-            "values": {"rr": {"regions": ["APAC"]}},
-            "dialect": "duckdb",
-        }
-    }
-    assert rr.post("/proposals/recipes", "alice", recipe).status_code == 200
-    recipes = rr.get("/recipes", "vic", params={"q": "apac"}).json()
-    assert [r["id"] for r in recipes] == ["apac_q3_rr"]
+def test_joins_and_tables(rr, check_error) -> None:
     joins = rr.get("/joins", "vic", params={"table": "accounts"}).json()
     assert joins and all("accounts" in (j["left_table"], j["right_table"]) for j in joins)
+    assert all(j["known"] and j["sources"] == ["realization_rate"] for j in joins)
+    known = rr.get("/joins", "vic", params={"known_only": "true", "definition": "x"}).json()
+    assert known == []
     tables = rr.get("/tables", "vic", params=[("name", "deals"), ("name", "nope")]).json()
     assert [(t["name"], t["found"]) for t in tables] == [("deals", True), ("nope", False)]
     assert "closed_at" in {c["name"] for c in tables[0]["columns"]}
-    for path in ("/api/v1/recipes", "/api/v1/joins", "/api/v1/tables"):
+    for path in ("/api/v1/joins", "/api/v1/tables", "/api/v1/library"):
         check_error(rr.client.get(path), 401, "Unauthorized")
-    # Drafts are listed only on request, as in search and the MCP tools.
-    drafts = rr.get("/recipes", "vic", params={"include_drafts": "true"}).json()
-    assert {r["id"] for r in recipes} <= {r["id"] for r in drafts}
+    check_error(rr.get("/recipes", "vic"), 404, "HTTPError")
 
 
 def test_run_with_a_raw_final_select_needs_check_and_run(rr, check_error) -> None:
     """Regression (security review, poc3): a token allowed compile_and_run but not
-    check_and_run ran raw SQL through /run's final `select`."""
+    check_and_run ran raw SQL through /run's final `select` — also through a composed
+    definition's stored final SELECT (ADR 0026)."""
     api = rr
     made = api.post(
         "/me/tokens",
@@ -662,13 +704,40 @@ def test_run_with_a_raw_final_select_needs_check_and_run(rr, check_error) -> Non
         403,
         "PermissionDeniedError",
     )
+    raw_select = "SELECT a.account_id, (SELECT COUNT(*) FROM rr) AS n FROM accounts AS a"
     body = {
         "uses": {"rr": {"id": "realization_rate"}},
         "values": {"rr": Q3_APAC},
-        "select": "SELECT a.account_id, (SELECT COUNT(*) FROM rr) AS n FROM accounts AS a",
+        "select": raw_select,
     }
     refused = api.client.post("/api/v1/run", headers=headers, json=body)
     check_error(refused, 403, "PermissionDeniedError")
     assert "check_and_run" in refused.json()["error"]["message"]
     ok = api.client.post("/api/v1/run", headers=headers, json=body | {"select": "SELECT * FROM rr"})
     assert ok.status_code == 200 and ok.json()["ran"] is True
+    # A composed definition whose stored final SELECT reads raw tables (proposed and
+    # approved by people holding check_and_run) needs check_and_run to run, even verified.
+    composed = {
+        "composition": {"uses": {"rr": {"id": "realization_rate"}}, "select": raw_select},
+        "dialect": "duckdb",
+        "metadata": {"id": "raw_combo", "title": "Raw combo"},
+    }
+    assert api.post("/proposals/definitions", "alice", composed).json()["auto_applied"]
+    assert api.post("/definitions/raw_combo/verify", "ann", {"version": 1}).status_code == 200
+    run_composed = {"uses": {"c": {"id": "raw_combo"}}}
+    refused = api.client.post("/api/v1/run", headers=headers, json=run_composed)
+    check_error(refused, 403, "PermissionDeniedError")
+    assert api.post("/run", "vic", run_composed).json()["ran"] is True  # vic holds it
+    # Proposing one runs it in the checks: a proposer without check_and_run is refused.
+    narrow = api.post(
+        "/me/tokens",
+        "alice",
+        {"name": "builder", "tool_mode": "only", "include": ["propose_definition"]},
+    )
+    builder = {"Authorization": f"Bearer {narrow.json()['token']}"}
+    again = composed | {"metadata": {"id": "raw_combo_2", "title": "Raw combo 2"}}
+    check_error(
+        api.client.post("/api/v1/proposals/definitions", headers=builder, json=again),
+        403,
+        "PermissionDeniedError",
+    )

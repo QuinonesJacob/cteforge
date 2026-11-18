@@ -470,3 +470,22 @@ AUTO_APPLY_CASES = [
 )
 def test_can_auto_apply(mode, target, checks, expected):
     assert can_auto_apply(mode, target, checks) is expected
+
+
+# ── ADR 0026: joins ──────────────────────────────────────────────────────────────────
+
+
+def test_agent_added_join_never_auto_applies() -> None:
+    from cteforge.trust.approval import join_may_auto_apply
+
+    assert not join_may_auto_apply("add", ActorKind.AGENT)
+    assert join_may_auto_apply("add", ActorKind.HUMAN)
+    assert join_may_auto_apply("annotate", ActorKind.AGENT)
+
+
+def test_only_a_person_approving_confirms_a_join() -> None:
+    from cteforge.trust.approval import confirms_join
+
+    assert confirms_join(ActorKind.HUMAN, auto=False)
+    assert not confirms_join(ActorKind.HUMAN, auto=True)  # auto-apply is no approval
+    assert not confirms_join(ActorKind.AGENT, auto=False)  # nor an admin agent's

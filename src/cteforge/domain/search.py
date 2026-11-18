@@ -67,6 +67,13 @@ def search_document(
                 line += ": " + "; ".join(details)
             lines.append(line)
         parts.append(_section("Variables", "\n".join(lines)))
+    if d.composition is not None:
+        # ADR 0026: a composed definition is found by the parts it is built from.
+        lines = [
+            f"- `{alias}`: `{ref.id}`" + (f" v{ref.version}" if ref.version is not None else "")
+            for alias, ref in sorted(d.composition.uses.items())
+        ]
+        parts.append(_section("Built from", "\n".join(lines)))
     if d.outputs:
         parts.append(_section("Outputs", ", ".join(d.outputs)))
     if d.grain and d.grain.strip():

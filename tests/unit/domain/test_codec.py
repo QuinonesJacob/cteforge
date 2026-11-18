@@ -13,7 +13,7 @@ def test_definition_yaml_roundtrip(sample_definition):
 
 
 def test_rejects_unknown_schema_version(sample_definition):
-    text = definition_to_yaml(sample_definition).replace("schema_version: 1", "schema_version: 99")
+    text = definition_to_yaml(sample_definition).replace("schema_version: 2", "schema_version: 99")
     with pytest.raises(CodecError, match="schema_version 99"):
         definition_from_yaml(text)
 
@@ -100,3 +100,110 @@ def test_variable_spec_consistency(patch, message):
     data["variables"] = [variable]
     with pytest.raises(CodecError, match=message):
         definition_from_yaml(yaml.safe_dump(data))
+
+
+# ── ADR 0026: composed definitions (schema 2) and recipe files ──────────────────────
+
+COMPOSED = """\
+schema_version: 2
+id: rr_emea
+title: Realization EMEA
+source_dialect: duckdb
+template: SELECT rr.month FROM rr
+composition:
+  uses:
+    rr:
+      id: realization_rate
+    bc:
+      id: booked_vs_collected
+      version: 2
+  fixed:
+    rr:
+      regions: [EMEA]
+"""
+
+
+def test_composed_definition_round_trips():
+    from cteforge.domain.models import DefinitionRef
+
+    d = definition_from_yaml(COMPOSED)
+    assert d.composed and d.composition is not None
+    assert d.composition.uses["bc"] == DefinitionRef(id="booked_vs_collected", version=2)
+    assert d.composition.uses["rr"].version is None  # floating
+    assert d.composition.fixed == {"rr": {"regions": ["EMEA"]}}
+    assert d.uses_definition("booked_vs_collected") and not d.uses_definition("x")
+    assert definition_from_yaml(definition_to_yaml(d)) == d
+
+
+def test_version_1_files_still_load_as_the_current_version(sample_definition):
+    text = definition_to_yaml(sample_definition).replace("schema_version: 2", "schema_version: 1")
+    loaded = definition_from_yaml(text)
+    assert loaded.schema_version == 2 and loaded == sample_definition
+    with pytest.raises(CodecError, match="cannot carry a composition"):
+        definition_from_yaml(COMPOSED.replace("schema_version: 2", "schema_version: 1"))
+
+
+@pytest.mark.parametrize(
+    ("change", "message"),
+    [
+        (("    rr:\n      regions", "    xx:\n      regions"), "not in uses"),
+        (("template: SELECT rr.month FROM rr", "template: ''"), "exactly one part"),
+        (("    rr:\n      id", "    Bad-Alias:\n      id"), "lower_snake_case"),
+        (("composition:", "composition_x:"), "composition_x"),
+    ],
+)
+def test_invalid_compositions_are_refused(change, message):
+    with pytest.raises(CodecError, match=message):
+        definition_from_yaml(COMPOSED.replace(*change))
+
+
+def test_sql_definition_needs_a_template():
+    with pytest.raises(CodecError, match="SQL"):
+        definition_from_yaml("id: x\ntitle: x\nsource_dialect: duckdb\ntemplate: ''\n")
+
+
+def test_rename_rewrites_parts_and_keeps_pins():
+    d = definition_from_yaml(COMPOSED)
+    renamed = d.with_definition_renamed("booked_vs_collected", "booked")
+    assert (
+        renamed.composition.uses["bc"].id == "booked"
+        and renamed.composition.uses["bc"].version == 2
+    )
+    assert d.with_definition_renamed("unused", "x") is d
+
+
+RECIPE = {
+    "schema_version": 1,
+    "id": "apac_q3",
+    "version": 4,
+    "title": "APAC Q3",
+    "description": "APAC only",
+    "uses": {"rr": {"id": "realization_rate"}},
+    "values": {"rr": {"regions": ["APAC"]}},
+    "select": None,
+    "dialect": "duckdb",
+    "state": "verified",
+}
+
+
+def test_recipe_becomes_a_composed_definition():
+    from cteforge.domain.codec import definition_from_recipe, is_recipe_data
+    from cteforge.domain.models import DefinitionState
+
+    assert is_recipe_data(RECIPE) and not is_recipe_data({"template": "x"})
+    d = definition_from_recipe(RECIPE)
+    assert (d.id, d.version, d.meaning, d.template) == ("apac_q3", 1, "APAC only", "")
+    assert d.composition.fixed == {"rr": {"regions": ["APAC"]}}
+    # Verified only when the verifier is known.
+    assert d.state is DefinitionState.LLM_ANNOTATED and d.verified_by is None
+    verified = definition_from_recipe(RECIPE, id="apac_q3_recipe", verified_by="ann")
+    assert verified.id == "apac_q3_recipe" and verified.state is DefinitionState.VERIFIED
+    assert verified.verified_by == "ann"
+    draft = definition_from_recipe(RECIPE | {"state": "draft"}, verified_by="ann")
+    assert draft.state is DefinitionState.DRAFT and draft.verified_by is None
+    with pytest.raises(CodecError, match="unknown fields"):
+        definition_from_recipe(RECIPE | {"surprise": 1})
+    with pytest.raises(CodecError, match="exactly one part"):
+        definition_from_recipe(
+            RECIPE | {"uses": {"a": {"id": "x"}, "b": {"id": "y"}}, "values": {}}
+        )

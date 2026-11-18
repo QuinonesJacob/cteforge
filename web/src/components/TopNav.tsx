@@ -16,10 +16,10 @@ export function TopNav() {
 
   // Links follow the signed-in token's tools (ADR 0027); Settings (My tokens) is for everyone.
   const links: { to: string; label: string; end?: boolean; badge?: number | null }[] = [
-    { to: "/", label: "Library", end: true },
-    { to: "/explore", label: "Explore" },
+    // ADR 0026: one Library (definitions + proposals); its badge counts pending proposals.
+    { to: "/", label: "Library", end: true, badge: can(user, "list_proposals") ? pending : null },
+    ...(can(user, "list_joins") ? [{ to: "/joins", label: "Join map" }] : []),
     ...(canPropose(user) ? [{ to: "/import", label: "Import" }] : []),
-    ...(can(user, "list_proposals") ? [{ to: "/review", label: "Review", badge: pending }] : []),
     ...(can(user, "view_audit") ? [{ to: "/audit", label: "Audit" }] : []),
     ...(user ? [{ to: "/settings", label: "Settings" }] : []),
   ];

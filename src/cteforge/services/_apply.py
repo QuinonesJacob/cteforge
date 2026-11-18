@@ -3,9 +3,10 @@
 Support module, not a use-case: no permission checks of its own (callers `require` first).
 
 - Building proposals: definition checks via the import engine (services/import_query.py),
-  recipe checks (render + compose dry-run, nothing runs), owner rule, warehouse lookup.
+  composed-definition checks (services/_compose.py, ADR 0026), owner rule, warehouse
+  lookup.
 - Submitting: store the proposal, auto-apply it when the team mode and checks allow.
-- Applying an approved proposal to the store (`apply_proposal`): a new definition/recipe
+- Applying an approved proposal to the store (`apply_proposal`): a new definition
   version or a join edge, then the join map is refreshed (services/_library.py) and a new
   definition version gets its meaning-search vector (services/_meaning.py; best effort,
   only when the model is already loaded — never fails or delays the apply).
@@ -15,8 +16,9 @@ otherwise the state the checks earned (LLM_ANNOTATED when they passed and were c
 DRAFT otherwise). A proposal's stored definition never carries VERIFIED.
 
 Join mining (`_library.refresh_join_map`): every JOIN between two BASE tables of a
-definition's SQL becomes a JoinEdge with the deterministic id `_library.join_edge_id`;
-`usage_count` is recomputed after every apply. Mining never blocks an apply.
+definition's SQL (a composed definition's compiled SQL) becomes a JoinEdge with the
+deterministic id `_library.join_edge_id`; `sources` and `usage_count` are recomputed after
+every apply. Mining never blocks an apply.
 
 Applying claims the proposal first: one compare-and-swap in the store (`update_proposal`
 with `expected_status=PENDING`) marks it approved with its resulting version, and only the
@@ -28,14 +30,23 @@ Drafts (DESIGN §8, §18): a definition proposal whose checks earned DRAFT (a wa
 as `type_unknown`, results not compared, or a metadata-only revision of a draft) is never
 auto-applied and can never be applied with verify; a person may still approve it as a
 draft. `check_verifiable` is the one rule for verify on approval (also enforced here, not
-only by review): no error issue, no `checks_incomplete`, no `draft_not_usable` (a recipe on
-a draft definition), and not a DRAFT definition.
+only by review): no error issue, no `checks_incomplete`, no `draft_not_usable` (a composed
+definition on a draft part), and not a DRAFT definition. Join proposals are approved, never
+verified (approval by a person confirms the edge).
 
-Joins (DESIGN §18): a join proposal is checked on the default warehouse profile (both
-tables exist, every key column exists; else a `not_found` error; no profile or a lookup
-failure → `checks_incomplete`, so it waits for review). It records the edge it was based
-on (`payload.base_join`, None for a new edge); applying it after the edge changed (content
-or state, usage_count ignored) raises StaleVersionError with a `stale_base_version` issue.
+Joins (DESIGN §18, ADR 0026): a join proposal (`action` add | annotate) is checked on the
+default warehouse profile (both tables exist, every key column exists; else a `not_found`
+error; no profile or a lookup failure → `checks_incomplete`, so it waits for review); a
+relationship claim is checked against the data (`relationship_evidence`: COUNT(*) vs
+COUNT(DISTINCT key) per side via compose.relationship; a side claimed "one" with duplicate
+keys → `relationship_contradicted` error) and the evidence is stored with the proposal and
+the edge. An edge an AGENT adds never auto-applies (trust.approval.join_may_auto_apply).
+Applying records a person's approval as `confirmed_by` (trust.approval.confirms_join),
+which makes an added edge known. A confirmed edge is treated like a verified definition
+(its changes wait for a person or an admin agent). It records the edge it was based on
+(`payload.base_join`, None for a new edge); applying it after the edge changed (content,
+confirmation or annotations; usage_count and sources ignored) raises StaleVersionError
+with a `stale_base_version` issue.
 
 Renames (ADR 0024): a RENAME_DEFINITION proposal (`rename_proposal`) carries `from_id`,
 `to_id` and the references seen when it was proposed. It is checked like any change to its
@@ -43,7 +54,8 @@ target (auto-applied only in open mode on a definition that is not verified; nev
 verify). Applying it re-checks that the definition still has `from_id` (a rename that
 another rename overtook is stale) and that `to_id` is still free, then the store renames
 it in one transaction (`Store.rename_definition`): no new version, every stored copy of
-the id (versions' YAML, recipes, proposals) rewritten, the old id recorded as a former id.
+the id (versions' YAML, composed definitions' parts, proposals) rewritten, the old id
+recorded as a former id.
 
 Decisions are serialized in-process (`DECISIONS`): applying and deciding re-read the
 proposal under the lock and refuse one that is no longer pending. Across processes on one
@@ -59,9 +71,9 @@ import uuid
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-from pydantic import TypeAdapter, ValidationError
+from pydantic import ValidationError
 
-from cteforge.compose.assemble import Part, compose
+from cteforge.compose import relationship
 from cteforge.compose.checks import ensure_query
 from cteforge.domain.audit import AuditKind
 from cteforge.domain.codec import AnnotationFile, definition_from_yaml, definition_to_yaml
@@ -73,41 +85,41 @@ from cteforge.domain.errors import (
     PermissionDeniedError,
     PolicyError,
     RenderError,
-    SqlParseError,
     StaleVersionError,
     StoreError,
-    VariableValueError,
     WarehouseError,
 )
 from cteforge.domain.issues import Issue, IssueCode, Severity, has_errors
 from cteforge.domain.models import (
     Annotation,
+    Composition,
     Definition,
     DefinitionState,
-    Ident,
     JoinEdge,
-    Recipe,
+    RelationshipEvidence,
+    SideCount,
 )
 from cteforge.domain.proposals import Proposal, ProposalKind, ProposalStatus
 from cteforge.domain.users import User
 from cteforge.parsing.analyze import parse
-from cteforge.services import _audit, _library, _meaning
+from cteforge.services import _audit, _compose, _library, _meaning
 from cteforge.services.cards import (
     ProposalOutcome,
     ProposalView,
     card_from_definition,
-    json_safe,
     proposal_view,
 )
 from cteforge.services.context import AppContext, team_mode
 from cteforge.services.import_query import import_query
-from cteforge.templating.render import render
-from cteforge.trust.approval import can_auto_apply, reviews_all
+from cteforge.trust.approval import (
+    can_auto_apply,
+    confirms_join,
+    join_may_auto_apply,
+    reviews_all,
+)
 from cteforge.warehouse.base import Warehouse
 
-_IDENT = TypeAdapter(Ident)
-
-Applied = Definition | Recipe | JoinEdge
+Applied = Definition | JoinEdge
 
 # Serializes proposal decisions in this process (see the module docstring).
 DECISIONS = threading.RLock()
@@ -280,81 +292,38 @@ def checked_definition(
     return definition, list(outcome.issues)
 
 
+def checked_composition(
+    ctx: AppContext,
+    user: User,
+    composition: Composition,
+    select: str | None,
+    dialect: Dialect,
+    annotations: list[Annotation],
+    metadata: Mapping[str, Any],
+    warehouse: Warehouse | None,
+) -> tuple[Definition, list[Issue]]:
+    """The composed-definition counterpart of `checked_definition` (ADR 0026):
+    `_compose.checked_composition`, then the join-keys rule."""
+    definition, issues = _compose.checked_composition(
+        ctx, user, composition, select, dialect, annotations, metadata, warehouse
+    )
+    check_join_keys(definition)
+    return definition, issues
+
+
 def logic_changed(old: Definition, new: Definition) -> bool:
-    """DESIGN §15: SQL, variables, grain, outputs or join keys changed."""
-    keys = ("source_dialect", "template", "variables", "grain", "outputs", "join_keys", "tables")
+    """DESIGN §15: SQL (or composition), variables, grain, outputs or join keys changed."""
+    keys = (
+        "source_dialect",
+        "template",
+        "variables",
+        "composition",
+        "grain",
+        "outputs",
+        "join_keys",
+        "tables",
+    )
     return any(getattr(old, k) != getattr(new, k) for k in keys)
-
-
-# ── Recipe checks ────────────────────────────────────────────────────────────────────
-
-
-def _recipe_issue(message: str, code: IssueCode = IssueCode.RECIPE_INVALID, **kw: Any) -> Issue:
-    return Issue(code=code, severity=Severity.ERROR, message=message, **kw)
-
-
-def recipe_checks(ctx: AppContext, recipe: Recipe) -> list[Issue]:
-    """Validate a recipe without running it: every alias is lower_snake_case and resolves
-    to an existing definition (version), values validate and render (templating), the
-    final SELECT is one read-only query, and compose accepts the whole (DESIGN §17)."""
-    issues: list[Issue] = []
-    parts: list[Part] = []
-    for alias in recipe.values:
-        if alias not in recipe.uses:
-            issues.append(
-                _recipe_issue(
-                    f"values are given for '{alias}', which is not an alias in uses "
-                    f"({sorted(recipe.uses)}).",
-                    IssueCode.UNKNOWN_ALIAS,
-                )
-            )
-    for alias, ref in recipe.uses.items():
-        try:
-            _IDENT.validate_python(alias)
-        except ValidationError:
-            issues.append(
-                _recipe_issue(
-                    f"Alias '{alias}' must be lower_snake_case (letters, digits, single "
-                    "underscores).",
-                    IssueCode.UNKNOWN_ALIAS,
-                )
-            )
-            continue
-        definition = ctx.store.get_definition(ref.id, ref.version)
-        if definition is None:
-            missing = _library.definition_not_found(ctx, ref.id, ref.version)
-            issues.append(_recipe_issue(f"'{alias}': {missing}", IssueCode.NOT_FOUND))
-            continue
-        if definition.state is DefinitionState.DRAFT:
-            issues.append(
-                Issue(
-                    code=IssueCode.DRAFT_NOT_USABLE,
-                    severity=Severity.WARNING,
-                    message=f"'{alias}': definition '{ref.id}' is a draft; the recipe cannot "
-                    "run until it passes its checks.",
-                )
-            )
-        try:
-            rendered = render(definition, recipe.values.get(alias, {}), recipe.dialect)
-        except (RenderError, VariableValueError) as exc:
-            issues.append(_recipe_issue(f"'{alias}': {exc}"))
-            continue
-        issues += rendered.issues
-        parts.append(Part(alias=alias, definition=definition, sql=rendered.sql))
-    if recipe.select is not None and recipe.select.strip():
-        try:
-            ensure_query(parse(recipe.select, recipe.dialect), "final SELECT")
-        except SqlParseError as exc:
-            return [*issues, _recipe_issue(str(exc))]
-        except RenderError as exc:
-            return [*issues, _recipe_issue(str(exc), IssueCode.NOT_READ_ONLY)]
-    if has_errors(issues):
-        return issues
-    try:
-        composed = compose(parts, recipe.select, recipe.dialect)
-    except (RenderError, SqlParseError) as exc:
-        return [*issues, _recipe_issue(str(exc))]
-    return [*issues, *composed.issues]
 
 
 # ── Submitting ───────────────────────────────────────────────────────────────────────
@@ -390,25 +359,6 @@ def definition_payload(definition: Definition, *, changed_logic: bool) -> dict[s
     if stored.state is DefinitionState.VERIFIED:
         stored = stored.model_copy(update={"state": DefinitionState.LLM_ANNOTATED})
     return {"definition_yaml": definition_to_yaml(stored), "logic_changed": changed_logic}
-
-
-def recipe_proposal(ctx: AppContext, user: User, recipe: Recipe, summary: str) -> Proposal:
-    """A NEW_RECIPE proposal (next version when the id exists) with its checks."""
-    current = ctx.store.get_recipe(recipe.id)
-    base = None if current is None else current.version
-    proposed = recipe.model_copy(
-        update={"version": (base or 0) + 1, "state": DefinitionState.LLM_ANNOTATED}
-    )
-    return new_proposal(
-        ctx,
-        user,
-        ProposalKind.NEW_RECIPE,
-        proposed.id,
-        {"recipe": proposed.model_dump(mode="json") | {"values": json_safe(proposed.values)}},
-        recipe_checks(ctx, proposed),
-        summary=summary,
-        base_version=base,
-    )
 
 
 def rename_proposal(
@@ -452,22 +402,33 @@ def stale_rename_error(proposal: Proposal) -> StaleVersionError:
     return error
 
 
+_JOIN_BASIS_IGNORED = {"usage_count", "sources"}
+
+
 def _join_basis(edge: JoinEdge | None) -> dict[str, Any] | None:
-    """What a join proposal is based on: the edge without its usage_count."""
-    return None if edge is None else edge.model_dump(mode="json", exclude={"usage_count"})
+    """What a join proposal is based on: the edge without what mining recomputes."""
+    return None if edge is None else edge.model_dump(mode="json", exclude=_JOIN_BASIS_IGNORED)
 
 
 def _incomplete(message: str) -> Issue:
     return Issue(code=IssueCode.CHECKS_INCOMPLETE, severity=Severity.WARNING, message=message)
 
 
+def _not_found(message: str) -> Issue:
+    return Issue(code=IssueCode.NOT_FOUND, severity=Severity.ERROR, message=message)
+
+
+def _default_warehouse(ctx: AppContext) -> tuple[str | None, Warehouse | None]:
+    try:
+        return warehouse_for(ctx, None)
+    except CteforgeError:
+        return None, None
+
+
 def join_checks(ctx: AppContext, edge: JoinEdge) -> list[Issue]:
     """Both tables and every key column exist on the default warehouse profile. Without a
     usable profile the checks are incomplete (the proposal then waits for review)."""
-    try:
-        _, warehouse = warehouse_for(ctx, None)
-    except CteforgeError:
-        warehouse = None
+    _, warehouse = _default_warehouse(ctx)
     if warehouse is None:
         return [
             _incomplete(
@@ -486,54 +447,140 @@ def join_checks(ctx: AppContext, edge: JoinEdge) -> list[Issue]:
             issues.append(_incomplete(f"Could not read the columns of '{table}'."))
             continue
         if not columns:
-            issues.append(
-                _recipe_issue(
-                    f"Table '{table}' does not exist on the warehouse.", IssueCode.NOT_FOUND
-                )
-            )
+            issues.append(_not_found(f"Table '{table}' does not exist on the warehouse."))
             continue
         missing = sorted({c for c in wanted if c.lower() not in columns})
         if missing:
-            issues.append(
-                _recipe_issue(
-                    f"Key column(s) {missing} do not exist in '{table}'.", IssueCode.NOT_FOUND
-                )
-            )
+            issues.append(_not_found(f"Key column(s) {missing} do not exist in '{table}'."))
     return issues
 
 
-def join_proposal(ctx: AppContext, user: User, edge: JoinEdge, summary: str) -> Proposal:
-    """A NEW_JOIN proposal for a canonical edge (an update when the id exists), with its
-    checks (`join_checks`) and the edge it is based on (`payload.base_join`)."""
+def _count_side(warehouse: Warehouse, table: str, keys: list[str]) -> SideCount:
+    """Rows with every key set vs distinct key tuples on one side. The query is built by
+    compose.relationship from sqlglot identifiers (no text splicing, no values)."""
+    result = warehouse.run(relationship.relationship_query(table, keys, warehouse.dialect), 1)
+    if len(result.rows) != 1 or len(result.rows[0]) != 2:
+        raise WarehouseError("unexpected result shape")
+    rows, distinct = (int(v or 0) for v in result.rows[0])
+    return SideCount(table=table, keys=keys, rows=rows, distinct_keys=distinct)
+
+
+def relationship_evidence(
+    ctx: AppContext, edge: JoinEdge
+) -> tuple[RelationshipEvidence | None, list[Issue]]:
+    """Check `edge.relationship` against the default warehouse (ADR 0026): COUNT(*) vs
+    COUNT(DISTINCT key) on each side. A side the claim calls "one" that has duplicate keys
+    is a `relationship_contradicted` error; no warehouse or a failed count →
+    `checks_incomplete` (a runtime failure keeps only its class: messages can quote
+    data). Returns (evidence, issues); no relationship → (None, [])."""
+    if edge.relationship is None:
+        return None, []
+    profile, warehouse = _default_warehouse(ctx)
+    if warehouse is None:
+        return None, [
+            _incomplete("No default warehouse profile: the relationship was not checked.")
+        ]
+    try:
+        left = _count_side(warehouse, edge.left_table, [k.left for k in edge.keys])
+        right = _count_side(warehouse, edge.right_table, [k.right for k in edge.keys])
+    except (WarehouseError, RenderError, ValueError, TypeError) as exc:
+        return None, [
+            _incomplete(
+                f"The relationship could not be checked on the warehouse ({type(exc).__name__})."
+            )
+        ]
+    observed = relationship.relationship_of(
+        relationship.side(left.rows, left.distinct_keys),
+        relationship.side(right.rows, right.distinct_keys),
+    )
+    fits = relationship.consistent(edge.relationship, observed)
+    evidence = RelationshipEvidence(
+        claimed=edge.relationship,
+        observed=observed,
+        left=left,
+        right=right,
+        consistent=fits,
+        profile=profile,
+        checked_at=ctx.now(),
+    )
+    if fits:
+        return evidence, []
+    message = (
+        f"The data contradicts '{edge.relationship}': '{left.table}' has {left.rows} rows for "
+        f"{left.distinct_keys} distinct keys and '{right.table}' {right.rows} rows for "
+        f"{right.distinct_keys} distinct keys, so it is {observed} now. A side called "
+        "'one' must have each key once."
+    )
+    return evidence, [
+        Issue(code=IssueCode.RELATIONSHIP_CONTRADICTED, severity=Severity.ERROR, message=message)
+    ]
+
+
+def join_proposal(
+    ctx: AppContext, user: User, edge: JoinEdge, summary: str, *, action: str = "annotate"
+) -> Proposal:
+    """A NEW_JOIN proposal (`action` add: a new edge; annotate: relationship / traps /
+    notes on an existing edge) for a canonical edge, with its checks (`join_checks`, and
+    the relationship evidence when a relationship is claimed) and the edge it is based on
+    (`payload.base_join`)."""
     existing = ctx.store.get_join(edge.id)
-    count = 0 if existing is None else existing.usage_count
-    edge = edge.model_copy(update={"usage_count": count, "state": DefinitionState.LLM_ANNOTATED})
+    keep: dict[str, Any] = {"usage_count": 0, "sources": []}
+    if existing is not None:
+        keep = {
+            "usage_count": existing.usage_count,
+            "sources": list(existing.sources),
+            "added_by": existing.added_by,
+            "added_by_kind": existing.added_by_kind,
+            "confirmed_by": existing.confirmed_by,
+        }
+    elif action == "add":
+        keep |= {"added_by": user.name, "added_by_kind": user.kind.value, "confirmed_by": None}
+    edge = edge.model_copy(update=keep)
+    checks = join_checks(ctx, edge)
+    evidence: RelationshipEvidence | None = None
+    if edge.relationship is not None and not has_errors(checks):
+        evidence, evidence_issues = relationship_evidence(ctx, edge)
+        checks += evidence_issues
+    if evidence is not None or (
+        existing is not None and edge.relationship != existing.relationship
+    ):
+        edge = edge.model_copy(update={"evidence": evidence})
     return new_proposal(
         ctx,
         user,
         ProposalKind.NEW_JOIN,
         edge.id,
-        {"join": edge.model_dump(mode="json"), "base_join": _join_basis(existing)},
-        join_checks(ctx, edge),
+        {
+            "join": edge.model_dump(mode="json"),
+            "base_join": _join_basis(existing),
+            "action": action,
+            "evidence": evidence.model_dump(mode="json") if evidence is not None else None,
+        },
+        checks,
         summary=summary,
     )
 
 
 def target_state(ctx: AppContext, proposal: Proposal) -> DefinitionState | None:
-    """Current state of what the proposal changes; None when it does not exist yet."""
+    """Current state of what the proposal changes; None when it does not exist yet. A join
+    edge a person confirmed counts as VERIFIED (changes to it wait for a person or an
+    admin agent), any other edge as LLM_ANNOTATED (ADR 0026)."""
     if proposal.kind is ProposalKind.NEW_RECIPE:
-        recipe = ctx.store.get_recipe(proposal.target_id)
-        return None if recipe is None else recipe.state
+        return None  # legacy: recipes no longer exist
     if proposal.kind is ProposalKind.NEW_JOIN:
         edge = ctx.store.get_join(proposal.target_id)
-        return None if edge is None else edge.state
+        if edge is None:
+            return None
+        if edge.confirmed_by is not None:
+            return DefinitionState.VERIFIED
+        return DefinitionState.LLM_ANNOTATED
     definition = ctx.store.get_definition(proposal.target_id)
     return None if definition is None else definition.state
 
 
 def proposed_state(proposal: Proposal) -> DefinitionState | None:
-    """The state a definition proposal's checks earned; None for recipes, joins and
-    renames."""
+    """The state a definition proposal's checks earned; None for joins, renames and legacy
+    recipes."""
     if proposal.kind not in (ProposalKind.NEW_DEFINITION, ProposalKind.REVISE_DEFINITION):
         return None
     return definition_from_yaml(str(proposal.payload["definition_yaml"])).state
@@ -541,8 +588,14 @@ def proposed_state(proposal: Proposal) -> DefinitionState | None:
 
 def may_auto_apply(ctx: AppContext, proposal: Proposal) -> bool:
     """DESIGN §18 via trust.approval.can_auto_apply: open mode, no errors, complete checks,
-    target new or not verified (for recipes and joins too), and not a DRAFT definition
-    (its checks did not all pass)."""
+    target new or not verified (a join: not confirmed), and not a DRAFT definition (its
+    checks did not all pass). An edge an agent adds never auto-applies (ADR 0026)."""
+    if proposal.kind is ProposalKind.NEW_RECIPE:
+        return False
+    if proposal.kind is ProposalKind.NEW_JOIN and not join_may_auto_apply(
+        str(proposal.payload.get("action", "annotate")), proposal.author_kind
+    ):
+        return False
     state = target_state(ctx, proposal)
     if state is DefinitionState.VERIFIED:
         return False
@@ -557,12 +610,18 @@ def verify_refusal(proposal: Proposal) -> str | None:
     codes = {i.code for i in proposal.checks}
     if proposal.kind is ProposalKind.RENAME_DEFINITION:
         return "is a rename; there is nothing to verify (approve it without verify)"
+    if proposal.kind is ProposalKind.NEW_JOIN:
+        return "is a join; joins are approved, not verified (a person's approval confirms the edge)"
+    if proposal.kind is ProposalKind.NEW_RECIPE:
+        return "is a recipe proposal; recipes no longer exist (ADR 0026)"
     if has_errors(proposal.checks):
         return "has failing checks; it cannot be approved or verified"
     if IssueCode.CHECKS_INCOMPLETE in codes:
         return "was not fully checked (checks_incomplete); it can be approved but not verified"
     if IssueCode.DRAFT_NOT_USABLE in codes:
         return "uses a draft definition; it can be approved but not verified"
+    if IssueCode.PART_NOT_USABLE in codes:
+        return "uses a part that is not usable now; it can be approved but not verified"
     if proposed_state(proposal) is DefinitionState.DRAFT:
         return (
             "is a draft (its checks did not all pass); it can be approved as a draft but not "
@@ -598,22 +657,28 @@ def outcome(ctx: AppContext, proposal: Proposal, applied: Applied | None) -> Pro
 
 
 def view(ctx: AppContext, proposal: Proposal) -> ProposalView:
-    """Proposal + diff against its base + impact preview (recipes using the definition)."""
+    """Proposal + diff against its base + impact preview ("used by": composed definitions
+    using the target definition, ADR 0026) + for a composed definition its parts,
+    fixed/open variables and compiled SQL."""
     base: Applied | None = None
     impact: list[str] = []
+    composition = None
     if proposal.kind in (ProposalKind.NEW_DEFINITION, ProposalKind.REVISE_DEFINITION):
         if proposal.base_version is not None:
             base = ctx.store.get_definition(proposal.target_id, proposal.base_version)
-        impact = [r.id for r in ctx.store.recipes_using(proposal.target_id)]
+        impact = [d.id for d in ctx.store.definitions_using(proposal.target_id)]
+        try:
+            proposed = definition_from_yaml(str(proposal.payload["definition_yaml"]))
+        except (CodecError, KeyError):
+            proposed = None
+        if proposed is not None and proposed.composition is not None:
+            composition = _compose.composition_card(ctx, proposed)
     elif proposal.kind is ProposalKind.RENAME_DEFINITION:
         # No diff: the payload says from → to; impact is what uses the definition now.
-        impact = [r.id for r in ctx.store.recipes_using(proposal.target_id)]
-    elif proposal.kind is ProposalKind.NEW_RECIPE:
-        if proposal.base_version is not None:
-            base = ctx.store.get_recipe(proposal.target_id, proposal.base_version)
-    else:
+        impact = [d.id for d in ctx.store.definitions_using(proposal.target_id)]
+    elif proposal.kind is ProposalKind.NEW_JOIN:
         base = ctx.store.get_join(proposal.target_id)
-    return proposal_view(proposal, base, impact)
+    return proposal_view(proposal, base, impact, composition)
 
 
 # ── Applying ─────────────────────────────────────────────────────────────────────────
@@ -701,11 +766,16 @@ def _check_base(ctx: AppContext, proposal: Proposal) -> None:
         latest = ctx.store.latest_version(proposal.target_id)
         if latest != proposal.base_version:
             raise stale_error("Definition", proposal.target_id, latest, proposal.base_version)
+        # Another composed definition applied meanwhile may close a cycle (ADR 0026).
+        cycle = _compose.cycle_issue(
+            ctx, definition_from_yaml(str(proposal.payload["definition_yaml"]))
+        )
+        if cycle is not None:
+            error = PolicyError(f"composition_cycle: {cycle.message}")
+            error.issues = [cycle]  # type: ignore[attr-defined]
+            raise error
     elif proposal.kind is ProposalKind.NEW_RECIPE:
-        current = ctx.store.get_recipe(proposal.target_id)
-        latest = None if current is None else current.version
-        if latest != proposal.base_version:
-            raise stale_error("Recipe", proposal.target_id, latest, proposal.base_version)
+        raise PolicyError("Recipes no longer exist (ADR 0026); this proposal can't be applied.")
     elif proposal.kind is ProposalKind.RENAME_DEFINITION:
         old = str(proposal.payload["from_id"])
         if proposal.target_id != old or ctx.store.latest_version(old) is None:
@@ -760,22 +830,19 @@ def _apply_definition(
         ) from None
 
 
-def _apply_recipe(ctx: AppContext, proposal: Proposal, verify: bool, version: int) -> Recipe:
-    proposed = Recipe.model_validate(proposal.payload["recipe"])
-    state = DefinitionState.VERIFIED if verify else DefinitionState.LLM_ANNOTATED
-    recipe = proposed.model_copy(update={"version": version, "state": state})
-    try:
-        return ctx.store.add_recipe_version(recipe, author=proposal.author)
-    except StaleVersionError:
-        current = ctx.store.get_recipe(proposal.target_id)
-        raise _lost_race("Recipe", proposal, None if current is None else current.version) from None
-
-
-def _apply_join(ctx: AppContext, proposal: Proposal, verify: bool) -> JoinEdge:
+def _apply_join(ctx: AppContext, proposal: Proposal, user: User, auto: bool) -> JoinEdge:
+    """Write the proposed edge. Mining-owned fields (sources, usage_count) are taken from
+    the stored edge; a person's approval confirms it (`confirmed_by`)."""
     proposed = JoinEdge.model_validate(proposal.payload["join"])
-    state = DefinitionState.VERIFIED if verify else DefinitionState.LLM_ANNOTATED
-    ctx.store.upsert_join(proposed.model_copy(update={"state": state}))
-    return proposed
+    current = ctx.store.get_join(proposed.id)
+    update: dict[str, Any] = {}
+    if current is not None:
+        update |= {"sources": list(current.sources), "usage_count": current.usage_count}
+    if confirms_join(user.kind, auto=auto):
+        update["confirmed_by"] = user.name
+    edge = proposed.model_copy(update=update)
+    ctx.store.upsert_join(edge)
+    return edge
 
 
 def apply_proposal(
@@ -806,9 +873,6 @@ def apply_proposal(
             if proposal.kind in (ProposalKind.NEW_DEFINITION, ProposalKind.REVISE_DEFINITION):
                 assert version is not None
                 applied = _apply_definition(ctx, proposal, user, verify, version)
-            elif proposal.kind is ProposalKind.NEW_RECIPE:
-                assert version is not None
-                applied = _apply_recipe(ctx, proposal, verify, version)
             elif proposal.kind is ProposalKind.RENAME_DEFINITION:
                 applied = ctx.store.rename_definition(
                     str(proposal.payload["from_id"]),
@@ -818,12 +882,12 @@ def apply_proposal(
                     proposal_id=proposal.id,
                 )
             else:
-                applied = _apply_join(ctx, proposal, verify)
+                applied = _apply_join(ctx, proposal, user, auto)
         except BaseException:
             _release(ctx, proposal)
             raise
         # The change is in the library; the join map follows (mining never blocks it).
-        _library.refresh_join_map(ctx, applied if isinstance(applied, Definition) else None)
+        _library.refresh_join_map(ctx, lambda d: _compose.compiled_sql(ctx, d))
         if isinstance(applied, JoinEdge):
             edge = ctx.store.get_join(applied.id)
             assert edge is not None

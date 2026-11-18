@@ -1,13 +1,16 @@
 """Read/write a library directory: the optional git export of the store (ADR 0003).
 
 Layout (one YAML file per object, named by its id; deterministic output for clean diffs):
-    <dir>/definitions/<id>.yml   definition codec YAML (domain/codec.py), latest version
-    <dir>/recipes/<id>.yml       Recipe fields, in model field order
+    <dir>/definitions/<id>.yml   definition codec YAML (domain/codec.py), latest version;
+                                 SQL or composed (ADR 0026)
     <dir>/joins/<id>.yml         JoinEdge fields, in model field order
+    <dir>/recipes/<id>.yml       legacy (ADR 0026): read only, as composed definitions
+                                 (`codec.definition_from_recipe`); never written, and
+                                 removed by an export with `prune`
 
-Recipes and joins have no codec format of their own; they are written as their model's
-plain fields and read back through model validation. Malformed files raise CodecError
-naming the file, never echoing its contents.
+Joins have no codec format of their own; they are written as their model's plain fields
+and read back through model validation. Malformed files raise CodecError naming the file,
+never echoing its contents.
 """
 
 from __future__ import annotations
@@ -20,9 +23,9 @@ from typing import Any
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from cteforge.domain.codec import definition_from_yaml, definition_to_yaml
+from cteforge.domain.codec import definition_from_recipe, definition_from_yaml, definition_to_yaml
 from cteforge.domain.errors import CodecError
-from cteforge.domain.models import Definition, JoinEdge, Recipe
+from cteforge.domain.models import Definition, JoinEdge
 
 DEFINITIONS_DIR = "definitions"
 RECIPES_DIR = "recipes"
@@ -32,12 +35,13 @@ _SAFE_NAME = re.compile(r"^[a-z0-9_][a-z0-9_.=,-]*$")
 
 
 class LibraryFiles(BaseModel):
-    """Everything read from a library directory, each list sorted by file name."""
+    """Everything read from a library directory, each list sorted by file name.
+    `recipes`: legacy recipe files, already converted to composed definitions."""
 
     model_config = ConfigDict(frozen=True)
 
     definitions: list[Definition] = Field(default_factory=list)
-    recipes: list[Recipe] = Field(default_factory=list)
+    recipes: list[Definition] = Field(default_factory=list)
     joins: list[JoinEdge] = Field(default_factory=list)
 
 
@@ -53,10 +57,8 @@ def _plain(value: Any) -> Any:
 
 
 def _dump(model: BaseModel) -> str:
-    data = model.model_dump(mode="json")
-    if isinstance(model, Recipe):  # keep exact numbers in values (mode="json" would str them)
-        data["values"] = _plain(model.values)
-    return yaml.safe_dump(data, sort_keys=False, allow_unicode=True)
+    data = model.model_dump(mode="json", exclude_none=True)
+    return yaml.safe_dump(_plain(data), sort_keys=False, allow_unicode=True)
 
 
 def _file_name(id: str) -> str:
@@ -83,12 +85,12 @@ def write_library(
     directory: str | Path,
     *,
     definitions: list[Definition],
-    recipes: list[Recipe],
     joins: list[JoinEdge],
     prune: bool = False,
 ) -> list[Path]:
     """Write every object as its own file. `prune=True` deletes other `*.yml` files in the
-    three sub-directories, so the directory mirrors the library exactly."""
+    sub-directories (legacy `recipes/` included), so the directory mirrors the library
+    exactly."""
     root = Path(directory)
     try:
         written = _write_all(
@@ -96,9 +98,9 @@ def write_library(
             {_file_name(d.id): definition_to_yaml(d) for d in definitions},
             prune,
         )
-        written += _write_all(
-            root / RECIPES_DIR, {_file_name(r.id): _dump(r) for r in recipes}, prune
-        )
+        if prune and (root / RECIPES_DIR).is_dir():
+            for stale in (root / RECIPES_DIR).glob("*" + SUFFIX):
+                stale.unlink()
         written += _write_all(root / JOINS_DIR, {_file_name(j.id): _dump(j) for j in joins}, prune)
     except OSError as exc:
         raise CodecError(f"Cannot write library to {root}: {exc.strerror}") from exc
@@ -143,8 +145,20 @@ def read_library(directory: str | Path) -> LibraryFiles:
             definitions.append(definition_from_yaml(text))
         except CodecError as exc:
             raise CodecError(f"{path.name}: {exc}") from None
+    recipes: list[Definition] = []
+    for path, text in _texts(root / RECIPES_DIR):
+        try:
+            data = yaml.safe_load(text)
+        except yaml.YAMLError:
+            raise CodecError(f"{path.name}: invalid YAML") from None
+        if not isinstance(data, dict):
+            raise CodecError(f"{path.name}: expected a YAML mapping at the top level")
+        try:
+            recipes.append(definition_from_recipe(data))
+        except CodecError as exc:
+            raise CodecError(f"{path.name}: {exc}") from None
     return LibraryFiles(
         definitions=definitions,
-        recipes=[_model(p, t, Recipe) for p, t in _texts(root / RECIPES_DIR)],
+        recipes=recipes,
         joins=[_model(p, t, JoinEdge) for p, t in _texts(root / JOINS_DIR)],
     )

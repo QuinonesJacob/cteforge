@@ -14,13 +14,13 @@ from cteforge.domain.codec import definition_to_yaml
 from cteforge.domain.dialects import Dialect
 from cteforge.domain.issues import Issue, IssueCode, Severity
 from cteforge.domain.models import (
+    Composition,
     Definition,
     DefinitionRef,
     DefinitionState,
     DefinitionVersionInfo,
     JoinEdge,
     JoinKey,
-    Recipe,
     TrustLabel,
 )
 from cteforge.domain.proposals import Proposal, ProposalKind
@@ -236,12 +236,22 @@ def test_proposal_view_identical_has_empty_diff(definition: Definition) -> None:
     assert proposal_view(p, base=definition).diff == ""
 
 
-def test_proposal_view_recipe_and_join() -> None:
-    recipe = Recipe(id="r", title="R", uses={"a": DefinitionRef(id="x")}, dialect=Dialect.DUCKDB)
-    changed = recipe.model_copy(update={"version": 2, "title": "R2"})
-    p = _proposal(ProposalKind.NEW_RECIPE, "r", {"recipe": changed.model_dump(mode="json")})
-    diff = proposal_view(p, base=recipe).diff
+def test_proposal_view_composed_definition_and_join() -> None:
+    composed = Definition(
+        id="r",
+        title="R",
+        template="SELECT * FROM a",
+        composition=Composition(uses={"a": DefinitionRef(id="x")}),
+        source_dialect=Dialect.DUCKDB,
+    )
+    changed = composed.model_copy(update={"version": 2, "title": "R2"})
+    p = _proposal(
+        ProposalKind.REVISE_DEFINITION, "r", {"definition_yaml": definition_to_yaml(changed)}
+    )
+    diff = proposal_view(p, base=composed).diff
     assert "--- r@v1" in diff and "-title: R" in diff and "+title: R2" in diff
+    legacy = _proposal(ProposalKind.NEW_RECIPE, "old", {"recipe": {"id": "old", "title": "O"}})
+    assert "+title: O" in proposal_view(legacy).diff  # legacy recipe proposals still render
 
     edge = JoinEdge(
         id="a__b__k", left_table="a", right_table="b", keys=[JoinKey(left="k", right="k")]

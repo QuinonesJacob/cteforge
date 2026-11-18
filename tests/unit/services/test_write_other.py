@@ -1,5 +1,5 @@
-"""Join map (mining + propose_join), propose_recipe, library export/import (DESIGN §3, §17,
-§18; ADR 0003)."""
+"""Join map (mining + propose_join add/annotate, ADR 0026), library export/import with
+composed definitions and legacy recipe files (DESIGN §3, §17, §18; ADR 0003)."""
 
 from __future__ import annotations
 
@@ -23,7 +23,7 @@ from cteforge.services import review
 from cteforge.services.context import AppConfig, AppContext, open_context, set_team_mode
 from cteforge.services.library_io import export_library, import_library
 from cteforge.services.propose import propose_definition, revise_definition
-from cteforge.services.propose_other import propose_join, propose_recipe
+from cteforge.services.propose_other import propose_join
 
 EXAMPLES = Path(__file__).resolve().parents[3] / "examples"
 FIXED = dt.datetime(2026, 11, 16, 9, 30, tzinfo=dt.UTC)
@@ -121,9 +121,11 @@ def test_cte_joins_are_mined_through_pass_through_keys(ctx: AppContext) -> None:
     ad, di = ctx.store.get_join(AD), ctx.store.get_join(DI)
     assert (ad.left_table, ad.right_table, ad.join_type) == ("accounts", "deals", "inner")
     assert (di.left_table, di.right_table, di.join_type) == ("deals", "invoices", "left")
-    assert ad.state is DefinitionState.LLM_ANNOTATED and di.state is DefinitionState.LLM_ANNOTATED
+    # Mined edges are known automatically (ADR 0026) and name their sources.
+    assert ad.is_known() and di.is_known() and ad.sources == ["realization_rate"]
     _example(ctx, "booked_vs_collected")  # same two edges, now used by two definitions
     assert _usage(ctx) == {AD: 2, DI: 2}
+    assert ctx.store.get_join(AD).sources == ["booked_vs_collected", "realization_rate"]
 
 
 def test_computed_cte_keys_are_not_mined(ctx: AppContext) -> None:
@@ -145,7 +147,7 @@ def test_mined_usage_counts_are_recomputed(ctx: AppContext) -> None:
     assert _usage(ctx) == {AD: 1, DI: 1}
     edge = ctx.store.get_join(AD)
     assert edge.left_table == "accounts" and edge.right_table == "deals"
-    assert edge.state is DefinitionState.LLM_ANNOTATED and edge.join_type == "inner"
+    assert edge.is_known() and edge.join_type == "inner"
     _region(ctx)
     assert _usage(ctx) == {AD: 2, DI: 1}
     revise_definition(ctx, ALICE, id="region_bookings", base_version=1, sql=NO_JOIN_SQL)
@@ -154,70 +156,153 @@ def test_mined_usage_counts_are_recomputed(ctx: AppContext) -> None:
     assert _usage(ctx) == {AD: 1, DI: 1}
 
 
-# ── propose_join ──────────────────────────────────────────────────────────────────────
+# ── propose_join (ADR 0026: add | annotate) ───────────────────────────────────────────
 
 
-def test_propose_join_is_normalized_and_auto_applied(ctx: AppContext) -> None:
+def test_person_adds_an_edge_normalized_and_auto_applied(ctx: AppContext) -> None:
     out = propose_join(
         ctx,
-        BOT,
+        ALICE,
+        action="add",
         left_table="Deals",
         right_table="accounts",
         keys=[("Account_ID", "account_id")],
         join_type="left",
         relationship="many_to_one",
         traps=["closed deals only"],
+        notes="see the CRM docs",
         summary="deal → account",
     )
     assert out.auto_applied and out.proposal.kind is ProposalKind.NEW_JOIN
+    assert out.proposal.payload["action"] == "add"
     edge = ctx.store.get_join(AD)
     assert edge.left_table == "accounts" and edge.right_table == "deals"
     assert edge.join_type == "right" and edge.relationship == "one_to_many"
-    assert edge.traps == ["closed deals only"] and edge.usage_count == 0
+    assert edge.traps == ["closed deals only"] and edge.notes == "see the CRM docs"
+    assert edge.usage_count == 0 and edge.added_by == "alice" and edge.is_known()
+    # The relationship was checked on the warehouse; the evidence is stored.
+    evidence = out.proposal.payload["evidence"]
+    assert evidence["observed"] == "one_to_many" and evidence["consistent"] is True
+    assert evidence["left"]["rows"] == evidence["left"]["distinct_keys"]  # accounts: unique
+    assert edge.evidence is not None and edge.evidence.claimed == "one_to_many"
     _example(ctx, "booked_vs_collected")
     edge = ctx.store.get_join(AD)
     assert edge.usage_count == 1 and edge.relationship == "one_to_many"  # mining keeps it
+    assert edge.sources == ["booked_vs_collected"]
 
 
-def test_join_update_keeps_recomputed_usage(ctx: AppContext) -> None:
+def test_agent_added_edge_never_auto_applies_and_is_known_only_after_a_person(
+    ctx: AppContext,
+) -> None:
+    out = propose_join(
+        ctx, BOT, action="add", left_table="deals", right_table="invoices", keys=[("deal_id",) * 2]
+    )
+    assert out.issues == [] and not out.auto_applied  # open mode, checks pass: still waits
+    assert out.proposal.status is ProposalStatus.PENDING and ctx.store.get_join(DI) is None
+    # An agent approver's decision does not make it known.
+    review.approve(ctx, AGENT_APPROVER, out.proposal.id)
+    edge = ctx.store.get_join(DI)
+    assert edge.added_by == "bot" and edge.added_by_kind == "agent"
+    assert edge.confirmed_by is None and not edge.is_known()
+    again = propose_join(ctx, BOT, action="annotate", id=DI, notes="person please confirm")
+    assert again.auto_applied  # an annotation of an unconfirmed edge follows the usual rule
+    note = propose_join(ctx, BOT, action="annotate", id=DI, traps=["many invoices per deal"])
+    assert note.auto_applied
+    set_team_mode(ctx, TeamMode.STRICT)
+    waits = propose_join(ctx, BOT, action="annotate", id=DI, notes="x")
+    review.approve(ctx, APPROVER, waits.proposal.id)  # a person approves: confirmed, known
+    edge = ctx.store.get_join(DI)
+    assert edge.confirmed_by == "ann" and edge.is_known() and edge.notes == "x"
+    assert edge.traps == ["many invoices per deal"]
+
+
+def test_annotate_by_tables_and_keys_flips_relationship(ctx: AppContext) -> None:
     _example(ctx, "booked_vs_collected")
-    propose_join(
+    out = propose_join(
         ctx,
         ALICE,
+        action="annotate",
         left_table="invoices",
         right_table="deals",
         keys=[{"left": "deal_id", "right": "deal_id"}],
         relationship="many_to_one",
     )
+    assert out.auto_applied and out.proposal.payload["action"] == "annotate"
     edge = ctx.store.get_join(DI)
     assert edge.usage_count == 1 and edge.relationship == "one_to_many"
+    assert edge.sources == ["booked_vs_collected"]
 
 
-def test_verified_join_changes_wait_for_a_person(ctx: AppContext) -> None:
+def test_relationship_claim_contradicted_by_the_data(ctx: AppContext) -> None:
+    _example(ctx, "booked_vs_collected")
+    out = propose_join(ctx, ALICE, action="annotate", id=DI, relationship="one_to_one")
+    # invoices has several rows per deal: the "one" right side has duplicate keys.
+    assert [i.code for i in out.issues] == [IssueCode.RELATIONSHIP_CONTRADICTED]
+    assert not out.auto_applied and out.proposal.status is ProposalStatus.PENDING
+    evidence = out.proposal.payload["evidence"]
+    assert evidence["consistent"] is False and evidence["observed"] == "one_to_many"
+    assert evidence["right"]["rows"] > evidence["right"]["distinct_keys"]
+    with pytest.raises(PolicyError, match="failing checks"):
+        review.approve(ctx, APPROVER, out.proposal.id)
+    assert ctx.store.get_join(DI).relationship is None
+
+
+def test_annotate_and_add_refusals(ctx: AppContext) -> None:
+    from cteforge.domain.errors import NotFoundError
+
+    with pytest.raises(NotFoundError):
+        propose_join(ctx, ALICE, action="annotate", id="nope", notes="x")
+    with pytest.raises(NotFoundError, match="action='add'"):
+        propose_join(
+            ctx,
+            ALICE,
+            action="annotate",
+            left_table="deals",
+            right_table="accounts",
+            keys=[("account_id",) * 2],
+            notes="x",
+        )
+    _example(ctx, "booked_vs_collected")
+    with pytest.raises(PolicyError, match="annotate"):
+        propose_join(
+            ctx,
+            ALICE,
+            action="add",
+            left_table="deals",
+            right_table="accounts",
+            keys=[("account_id",) * 2],
+        )
+    with pytest.raises(PolicyError, match="Nothing to annotate"):
+        propose_join(ctx, ALICE, action="annotate", id=AD)
+    with pytest.raises(CodecError):
+        propose_join(ctx, ALICE, action="remove", id=AD)
+
+
+def test_confirmed_join_changes_wait_for_a_person(ctx: AppContext) -> None:
     set_team_mode(ctx, TeamMode.STRICT)
     first = propose_join(
-        ctx, BOT, left_table="deals", right_table="invoices", keys=[("deal_id", "deal_id")]
-    )
-    assert first.proposal.status is ProposalStatus.PENDING and ctx.store.get_join(DI) is None
-    review.approve(ctx, APPROVER, first.proposal.id, verify=True)
-    assert ctx.store.get_join(DI).state is DefinitionState.VERIFIED
-    set_team_mode(ctx, TeamMode.OPEN)
-    change = propose_join(
         ctx,
         BOT,
+        action="add",
         left_table="deals",
         right_table="invoices",
         keys=[("deal_id", "deal_id")],
-        traps=["x"],
     )
-    assert change.proposal.status is ProposalStatus.PENDING
+    assert first.proposal.status is ProposalStatus.PENDING and ctx.store.get_join(DI) is None
+    with pytest.raises(PolicyError, match="not verified"):
+        review.approve(ctx, APPROVER, first.proposal.id, verify=True)
+    review.approve(ctx, APPROVER, first.proposal.id)
+    assert ctx.store.get_join(DI).confirmed_by == "ann"
+    set_team_mode(ctx, TeamMode.OPEN)
+    change = propose_join(ctx, BOT, action="annotate", id=DI, traps=["x"])
+    assert change.proposal.status is ProposalStatus.PENDING  # confirmed: waits
     with pytest.raises(PermissionDeniedError):
         review.approve(ctx, AGENT_APPROVER, change.proposal.id)
     with pytest.raises(PermissionDeniedError):
         review.approve(ctx, ALICE, change.proposal.id)
     review.approve(ctx, APPROVER, change.proposal.id)
     edge = ctx.store.get_join(DI)
-    assert edge.traps == ["x"] and edge.state is DefinitionState.LLM_ANNOTATED
+    assert edge.traps == ["x"] and edge.confirmed_by == "ann"
 
 
 @pytest.mark.parametrize(
@@ -233,108 +318,23 @@ def test_verified_join_changes_wait_for_a_person(ctx: AppContext) -> None:
 def test_bad_join_input(ctx: AppContext, kwargs: dict[str, Any]) -> None:
     args = {"left_table": "deals", "right_table": "accounts", "keys": [("a", "b")]} | kwargs
     with pytest.raises(CodecError):
-        propose_join(ctx, ALICE, **args)
+        propose_join(ctx, ALICE, action="add", **args)
     assert ctx.store.list_proposals() == []
 
 
-# ── propose_recipe ────────────────────────────────────────────────────────────────────
+# ── composed definitions in the library files ─────────────────────────────────────────
 
-
-def _recipe(**over: Any) -> dict[str, Any]:
-    return {
-        "id": "rr_emea",
-        "title": "Realization EMEA",
-        "uses": {"rr": {"id": "realization_rate"}},
-        "values": {"rr": {"regions": ["EMEA"]}},
-        "dialect": "duckdb",
-    } | over
+COMPOSITION = {
+    "uses": {"rr": {"id": "realization_rate"}},
+    "select": "SELECT rr.month, rr.realization_rate FROM rr",
+    "fixed": {"rr": {"regions": ["EMEA"]}},
+}
 
 
 @pytest.fixture
 def with_rr(ctx: AppContext) -> AppContext:
     _example(ctx, "realization_rate", join_keys=["month", "region"])
     return ctx
-
-
-def test_valid_recipe_is_auto_applied_and_versioned(with_rr: AppContext) -> None:
-    ctx = with_rr
-    out = propose_recipe(ctx, BOT, recipe=_recipe(), summary="EMEA")
-    assert out.issues == [] and out.auto_applied
-    stored = ctx.store.get_recipe("rr_emea")
-    assert stored.version == 1 and stored.state is DefinitionState.LLM_ANNOTATED
-    again = propose_recipe(ctx, BOT, recipe=_recipe(title="RR EMEA"))
-    assert again.proposal.base_version == 1 and again.proposal.resulting_version == 2
-    assert ctx.store.get_recipe("rr_emea").title == "RR EMEA"
-
-
-def test_recipe_with_select_over_alias(with_rr: AppContext) -> None:
-    out = propose_recipe(
-        with_rr, ALICE, recipe=_recipe(select="SELECT rr.month, rr.realization_rate FROM rr")
-    )
-    assert out.issues == [] and out.auto_applied
-
-
-def _codes(out) -> set[IssueCode]:
-    return {i.code for i in out.issues if i.severity is Severity.ERROR}
-
-
-@pytest.mark.parametrize(
-    ("over", "code"),
-    [
-        ({"select": "SELECT x.month FROM rr"}, IssueCode.UNKNOWN_ALIAS),
-        ({"values": {"other": {"regions": ["EMEA"]}}}, IssueCode.UNKNOWN_ALIAS),
-        (
-            {"uses": {"Bad-Alias": {"id": "realization_rate"}}, "values": {}},
-            IssueCode.UNKNOWN_ALIAS,
-        ),
-        ({"uses": {"rr": {"id": "missing"}}}, IssueCode.NOT_FOUND),
-        ({"uses": {"rr": {"id": "realization_rate", "version": 9}}}, IssueCode.NOT_FOUND),
-        ({"values": {"rr": {"regions": "EMEA"}}}, IssueCode.RECIPE_INVALID),
-        ({"values": {"rr": {"nope": 1}}}, IssueCode.RECIPE_INVALID),
-        ({"select": "DELETE FROM rr"}, IssueCode.NOT_READ_ONLY),
-        ({"select": "SELECT nextval('s') FROM rr"}, IssueCode.NOT_READ_ONLY),
-        ({"select": "SELECT (1"}, IssueCode.RECIPE_INVALID),
-    ],
-)
-def test_invalid_recipes_wait_and_cannot_be_approved(
-    with_rr: AppContext, over: dict[str, Any], code: IssueCode
-) -> None:
-    ctx = with_rr
-    out = propose_recipe(ctx, ALICE, recipe=_recipe(**over))
-    assert code in _codes(out)
-    assert out.proposal.status is ProposalStatus.PENDING and not out.auto_applied
-    assert ctx.store.get_recipe("rr_emea") is None
-    with pytest.raises(PolicyError, match="failing checks"):
-        review.approve(ctx, APPROVER, out.proposal.id)
-
-
-def test_malformed_recipe_raises(with_rr: AppContext) -> None:
-    with pytest.raises(CodecError):
-        propose_recipe(with_rr, ALICE, recipe={"id": "x"})
-
-
-@pytest.mark.parametrize(
-    "reserved",
-    [{"state": "verified"}, {"version": 7}, {"schema_version": 99}],
-)
-def test_recipe_input_cannot_set_state_version_or_schema(
-    with_rr: AppContext, reserved: dict[str, Any]
-) -> None:
-    """Regression: these were accepted and silently ignored."""
-    (key,) = reserved
-    before = len(with_rr.store.list_proposals())
-    with pytest.raises(CodecError, match=f"'{key}'.*cannot be set by a proposal"):
-        propose_recipe(with_rr, ALICE, recipe=_recipe(**reserved))
-    assert len(with_rr.store.list_proposals()) == before
-
-
-def test_recipe_diff_against_previous_version(with_rr: AppContext) -> None:
-    ctx = with_rr
-    propose_recipe(ctx, ALICE, recipe=_recipe())
-    set_team_mode(ctx, TeamMode.STRICT)
-    out = propose_recipe(ctx, ALICE, recipe=_recipe(values={"rr": {"regions": ["NA"]}}))
-    view = review.get_proposal(ctx, VIEWER, out.proposal.id)
-    assert "--- rr_emea@v1" in view.diff and "+    - NA" in view.diff
 
 
 # ── library export / import ───────────────────────────────────────────────────────────
@@ -350,13 +350,20 @@ def _populate(ctx: AppContext) -> None:
     propose_join(
         ctx,
         ALICE,
+        action="annotate",
         left_table="invoices",
         right_table="deals",
         keys=[("deal_id", "deal_id")],
         relationship="many_to_one",
         traps=["one deal, many invoices"],
     )
-    propose_recipe(ctx, ALICE, recipe=_recipe())
+    propose_definition(
+        ctx,
+        ALICE,
+        composition=COMPOSITION,
+        dialect="duckdb",
+        metadata={"id": "rr_emea", "title": "Realization EMEA"},
+    )
 
 
 def test_export_is_deterministic_and_complete(ctx: AppContext, tmp_path: Path) -> None:
@@ -367,14 +374,19 @@ def test_export_is_deterministic_and_complete(ctx: AppContext, tmp_path: Path) -
     assert sorted(files) == [
         "definitions/booked_vs_collected.yml",
         "definitions/realization_rate.yml",
+        "definitions/rr_emea.yml",
         f"joins/{AD}.yml",
         f"joins/{DI}.yml",
-        "recipes/rr_emea.yml",
     ]
     assert len(written) == 5 and files == _files(tmp_path / "b")
+    composed = yaml.safe_load(files["definitions/rr_emea.yml"])
+    assert composed["schema_version"] == 2
+    assert composed["composition"]["uses"] == {"rr": {"id": "realization_rate"}}
+    assert composed["composition"]["fixed"] == {"rr": {"regions": ["EMEA"]}}
     join = yaml.safe_load(files[f"joins/{DI}.yml"])
     # Both definitions use deals<->invoices (realization_rate through its CTEs).
-    assert join["relationship"] == "one_to_many" and join["usage_count"] == 2
+    assert join["relationship"] == "one_to_many" and join["usage_count"] == 3
+    assert join["sources"] == ["booked_vs_collected", "realization_rate", "rr_emea"]
 
 
 def test_export_prune_removes_stale_files(ctx: AppContext, tmp_path: Path) -> None:
@@ -384,10 +396,13 @@ def test_export_prune_removes_stale_files(ctx: AppContext, tmp_path: Path) -> No
     stale.write_text("x")
     keep = tmp_path / "notes.yml"
     keep.write_text("mine")
+    legacy = tmp_path / "recipes" / "old.yml"
+    legacy.parent.mkdir(parents=True)
+    legacy.write_text("x")
     export_library(ctx, VIEWER, tmp_path)
-    assert stale.exists()
+    assert stale.exists() and legacy.exists()
     export_library(ctx, VIEWER, tmp_path, prune=True)
-    assert not stale.exists() and keep.exists()
+    assert not stale.exists() and not legacy.exists() and keep.exists()
 
 
 def test_import_round_trip_goes_through_proposals(warehouse_copy: Path, tmp_path: Path) -> None:
@@ -400,10 +415,12 @@ def test_import_round_trip_goes_through_proposals(warehouse_copy: Path, tmp_path
         assert kinds == [
             ProposalKind.NEW_DEFINITION,
             ProposalKind.NEW_DEFINITION,
-            ProposalKind.NEW_JOIN,
-            ProposalKind.NEW_RECIPE,
+            ProposalKind.NEW_JOIN,  # the annotation (the edge itself is mined)
+            ProposalKind.NEW_DEFINITION,  # the composed one, after its part
         ]
-        assert all(o.auto_applied and o.issues == [] for o in outcomes)
+        assert [o.proposal.payload.get("action") for o in outcomes][2] == "annotate"
+        assert all(o.auto_applied for o in outcomes)
+        assert target.store.get_definition("rr_emea").composition is not None
         assert {p.author for p in target.store.list_proposals()} == {"alice"}
         export_library(target, VIEWER, tmp_path / "again")
         assert _files(tmp_path / "again") == _files(tmp_path / "out")
@@ -456,13 +473,43 @@ def test_import_permissions_and_bad_files(ctx: AppContext, tmp_path: Path) -> No
         import_library(ctx, ALICE, tmp_path)
 
 
+def test_old_recipe_files_import_as_composed_definitions(
+    with_rr: AppContext, tmp_path: Path
+) -> None:
+    recipe = {
+        "schema_version": 1,
+        "id": "rr_emea",
+        "version": 3,
+        "title": "Realization EMEA",
+        "description": "EMEA only",
+        "uses": {"rr": {"id": "realization_rate"}},
+        "values": {"rr": {"regions": ["EMEA"]}},
+        "select": "SELECT rr.month, rr.realization_rate FROM rr",
+        "dialect": "duckdb",
+        "state": "verified",
+    }
+    (tmp_path / "recipes").mkdir()
+    (tmp_path / "recipes" / "rr_emea.yml").write_text(yaml.safe_dump(recipe))
+    [out] = import_library(with_rr, ALICE, tmp_path)
+    assert out.proposal.kind is ProposalKind.NEW_DEFINITION and out.auto_applied
+    stored = with_rr.store.get_definition("rr_emea")
+    assert stored.composition is not None and stored.meaning == "EMEA only"
+    assert stored.composition.fixed == {"rr": {"regions": ["EMEA"]}}
+    assert stored.state is DefinitionState.LLM_ANNOTATED  # never verified by a file
+
+
 # ── regressions (fixer pass) ──────────────────────────────────────────────────────────
 
 
 def test_join_on_missing_table_or_column_is_an_error_and_never_applies(ctx: AppContext) -> None:
     """Regression: join proposals ran no checks, so any edge auto-applied in open mode."""
     out = propose_join(
-        ctx, BOT, left_table="no_such_table", right_table="deals", keys=[["nope", "deal_id"]]
+        ctx,
+        ALICE,
+        action="add",
+        left_table="no_such_table",
+        right_table="deals",
+        keys=[["nope", "deal_id"]],
     )
     assert not out.auto_applied and out.proposal.status is ProposalStatus.PENDING
     assert [(i.code, i.severity) for i in out.issues] == [(IssueCode.NOT_FOUND, Severity.ERROR)]
@@ -470,7 +517,12 @@ def test_join_on_missing_table_or_column_is_an_error_and_never_applies(ctx: AppC
     with pytest.raises(PolicyError):
         review.approve(ctx, APPROVER, out.proposal.id)
     bad_key = propose_join(
-        ctx, BOT, left_table="accounts", right_table="deals", keys=[["account_id", "nope"]]
+        ctx,
+        ALICE,
+        action="add",
+        left_table="accounts",
+        right_table="deals",
+        keys=[["account_id", "nope"]],
     )
     assert [i.code for i in bad_key.issues] == [IssueCode.NOT_FOUND]
     assert "nope" in bad_key.issues[0].message and ctx.store.list_joins() == []
@@ -479,7 +531,12 @@ def test_join_on_missing_table_or_column_is_an_error_and_never_applies(ctx: AppC
 def test_join_without_a_warehouse_waits_for_review() -> None:
     with open_context(AppConfig(db_url="sqlite://"), clock=lambda: FIXED) as c:
         out = propose_join(
-            c, BOT, left_table="deals", right_table="accounts", keys=[["account_id"] * 2]
+            c,
+            ALICE,
+            action="add",
+            left_table="deals",
+            right_table="accounts",
+            keys=[["account_id"] * 2],
         )
         assert not out.auto_applied
         assert [i.code for i in out.issues] == [IssueCode.CHECKS_INCOMPLETE]
@@ -496,6 +553,7 @@ def test_older_join_proposal_is_stale_after_the_edge_changed(ctx: AppContext) ->
     p1 = propose_join(
         ctx,
         ALICE,
+        action="add",
         left_table="deals",
         right_table="accounts",
         keys=keys,
@@ -504,18 +562,19 @@ def test_older_join_proposal_is_stale_after_the_edge_changed(ctx: AppContext) ->
     p2 = propose_join(
         ctx,
         ALICE,
+        action="add",
         left_table="deals",
         right_table="accounts",
         keys=keys,
-        relationship="one_to_one",
+        relationship="many_to_one",
         traps=["x"],
     )
-    review.approve(ctx, APPROVER, p1.proposal.id, verify=True)
+    review.approve(ctx, APPROVER, p1.proposal.id)
     with pytest.raises(StaleVersionError) as info:
         review.approve(ctx, APPROVER, p2.proposal.id)
     assert [i.code for i in info.value.issues] == [IssueCode.STALE_BASE_VERSION]
     edge = ctx.store.get_join(AD)
-    assert edge.state is DefinitionState.VERIFIED and edge.relationship == "one_to_many"
+    assert edge.confirmed_by == "ann" and edge.relationship == "one_to_many"
     assert edge.traps == []
     assert review.get_proposal(ctx, APPROVER, p2.proposal.id).status is ProposalStatus.PENDING
 
@@ -552,9 +611,9 @@ def test_each_imported_proposal_is_audited_when_submitted(
     with _open(warehouse_copy) as target:
 
         def boom(*_a: Any, **_k: Any) -> Any:
-            raise CodecError("recipe step failed")
+            raise CodecError("composed step failed")
 
-        monkeypatch.setattr(_apply, "recipe_proposal", boom)
+        monkeypatch.setattr(_apply, "checked_composition", boom)
         with pytest.raises(CodecError):
             import_library(target, ALICE, tmp_path)
         applied = {d.id for d in target.store.list_definitions()}

@@ -170,7 +170,7 @@ def export(
         bool, typer.Option("--prune", help="Remove other *.yml files so DIR mirrors the library")
     ] = False,
 ) -> None:
-    """Write the library as YAML files (definitions/, recipes/, joins/) into DIRECTORY."""
+    """Write the library as YAML files (definitions/, joins/) into DIRECTORY."""
     with session() as (ctx, user):
         written = export_library(ctx, user, directory, prune=prune)
     for path in written:
@@ -198,23 +198,23 @@ def import_library_(
 
 @app.command()
 def references(id: str, as_json: JsonOpt = False) -> None:
-    """What inside cteforge uses definition ID (recipes, pending proposals, former IDs):
-    what a rename would update (ADR 0024)."""
+    """What inside cteforge uses definition ID (composed definitions built on it, pending
+    proposals, former IDs): what a rename would update (ADR 0024, 0026)."""
     with session() as (ctx, user):
         refs = describe.definition_references(ctx, user, id)
     if as_json:
         echo_json(refs)
         return
     typer.echo(f"{refs.id} v{refs.version} ({refs.state})")
-    if refs.recipes:
-        rows = [["RECIPE", "VERSION", "ALIAS", "USES"]]
-        for r in refs.recipes:
+    if refs.used_by:
+        rows = [["USED BY", "VERSION", "ALIAS", "USES"]]
+        for r in refs.used_by:
             uses = f"v{r.pinned_version} (pinned)" if r.pinned_version else "latest"
-            rows.append([r.recipe_id, f"v{r.recipe_version}", r.alias, uses])
+            rows.append([r.definition_id, f"v{r.definition_version}", r.alias, uses])
         typer.echo("")
         table(rows)
     else:
-        typer.echo("no recipes use it")
+        typer.echo("no composed definitions use it")
     if refs.proposals:
         rows = [["PROPOSAL", "KIND", "RELATION", "AUTHOR", "SUMMARY"]]
         for p in refs.proposals:

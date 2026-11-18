@@ -1,7 +1,8 @@
 import { Link, useParams } from "react-router-dom";
 import { getDefinition, getProposal } from "../api/endpoints";
-import type { DefinitionReferences, JoinEdge, ProposalView, Recipe } from "../api/types";
+import type { DefinitionReferences, JoinEdge, ProposalView, RelationshipEvidence } from "../api/types";
 import { Badge } from "../components/Badge";
+import { CompositionView } from "../components/CompositionView";
 import { DiffViewer } from "../components/DiffViewer";
 import { ErrorState } from "../components/ErrorState";
 import { ImpactList } from "../components/ImpactList";
@@ -10,8 +11,8 @@ import { JoinTable } from "../components/JoinTable";
 import { Loading } from "../components/Loading";
 import { PageHeader } from "../components/PageHeader";
 import { ProposalActions } from "../components/ProposalActions";
-import { RecipeSummary } from "../components/RecipeSummary";
 import { ReferencesList } from "../components/ReferencesList";
+import { RelationshipEvidenceView } from "../components/RelationshipEvidenceView";
 import { SqlViewer } from "../components/SqlViewer";
 import { formatDateTime } from "../lib/format";
 import { can, canApprove, DEFINITION_KINDS, type DecideTarget } from "../lib/roles";
@@ -57,14 +58,17 @@ export function ProposalPage() {
         }
       : null;
   const yaml = typeof p.payload.definition_yaml === "string" ? p.payload.definition_yaml : null;
-  // Recipe and join proposals carry the object itself (services/_apply.py payloads).
-  const recipe = p.kind === "new_recipe" && isObject(p.payload.recipe) ? (p.payload.recipe as unknown as Recipe) : null;
+  // Join proposals carry the edge itself, the action and the relationship evidence (ADR 0026).
   const join = p.kind === "new_join" && isObject(p.payload.join) ? (p.payload.join as unknown as JoinEdge) : null;
+  const joinAction = typeof p.payload.action === "string" ? p.payload.action : null;
+  const evidence = isObject(p.payload.evidence) ? (p.payload.evidence as unknown as RelationshipEvidence) : null;
+  // Legacy recipe proposals (removed by ADR 0026) only show their payload.
+  const legacyRecipe = p.kind === "new_recipe";
 
   return (
     <div className="page">
       <p className="small">
-        <Link to="/review">← Review queue</Link>
+        <Link to="/?review=mine">← Library: needs my review</Link>
       </p>
       <PageHeader
         title={p.summary || `${p.kind.replace(/_/g, " ")}: ${p.target_id}`}
@@ -106,10 +110,16 @@ export function ProposalPage() {
             <h2>Checks</h2>
             <IssueList issues={p.checks} emptyText="All checks passed." />
           </section>
-          {recipe && (
-            <section className="card" aria-label="Proposed recipe">
-              <h2>Recipe: {recipe.title}</h2>
-              <RecipeSummary recipe={recipe} />
+          {legacyRecipe && (
+            <p className="callout callout-info small" role="note">
+              A recipe proposal from before recipes became composed definitions (ADR 0026). Recipes no longer exist; it can't
+              be applied.
+            </p>
+          )}
+          {p.composition && (
+            <section aria-label="Proposed composition">
+              <h2 className="visually-hidden">Composition</h2>
+              <CompositionView composition={p.composition} label={p.target_id} />
             </section>
           )}
           {rename && (
@@ -119,7 +129,7 @@ export function ProposalPage() {
                 {rename.from} → {rename.to}
               </p>
               <p className="small muted">
-                No new version: every version, recipe and pending proposal that uses the ID moves to the new one. The
+                No new version: every version, composed definition and pending proposal that uses the ID moves to the new one. The
                 old ID stays searchable; looking it up fails with an error naming the new ID.
               </p>
               <h3 className="small">Used inside cteforge when proposed</h3>
@@ -134,11 +144,22 @@ export function ProposalPage() {
           )}
           {join && (
             <section className="card" aria-label="Proposed join">
-              <h2>Join</h2>
-              <JoinTable joins={[join]} label="Proposed join" />
+              <h2>{joinAction === "add" ? "New join" : joinAction === "annotate" ? "Join annotation" : "Join"}</h2>
+              {joinAction === "add" && p.author_kind === "agent" && (
+                <p className="muted small">
+                  Added by an agent: it never applies on its own and counts as known only once a person approves it.
+                </p>
+              )}
+              <JoinTable joins={[join]} label="Proposed edge" />
+              {evidence && (
+                <>
+                  <h3 className="small">Relationship check</h3>
+                  <RelationshipEvidenceView evidence={evidence} />
+                </>
+              )}
             </section>
           )}
-          {(p.diff || yaml || (!recipe && !join && !rename)) && (
+          {(p.diff || yaml || (!join && !rename)) && (
             <section>
               <h2>Diff</h2>
               {p.diff ? (
@@ -153,7 +174,7 @@ export function ProposalPage() {
         </div>
         <aside className="stack">
           <section className="card">
-            <h2>Impact</h2>
+            <h2>Used by</h2>
             <ImpactList impact={p.impact} />
           </section>
           <ProposalActions

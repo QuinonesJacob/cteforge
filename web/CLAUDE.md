@@ -14,14 +14,16 @@ React 18 + TypeScript (strict) + Vite GUI (ADR 0019). Talks only to the HTTP API
 - `src/lib/` — pure, framework-free logic (no React, no fetch, no DOM) so it is unit-testable:
   variable form values ↔ JSON, import variable-building rules (type suggestion, ADR 0015
   description rule), revise helpers (`revise.ts`: card → drafts/metadata, changed keys
-  only), composition/recipe run requests (`variableForm.ts`), diff line classification,
+  only), run requests (`variableForm.ts`), Library filters ⇄ URL ⇄ `GET /library` query
+  (`library.ts`, ADR 0026), join-map annotate/add requests (`joins.ts`), diff line classification,
   trust/state badge mapping, display-only SQL tokenizer, formatting helpers, permission
   checks (`roles.ts`, on the token's tools), the tool catalog and token/role form rules
   (`tools.ts`, ADR 0027), rename-form rules (`rename.ts`, ADR 0024).
 - `src/state/` — React context providers and hooks (auth, toasts, theme, async loading).
-- `src/pages/` — one file per route: SignIn, Library, Definition (Overview, Run, History,
-  Edit), Import (also revise mode: `/import?revise=<id>`), Explore (Recipes, Compose, Join
-  map, Tables, SQL), Review (list + detail), Audit, Settings, NotFound.
+- `src/pages/` — one file per route: SignIn, Library (`/`: definitions + the proposals
+  touching them, ADR 0026), Definition (Overview, Run, History, Edit), Import (also revise
+  mode: `/import?revise=<id>`), Join map (`/joins`), Proposal (`/review/:id`), Audit,
+  Settings, NotFound. `/review` redirects to `/?review=mine`, `/explore` to `/`.
 - `src/components/` — shared UI pieces, one component per file (SQL viewer, variable form,
   issue list, trust badge, diff viewer, literal table, …).
 - `src/styles/` — plain CSS: `tokens.css` (light/dark custom properties), `base.css`,
@@ -58,18 +60,42 @@ If something does not clearly fit one of the above, it does not belong here.
   Nothing else without a reason in this file.
 
 ## Contract notes (from services/cards.py)
-- Search (ADR 0023): `SearchHit.match` is keyword | meaning | both (null for an empty
-  query); `SearchHitCard` shows a "matched by meaning" badge for meaning-only hits; the
-  Library shows a hit's `note` (meaning search unavailable → keyword-only results) once.
-  The Playwright setup runs the server with `CTEFORGE_SEARCH_EMBEDDINGS=off` (tests never
-  download the model).
+- Library (ADR 0026): `GET /library?q=&trust=&approval=&created_by=&verified_by=
+  &needs_my_review=` (list params repeat) → `LibraryPage {rows, total, pending_count,
+  proposals_visible}`; filtering is server-side. `LibraryRow.version` null = a
+  new-definition proposal never applied ("Pending approval", links to `/review/:id`);
+  `pending` (ProposalBrief) become "Revision pending" / "Rename pending" badges linking to
+  the proposal; `composed` rows get a "composed" tag. Filters live in the URL
+  (`lib/library.ts`: `trust`, `approval` — absent = pending + approved, rejected and
+  withdrawn hidden —, `created`, `verified`, `review=mine`); approval filters only with
+  list_proposals, "Needs my review" only with review_proposal. The pending count badge sits
+  on the Library nav item. The Playwright setup runs the server with
+  `CTEFORGE_SEARCH_EMBEDDINGS=off`.
+- Composed definitions (ADR 0026): `DefinitionCard.composed`, `composition`
+  (`CompositionCard`: parts alias → id, `pinned_version` or latest, `superseded`, `usable`;
+  `fixed`; `open_variables`; `select`; `compiled_sql`), `used_by` (UsedByReference) and
+  `joins` ("joins to": JoinCard). `CompositionView` shows them on the Definition overview and
+  on a proposal (`ProposalView.composition`). A composed definition's `variables` are its
+  open ones named `<alias>.<var>`; the Run tab sends them as `values[<id>]["<alias>.<var>"]`
+  (alias = its id). Composed definitions are not created or re-composed in the GUI (agents
+  do that through MCP); the Edit tab offers metadata only, and Import's revise mode refuses
+  them. `ProposalView.impact` = ids of composed definitions using the target ("Used by").
+- Join map (ADR 0026): `GET /joins?table=&known_only=` → JoinCard (edge + `known`,
+  `confirmed`, `pending_proposals`; `sources`, `relationship`, `traps`, `notes`,
+  `evidence`). `POST /proposals/joins {action: "annotate", id, relationship?, traps?,
+  notes?, summary}` (only changed fields) or `{action: "add", left_table, right_table,
+  keys, join_type, relationship?, traps?, notes?, summary}`; forms only with propose_join.
+  Pending additions are proposals, not edges: the page lists them from
+  `GET /proposals?status=pending` (callers with list_proposals). Join proposals show
+  `payload.action` and `payload.evidence`; they are approved, never verified.
 - `DefinitionCard.history` may be null; `GET /audit` returns `AuditPage {events, limit, has_more}`;
   approve returns `ProposalOutcome`, reject/withdraw return `ProposalView` (the GUI reloads after
   any decision). `POST /users` → 201 `{user, token | null}` is normalized in `endpoints.ts`
   (`toCreatedUser`; token null when the caller is an agent).
 - `/run` body: `uses: {<id>: {id, version}}`, `values: {<id>: {...}}`, `run`, `limit`.
-- `/run` also takes `profile` and `question`; `GET /definitions` takes `limit` (the GUI sends
-  100; the API default is 10). `RunOutcome.used` lists each definition version with its
+- `/run` also takes `profile` and `question` (no `recipe_id`: recipes were removed by ADR
+  0026). The GUI no longer calls the search route (`GET /definitions?q=`); the Library uses
+  `GET /library`. `RunOutcome.used` lists each definition version with its
   state and verifier + date; the run result shows it.
 - Revise: `GET /definitions/{id}?include_source=true` adds `source_sql` (template rendered
   with its original values) and `annotations` (literal IDs addressing that SQL). The Edit
@@ -79,21 +105,21 @@ If something does not clearly fit one of the above, it does not belong here.
 - IDs (ADR 0024): on Import the ID follows the title and is read-only until "Edit ID"
   (`MetadataForm`; "Use title" locks it again); revise mode and the Edit tab keep it
   read-only. Renames: the Edit tab's "Rename ID" (`RenameIdPanel`) loads
-  `GET /definitions/{id}/references` (`DefinitionReferences`: recipes, pending proposals,
+  `GET /definitions/{id}/references` (`DefinitionReferences`: used_by, pending proposals,
   former_ids, outside_warning; shown by `ReferencesList`), and enables submit only when the
   new ID is valid, different and typed again exactly (`lib/rename.ts` `checkRename`); it
   sends `POST /proposals/definitions/{id}/rename {new_id, base_version, summary}`. Applied
-  at once → toast + navigate to the new ID; else "Rename proposal submitted". The Review
+  at once → toast + navigate to the new ID; else "Rename proposal submitted". The proposal
   page shows `rename_definition` proposals as from → to plus `payload.references` (no diff,
   no "also verify"). `DefinitionCard.former_ids` shows as "formerly …" in the header.
 - Permissions (ADR 0027): the unit is the tool. `GET /me` returns the signed-in token's
   effective `tools`, `review_all`, and its role's `role_allowed` / `role_defaults`;
   `lib/roles.ts` decides what to offer from them (`can(user, tool)`; a user object without
   `tools` falls back to the built-in role's, `lib/tools.ts` `BUILTIN_ROLE_TOOLS`, mirroring
-  domain/access.py; agents never verify outside the admin role). Nav: Import needs
-  parse_query + propose_definition, Review list_proposals (also the pending badge), Audit
-  view_audit, Settings everyone. Edit tab / revise mode: revise_definition (+ parse_query);
-  save recipe: propose_recipe. Approve/reject: review_proposal with review_all, or the
+  domain/access.py; agents never verify outside the admin role). Nav (ADR 0026): Library ·
+  Join map (list_joins) · Import (parse_query + propose_definition) · Audit (view_audit) ·
+  Settings (everyone); the Library's pending badge needs list_proposals. Edit tab / revise
+  mode: revise_definition (+ parse_query); join forms: propose_join. Approve/reject: review_proposal with review_all, or the
   target definition's owner holding review_proposal; changes to verified work: a person or
   an admin agent. Verify: the verify tool. Never a role-name check except the admin-role
   rules for agents and the four-eyes "human admin" exemption.
@@ -136,12 +162,6 @@ If something does not clearly fit one of the above, it does not belong here.
   selected profile (`defaultImportDialect`) until the person picks one; the hint
   (`connectionDialectHint`) says "From connection X." or that a different dialect is
   checked translated, lower trust. Revise mode keeps the card's source_dialect and profile.
-- Explore: `GET /recipes?q=&include_drafts=`, `GET /joins?table=&include_drafts=`,
-  `GET /tables?name=&name=&profile=` (array query values repeat the key), `POST /check
-  {sql, profile?, run, limit}`, `POST /run {recipe_id, values: {}, run, limit, profile?}`,
-  compose `POST /run {uses: {<alias>: {id, version?}}, values, select?, ...}`,
-  `POST /proposals/recipes {recipe: {id, title, description, uses, values, select?, dialect},
-  summary}`. Recipe/join proposals carry `payload.recipe` / `payload.join`.
 - The GUI's request bodies and the fields it reads are pinned by
   `tests/e2e/test_gui_contract.py` against the real API: change both together.
 - Parse report: `literals[].id` is `<scope>.L<n>` and `grains[].id` is `<scope>.G<n>`; both are
@@ -153,7 +173,8 @@ If something does not clearly fit one of the above, it does not belong here.
   verify to holders of the verify tool (agents: admin role only).
 - The pending badge shares one poller per tab (`state/usePendingCount.ts`) on
   `GET /proposals/count` (no diffs, not audited); still poll rarely and only while visible.
-  GET /proposals builds diffs and writes an audit event per call: the Review page only.
+  GET /proposals builds diffs and writes an audit event per call: only the Join map page
+  (pending additions) calls it.
 - Verify is offered only on the latest version of an `llm_annotated` definition; approval is
   disabled while checks have errors; "also verify" is disabled on `checks_incomplete`.
 - Four-eyes (ADR 0018 addendum, ADR 0027: no exemption for agents; `lib/roles.ts` `isOwnWork`, `versionAuthors` mirror
@@ -174,11 +195,14 @@ If something does not clearly fit one of the above, it does not belong here.
   env.sh values and `CTEFORGE_AUTH=on`, waits for `GET /api/v1/me` → 401, and creates the
   human approver `ben`; teardown stops the server (SIGINT) and deletes the temp dir
   (`E2E_KEEP_TMP=1` keeps it, with `serve.log`). Specs: sign-in, library search, run form
-  (+ validation), import → auto-apply → run, admin sets the default connection → Import starts on it, strict mode + review + four-eyes, audit
-  filters, theme toggle and 375px layout, Edit-tab and SQL revisions, Explore (compose →
-  save recipe → run recipe, join map, tables, exploratory SQL), rename ID (references →
-  typed confirmation → applied → old ID's "renamed to" error; recipe still runs; a pending
-  rename on the Review page), access (ADR 0027: admin creates a custom role in Settings →
+  (+ validation), import → auto-apply → run, admin sets the default connection → Import starts on it, strict mode + Library "needs my review" + four-eyes, audit
+  filters, theme toggle and 375px layout, Edit-tab and SQL revisions, the demo's composed
+  definition (parts, variables, compiled SQL, used by, run), rename ID (references →
+  typed confirmation → applied → old ID's "renamed to" error; the composed definition
+  using it still runs; a pending rename on its proposal page), Library filters (pending
+  approval, needs my review, created by, rejected hidden by default, `/review` redirect),
+  join map (a person annotates a mined edge — relationship evidence; an agent's added edge
+  waits, a person approves it → known + confirmed; a read-only token sees no forms), access (ADR 0027: admin creates a custom role in Settings →
   Roles; a person generates a narrow token in My tokens — shown once, copy — signs in with
   it, sees the nav follow its tools, revokes it and is signed out; admin creates an agent
   with the custom role, generates a token for it in Settings → Users, revokes it → 401).

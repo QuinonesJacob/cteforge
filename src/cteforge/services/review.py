@@ -3,12 +3,14 @@
 Permissions are tools (ADR 0027): list/get/count need list_proposals; approve/reject need
 review_proposal; verify needs verify; withdraw needs the build tool of the proposal's kind.
 
-- list/get: each proposal comes with a unified diff against its base and the impact
-  preview (ids of recipes using the target definition).
+- list/get: each proposal comes with a unified diff against its base, the impact
+  preview (ids of composed definitions using the target definition: "used by", ADR 0026)
+  and, for a composed definition, its parts and compiled SQL.
 - approve: review_proposal with review_all (built-in approver/admin), or the target
-  definition's owner (trust.approval.can_approve); recipes and joins need review_all.
-  Changes to a VERIFIED target (definition, recipe or join) need a human or an agent
-  with the admin role (ADR 0027). A proposal whose
+  definition's owner (trust.approval.can_approve); joins need review_all.
+  Changes to a VERIFIED target (a definition, or a join a person confirmed) need a human
+  or an agent with the admin role (ADR 0027). Approving a join by a person confirms the
+  edge (it becomes known); an agent's approval does not (ADR 0026). A proposal whose
   checks hold an error cannot be approved (PolicyError): revise it instead. The base version
   is re-checked: a target that moved on raises StaleVersionError (stale_base_version issue
   on `.issues`) and the proposal stays pending.
@@ -67,7 +69,7 @@ _KIND_TOOLS = {
     ProposalKind.NEW_DEFINITION: Tool.PROPOSE_DEFINITION,
     ProposalKind.REVISE_DEFINITION: Tool.REVISE_DEFINITION,
     ProposalKind.RENAME_DEFINITION: Tool.REVISE_DEFINITION,
-    ProposalKind.NEW_RECIPE: Tool.PROPOSE_RECIPE,
+    ProposalKind.NEW_RECIPE: Tool.PROPOSE_DEFINITION,  # legacy (ADR 0026)
     ProposalKind.NEW_JOIN: Tool.PROPOSE_JOIN,
 }
 
@@ -102,8 +104,8 @@ def _target(ctx: AppContext, proposal: Proposal) -> _Target:
 
 
 def _require_decide(user: User, proposal: Proposal, target: _Target) -> None:
-    """Approve/reject permission: can_approve on the target definition; for recipes and
-    joins review_all, and a human or an admin agent when the target is verified."""
+    """Approve/reject permission: can_approve on the target definition; for joins
+    review_all, and a human or an admin agent when the edge is confirmed."""
     if proposal.kind in _DEFINITION_KINDS:
         require(user, Tool.REVIEW_PROPOSAL, target.definition)
         return

@@ -29,21 +29,25 @@ If something does not clearly fit one of the above, it does not belong here.
 ## Routes (all under /api/v1, JSON)
 GET /me → MeCard {name, role, kind, active, created_at, tools, review_all, role_allowed,
 role_defaults, token_id, token_expires_at, token_mode (the session's token; null without)} · GET /tools → ToolInfo[] {name, group, admin_only} · GET /profiles (name, dialect, `default` = the effective default connection; only these) ·
-GET /definitions?q=&include_drafts=&limit= · GET /definitions/{id}?version=&include_source= (adds `source_sql` + `annotations`, for revising) ·
+GET /library?q=&trust=&approval=&created_by=&verified_by=&needs_my_review= → LibraryPage
+(ADR 0026; tool `search`; proposal rows/badges only with list_proposals; needs_my_review
+needs review_proposal) ·
+GET /definitions?q=&include_drafts=&limit= · GET /definitions/{id}?version=&include_source= (adds `source_sql` + `annotations`, for revising; card has composed, composition, used_by, joins) ·
 GET /definitions/{id}/history · GET /definitions/{id}/references → DefinitionReferences
-(recipes, pending proposals, former_ids, outside_warning; ADR 0024) ·
+(used_by, pending proposals, former_ids, outside_warning; ADR 0024, 0026) ·
 GET /definitions/{id}/search-document?version= →
 SearchDocument {id, version, markdown} (ADR 0023) · POST /definitions/{id}/verify {version} ·
 POST /parse {sql, dialect?, profile?} (dialect omitted → the profile's, else the default connection's; ADR 0021) ·
-POST /run {uses? | recipe_id?, values, select?, dialect?, profile?, run, limit, question?} ·
+POST /run {uses, values, select?, dialect?, profile?, run, limit, question?} ·
 POST /check {sql, profile?, run, limit, question?} · POST /revalidate {ids?} ·
-POST /proposals/definitions {sql, dialect?, metadata, annotations, profile?, summary} ·
-POST /proposals/definitions/{id}/revise {base_version, sql?, metadata?, annotations?, summary} ·
+POST /proposals/definitions {sql | composition, dialect?, metadata, annotations?, profile?, summary} ·
+POST /proposals/definitions/{id}/revise {base_version, sql? | composition?, metadata?, annotations?, summary} ·
 POST /proposals/definitions/{id}/rename {new_id, base_version?, summary} (ADR 0024) ·
-POST /proposals/joins · POST /proposals/recipes ·
+POST /proposals/joins {action: annotate (default) | add, id?, left_table?, right_table?,
+keys?, join_type?, relationship?, traps?, notes?, summary} ·
 GET /proposals?status= · GET /proposals/count?status= (cheap, not audited; for the nav badge) · GET /proposals/{id} · POST /proposals/{id}/approve {verify, comment} ·
 POST /proposals/{id}/reject {comment} · POST /proposals/{id}/withdraw ·
-GET /recipes?q=&include_drafts= · GET /joins?table=&include_drafts= ·
+GET /joins?table=&known_only=&definition= → JoinCard[] ·
 GET /tables?name=&name=&profile= · GET /audit?actor=&kind=&definition_id=&limit= ·
 GET /users → UserView[] (role, kind, active, tokens' metadata — never values) ·
 POST /users {name, role, kind} → 201 {user, token | null} (a "default" token, once, only
@@ -60,7 +64,7 @@ effective_default_connection, issues} · PUT /settings {mode?, default_connectio
 (admin; only the fields given change, at least one; `default_connection` first — an unknown
 profile → 404 — then `mode`, each its own audited service call).
 /proposals/count
-→ {count}. GET /recipes, /joins and /tables call services/catalog.py.
+→ {count}. GET /joins and /tables call services/catalog.py; GET /library services/library.py.
 Errors: `{"error": {"type": <ErrorClass>, "message": str, "issues": [Issue]}}` with
 PermissionDenied 403 · NotFound 404 · VariableValue/Annotation/Render/SqlParse/Codec 422 ·
 StaleVersion/Policy 409 · Warehouse 502 · missing/invalid token 401 (WWW-Authenticate) ·

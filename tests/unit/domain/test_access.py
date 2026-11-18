@@ -33,14 +33,12 @@ def test_catalog_names_match_the_addendum() -> None:
         "check_and_run",
         "describe_tables",
         "list_joins",
-        "list_recipes",
     ]
     assert [t.value for t in TOOL_GROUPS[ToolGroup.BUILD]] == [
         "parse_query",
         "propose_definition",
         "revise_definition",
         "propose_join",
-        "propose_recipe",
     ]
     assert [t.value for t in TOOL_GROUPS[ToolGroup.REVIEW]] == [
         "list_proposals",

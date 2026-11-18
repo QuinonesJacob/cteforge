@@ -6,6 +6,11 @@ Project root: ../../../CLAUDE.md
 ## What belongs here (authoritative)
 - `assemble.py` — `compose()`: CTE hoisting/renaming, WITH assembly, dependency order.
 - `checks.py` — final-SELECT validation, join-key and grain (fan-out) checks between parts.
+- `relationship.py` — ADR 0026: the counting query that checks a join's relationship claim
+  (`relationship_query(table, keys, dialect)`: rows with every key set vs distinct key
+  tuples, built from sqlglot identifiers only — no values, no text splicing; a table name
+  has 1–3 dotted parts, a key one column), and the pure rules `side`, `relationship_of`,
+  `claimed_sides`, `consistent` (every side the claim calls "one" is unique in the data).
 
 If something does not clearly fit one of the above, it does not belong here.
 "Not forbidden" is not the same as "allowed."

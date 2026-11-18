@@ -2,9 +2,12 @@ import { describe, expect, it } from "vitest";
 import { ADMIN_ONLY_TOOLS, ALL_TOOLS, BUILTIN_ROLE_TOOLS, cleanRole, expiryFromDate, expiryWithin, groupCatalog, utcDate, sortTools, tokenToolsRequest, toolSummary } from "./tools";
 
 describe("tool catalog", () => {
-  it("mirrors domain/access.py: 20 tools in four groups, admin-only tools in admin", () => {
-    expect(ALL_TOOLS).toHaveLength(20);
-    expect(new Set(ALL_TOOLS).size).toBe(20);
+  it("mirrors domain/access.py: 18 tools in four groups, admin-only tools in admin", () => {
+    expect(ALL_TOOLS).toHaveLength(18);
+    expect(new Set(ALL_TOOLS).size).toBe(18);
+    // ADR 0026 removed recipes.
+    expect(ALL_TOOLS as string[]).not.toContain("list_recipes");
+    expect(ALL_TOOLS as string[]).not.toContain("propose_recipe");
     const groups = groupCatalog(null);
     expect(groups.map((g) => g.group)).toEqual(["use", "build", "review", "admin"]);
     expect(groups.find((g) => g.group === "admin")!.tools.filter((t) => t.admin_only).map((t) => t.name)).toEqual(
@@ -27,7 +30,7 @@ describe("tool catalog", () => {
   });
 
   it("summarizes coverage per group", () => {
-    expect(toolSummary(BUILTIN_ROLE_TOOLS.viewer)).toBe("Use 7/7 · Review 1/3");
+    expect(toolSummary(BUILTIN_ROLE_TOOLS.viewer)).toBe("Use 6/6 · Review 1/3");
     expect(toolSummary([])).toBe("No tools");
   });
 });

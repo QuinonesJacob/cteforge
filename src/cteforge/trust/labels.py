@@ -27,7 +27,12 @@ STRICT_USABLE = frozenset({TrustLabel.VERIFIED, TrustLabel.BUILT_FROM_VERIFIED})
 class TrustInputs(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    definition_states: list[DefinitionState]  # one per definition used; [] for raw SQL
+    definition_states: list[DefinitionState]  # one per SQL definition used; [] for raw SQL
+    # ADR 0026: the OWN state of each composed definition used (its parts' states are in
+    # definition_states). Verified → its final SELECT and choice of parts were reviewed by
+    # a person; llm_annotated → like an agent-written final SELECT
+    # (built_from_verified_parts at best); draft → not usable.
+    composed_states: list[DefinitionState] = Field(default_factory=list)
     raw_sql: bool = False  # check_and_run
     has_select: bool = False  # an agent-written final SELECT
     joins_known: bool = True  # every join in agent-written SQL is known
@@ -66,7 +71,11 @@ def _unique(issues: list[Issue]) -> list[Issue]:
 def assess(inputs: TrustInputs) -> TrustResult:
     label = TrustLabel.VERIFIED
     reasons: list[str] = []
-    states = inputs.definition_states
+    states = [*inputs.definition_states, *inputs.composed_states]
+    # A composed definition no person has verified combines its parts the way an agent's
+    # final SELECT does (ADR 0026): same cap, same rule for unknown joins.
+    unreviewed_composition = any(s is not DefinitionState.VERIFIED for s in inputs.composed_states)
+    has_select = inputs.has_select or unreviewed_composition
 
     # Base: agent-written raw SQL, or definitions used as-is.
     if inputs.raw_sql or not states:
@@ -82,8 +91,14 @@ def assess(inputs: TrustInputs) -> TrustResult:
     if inputs.has_select and not inputs.raw_sql and states:
         label = _worse(label, TrustLabel.BUILT_FROM_VERIFIED)
         reasons.append("An agent-written final SELECT combines the definitions.")
+    if unreviewed_composition and not inputs.raw_sql:
+        label = _worse(label, TrustLabel.BUILT_FROM_VERIFIED)
+        reasons.append(
+            "Uses a composed definition no person has verified as a whole (its parts are "
+            "labeled on their own)."
+        )
 
-    if DefinitionState.LLM_ANNOTATED in states:
+    if DefinitionState.LLM_ANNOTATED in inputs.definition_states:
         label = _worse(label, TrustLabel.LLM_ANNOTATED)
         reasons.append("Uses a definition that passed checks but no person has reviewed.")
 
@@ -95,7 +110,7 @@ def assess(inputs: TrustInputs) -> TrustResult:
     if any(i.code is IssueCode.UNKNOWN_JOIN for i in unique_issues):
         label = TrustLabel.EXPLORATORY
         reasons.append("Joins on keys that aren't in the join map.")
-    elif inputs.has_select and not inputs.joins_known and not inputs.raw_sql:
+    elif has_select and not inputs.joins_known and not inputs.raw_sql:
         label = TrustLabel.EXPLORATORY
         reasons.append("The final SELECT joins on keys that aren't known.")
 

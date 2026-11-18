@@ -16,20 +16,25 @@ No permission checks and no audit events of its own: callers `require` and recor
   omitted dialect → the connection's: the profile passed, else the default connection).
 - Definition lookup by id (ADR 0024): `get_definition` / `definition_not_found` — the ONE
   place a missing id becomes a NotFoundError, so a former id (renamed) fails naming the
-  current id in every caller (describe, history, run, recipes, verify, revise,
+  current id in every caller (describe, history, run, compositions, verify, revise,
   revalidate); `check_id_available` refuses a new id that exists or is another
-  definition's former id; `definition_references` lists what inside cteforge uses an id.
+  definition's former id; `definition_references` lists what inside cteforge uses an id
+  (composed definitions using it — "used by", ADR 0026 — and pending proposals).
 """
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from typing import Any
 
-from cteforge.domain.codec import AnnotationFile
+from cteforge.compose.assemble import ComposedQuery
+from cteforge.domain.access import Tool
+from cteforge.domain.codec import AnnotationFile, definition_from_yaml
 from cteforge.domain.dialects import Dialect
 from cteforge.domain.errors import CteforgeError, NotFoundError, PolicyError
+from cteforge.domain.issues import Issue, IssueCode, Severity
 from cteforge.domain.models import (
+    JOIN_TYPES,
     Annotation,
     Definition,
     DefinitionState,
@@ -38,12 +43,15 @@ from cteforge.domain.models import (
     JoinKey,
     TeamMode,
 )
-from cteforge.domain.proposals import DEFINITION_KINDS, ProposalStatus
+from cteforge.domain.proposals import DEFINITION_KINDS, ProposalKind, ProposalStatus
+from cteforge.domain.users import User
 from cteforge.parsing.analyze import analyze
+from cteforge.services.auth import permitted
 from cteforge.services.cards import (
     DefinitionReferences,
+    JoinCard,
     ProposalReference,
-    RecipeReference,
+    UsedByReference,
 )
 from cteforge.services.context import AppContext
 from cteforge.templating.render import render
@@ -136,37 +144,56 @@ OUTSIDE_WARNING = (
 )
 
 
-def definition_references(ctx: AppContext, definition: Definition) -> DefinitionReferences:
-    """Everything stored in cteforge that names `definition`'s id (ADR 0024): recipes (their
-    latest version; which alias, pinned version or floating) and pending proposals that
-    target it or whose recipe uses it. Join-map edges name tables, not definitions, and
-    audit events are history (never rewritten), so neither is listed."""
-    id = definition.id
-    recipes = [
-        RecipeReference(
-            recipe_id=recipe.id,
-            recipe_version=recipe.version,
-            title=recipe.title,
-            state=recipe.state,
+def used_by(ctx: AppContext, id: str) -> list[UsedByReference]:
+    """Composed definitions (latest versions) that use definition `id` as a part, one row
+    per alias: what a change to it reaches (floating parts) or does not (pinned)."""
+    return [
+        UsedByReference(
+            definition_id=composed.id,
+            definition_version=composed.version,
+            title=composed.title,
+            state=composed.state,
             alias=alias,
             pinned_version=ref.version,
         )
-        for recipe in ctx.store.recipes_using(id)
-        for alias, ref in sorted(recipe.uses.items())
+        for composed in ctx.store.definitions_using(id)
+        if composed.composition is not None
+        for alias, ref in sorted(composed.composition.uses.items())
         if ref.id == id
     ]
+
+
+def _proposal_uses(payload: dict[str, Any], id: str) -> bool:
+    """A definition proposal whose (composed) definition uses `id` as a part; or a legacy
+    recipe proposal using it."""
+    text = payload.get("definition_yaml")
+    if isinstance(text, str):
+        try:
+            return definition_from_yaml(text).uses_definition(id)
+        except CteforgeError:
+            return False
+    recipe = payload.get("recipe")
+    uses = recipe.get("uses") if isinstance(recipe, dict) else None
+    return isinstance(uses, dict) and any(
+        isinstance(ref, dict) and ref.get("id") == id for ref in uses.values()
+    )
+
+
+def definition_references(ctx: AppContext, definition: Definition) -> DefinitionReferences:
+    """Everything stored in cteforge that names `definition`'s id (ADR 0024, 0026): the
+    composed definitions using it (`used_by`: which alias, pinned or floating) and pending
+    proposals that target it or whose composed definition uses it. Join-map edges name
+    tables (their `sources` are refreshed after a rename), and audit events are history
+    (never rewritten), so neither is listed."""
+    id = definition.id
     proposals: list[ProposalReference] = []
     for p in ctx.store.list_proposals(ProposalStatus.PENDING):
         if p.kind in DEFINITION_KINDS and p.target_id == id:
             relation = "target"
-        else:
-            recipe = p.payload.get("recipe")
-            uses = recipe.get("uses") if isinstance(recipe, dict) else None
-            if not isinstance(uses, dict) or not any(
-                isinstance(ref, dict) and ref.get("id") == id for ref in uses.values()
-            ):
-                continue
+        elif _proposal_uses(p.payload, id):
             relation = "uses"
+        else:
+            continue
         proposals.append(
             ProposalReference(
                 proposal_id=p.id,
@@ -182,7 +209,7 @@ def definition_references(ctx: AppContext, definition: Definition) -> Definition
         id=id,
         version=definition.version,
         state=definition.state,
-        recipes=recipes,
+        used_by=used_by(ctx, id),
         proposals=proposals,
         former_ids=ctx.store.former_ids(id),
         outside_warning=OUTSIDE_WARNING,
@@ -225,7 +252,11 @@ def newest_in_states(
 
 def original_sql(definition: Definition) -> str:
     """The trusted query reconstructed: the template rendered with its original values in
-    its source dialect (formatting normalized; same AST as the original)."""
+    its source dialect (formatting normalized; same AST as the original). For a composed
+    definition (ADR 0026) it is its final SELECT over the part aliases ("" when it has
+    none); its whole compiled SQL comes from services/_compose.py."""
+    if definition.composition is not None and not definition.template.strip():
+        return ""
     return render(definition, {}).sql
 
 
@@ -265,8 +296,6 @@ def annotation_file(definition: Definition) -> AnnotationFile:
 
 # ── Join map ─────────────────────────────────────────────────────────────────────────
 
-JOIN_TYPES = ("inner", "left", "right", "full")
-RELATIONSHIPS = ("one_to_one", "one_to_many", "many_to_one", "many_to_many")
 _FLIPPED = {
     "left": "right",
     "right": "left",
@@ -300,7 +329,7 @@ def canonical_edge(
         pairs = [(b, a) for a, b in pairs]
         jt = _FLIPPED.get(jt, jt)
         if fields.get("relationship") is not None:
-            fields["relationship"] = _FLIPPED.get(fields["relationship"], fields["relationship"])
+            fields["relationship"] = flip_relationship(fields["relationship"])
     key_models = [JoinKey(left=a, right=b) for a, b in sorted(set(pairs))]
     return JoinEdge(
         id=join_edge_id(lt, rt, key_models),
@@ -312,13 +341,21 @@ def canonical_edge(
     )
 
 
-def mined_edges(definition: Definition) -> list[JoinEdge]:
-    """Joins between two base tables in the definition's SQL, also through CTEs / derived
-    tables whose key columns pass through unchanged from one base table (JoinInfo's
-    `*_base_table` / `base_keys`); a join through CTEs that lands on one table on both sides
-    is skipped. Empty when it can't be rendered or analyzed (mining is best-effort)."""
+def flip_relationship(relationship: str) -> str:
+    return _FLIPPED.get(relationship, relationship)
+
+
+def mined_edges(definition: Definition, sql: str | None = None) -> list[JoinEdge]:
+    """Joins between two base tables in the definition's SQL (`sql`, else its original
+    query), also through CTEs / derived tables whose key columns pass through unchanged
+    from one base table (JoinInfo's `*_base_table` / `base_keys`); a join through CTEs that
+    lands on one table on both sides is skipped. A composed definition is mined only from
+    its compiled SQL (`sql`; its final SELECT alone names aliases, not tables): without
+    it, nothing. Empty when it can't be rendered or analyzed (mining is best-effort)."""
+    if sql is None and definition.composition is not None:
+        return []
     try:
-        analysis = analyze(original_sql(definition), definition.source_dialect)
+        analysis = analyze(sql or original_sql(definition), definition.source_dialect)
     except CteforgeError:
         return []
     tables = {t.lower() for t in analysis.tables}
@@ -339,23 +376,38 @@ def mined_edges(definition: Definition) -> list[JoinEdge]:
     return list(edges.values())
 
 
-def refresh_join_map(ctx: AppContext, mined_from: Definition | None = None) -> None:
-    """Upsert edges mined from `mined_from` (new ones as llm_annotated) and recompute
-    `usage_count` of every edge: distinct latest definitions whose SQL uses it."""
-    usage: dict[str, int] = {}
+SqlOf = Callable[[Definition], str | None]
+
+
+def refresh_join_map(ctx: AppContext, sql_of: SqlOf | None = None) -> None:
+    """Mine every latest definition (ADR 0026: composed ones from their compiled SQL,
+    `sql_of`), insert edges not in the map yet, and recompute each edge's `sources`
+    (definition ids whose SQL contains it) and `usage_count`. Annotations, who added and
+    who confirmed an edge are kept. Mining never fails a caller."""
+    sources: dict[str, set[str]] = {}
+    mined: dict[str, JoinEdge] = {}
     for definition in ctx.store.list_definitions():
-        for edge in mined_edges(definition):
-            usage[edge.id] = usage.get(edge.id, 0) + 1
-    if mined_from is not None:
-        for edge in mined_edges(mined_from):
-            if ctx.store.get_join(edge.id) is None:
-                ctx.store.upsert_join(
-                    edge.model_copy(update={"usage_count": usage.get(edge.id, 0)})
-                )
-    for edge in ctx.store.list_joins():
-        count = usage.get(edge.id, 0)
-        if edge.usage_count != count:
-            ctx.store.upsert_join(edge.model_copy(update={"usage_count": count}))
+        sql = sql_of(definition) if sql_of is not None and definition.composition else None
+        for edge in mined_edges(definition, sql):
+            sources.setdefault(edge.id, set()).add(definition.id)
+            mined.setdefault(edge.id, edge)
+    stored = {e.id: e for e in ctx.store.list_joins()}
+    for id, edge in mined.items():
+        if id not in stored:
+            ctx.store.upsert_join(edge)
+            stored[id] = edge
+    for edge in stored.values():
+        found = sorted(sources.get(edge.id, ()))
+        if edge.sources != found or edge.usage_count != len(found):
+            ctx.store.upsert_join(
+                edge.model_copy(update={"sources": found, "usage_count": len(found)})
+            )
+
+
+def known_edges(ctx: AppContext) -> list[JoinEdge]:
+    """Join-map edges that count as known for trust labels (ADR 0026): mined from a
+    definition, added by a person, or confirmed by a person."""
+    return [e for e in ctx.store.list_joins() if e.is_known()]
 
 
 def same_table(a: str, b: str) -> bool:
@@ -385,3 +437,74 @@ def matching_edge(
         if (forward and pairs == edge_pairs) or (backward and flipped == edge_pairs):
             return edge
     return None
+
+
+def describe_keys(keys: Iterable[tuple[str, str]]) -> str:
+    return " AND ".join(f"{a} = {b}" for a, b in keys) or "no equality keys"
+
+
+def final_select_joins(
+    composed: ComposedQuery, aliases: set[str], edges: list[JoinEdge]
+) -> tuple[bool, list[Issue]]:
+    """(joins_known, unknown_join issues for raw-table joins) of a final SELECT over
+    aliases (an agent's, or a composed definition's). Alias↔alias joins were already
+    checked by compose (it reports their unknown_join issues itself). A join with a
+    raw-table side is known only when a known edge matches it; a raw table read outside
+    any known join also makes joins unknown."""
+    known = True
+    issues: list[Issue] = []
+    covered: set[str] = set()
+    for join in composed.joins:
+        left, right = join.left.lower(), join.right.lower()
+        if left in aliases and right in aliases:
+            known = known and join.known
+            continue
+        if matching_edge(join.left, join.right, join.keys, edges) is None:
+            known = False
+            issues.append(
+                Issue(
+                    code=IssueCode.UNKNOWN_JOIN,
+                    severity=Severity.WARNING,
+                    message=(
+                        f"Join between '{join.left}' and '{join.right}' "
+                        f"({describe_keys(join.keys)}) is not in the join map. Check the "
+                        "relationship before trusting the result, or propose the join."
+                    ),
+                )
+            )
+        else:
+            covered |= {left, right}
+    loose = [t for t in composed.raw_tables if not any(same_table(t, c) for c in covered)]
+    if loose:
+        known = False
+        issues.append(
+            Issue(
+                code=IssueCode.UNKNOWN_JOIN,
+                severity=Severity.WARNING,
+                message=(
+                    f"The final SELECT reads table(s) {loose} outside any known join; the "
+                    "result is not built only from the definitions."
+                ),
+            )
+        )
+    return known, issues
+
+
+def join_cards(ctx: AppContext, user: User, edges: Sequence[JoinEdge]) -> list[JoinCard]:
+    """Edges as JoinCards: known, confirmed (a person approved it, or a source definition
+    is verified) and, for callers who may list proposals, the pending proposals on it."""
+    verified = {d.id for d in ctx.store.list_definitions({DefinitionState.VERIFIED})}
+    pending: dict[str, list[str]] = {}
+    if permitted(user, Tool.LIST_PROPOSALS):
+        for p in ctx.store.list_proposals(ProposalStatus.PENDING):
+            if p.kind is ProposalKind.NEW_JOIN:
+                pending.setdefault(p.target_id, []).append(p.id)
+    return [
+        JoinCard(
+            **e.model_dump(),
+            known=e.is_known(),
+            confirmed=e.confirmed_by is not None or any(s in verified for s in e.sources),
+            pending_proposals=pending.get(e.id, []),
+        )
+        for e in edges
+    ]

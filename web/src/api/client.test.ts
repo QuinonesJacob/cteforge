@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ApiError, buildUrl, onUnauthorized, parseErrorBody, request } from "./client";
-import { createToken, createUser, revokeToken, searchDefinitions, toAuditPage, toCreatedUser } from "./endpoints";
+import { createToken, createUser, listLibrary, revokeToken, toAuditPage, toCreatedUser } from "./endpoints";
 import { clearToken, getToken, setToken } from "./token";
 
 function mockFetch(status: number, body: unknown) {
@@ -79,10 +79,14 @@ describe("JSON bodies and query strings", () => {
     );
   });
 
-  it("search passes q and include_drafts", async () => {
-    const fetchFn = mockFetch(200, []);
-    await searchDefinitions("revenue by month", true);
-    expect(fetchFn.mock.calls[0]?.[0]).toBe("/api/v1/definitions?q=revenue+by+month&include_drafts=true&limit=100");
+  it("library repeats list filters and drops empty ones", async () => {
+    const fetchFn = mockFetch(200, { rows: [], total: 0, pending_count: 0, proposals_visible: true });
+    await listLibrary({ q: "revenue by month", trust: ["verified", "draft"], created_by: ["agent"], needs_my_review: true });
+    expect(fetchFn.mock.calls[0]?.[0]).toBe(
+      "/api/v1/library?q=revenue+by+month&trust=verified&trust=draft&created_by=agent&needs_my_review=true",
+    );
+    await listLibrary({});
+    expect(fetchFn.mock.calls[1]?.[0]).toBe("/api/v1/library");
   });
 });
 

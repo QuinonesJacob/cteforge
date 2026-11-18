@@ -37,18 +37,30 @@ from sqlalchemy.engine import make_url
 from sqlalchemy.exc import ArgumentError, IntegrityError, NoSuchModuleError, SQLAlchemyError
 from sqlalchemy.pool import StaticPool
 
-from cteforge.domain.access import BUILTIN_ROLES, Role, TokenInfo, Tool, ToolMode, sorted_tools
-from cteforge.domain.codec import definition_from_yaml, definition_to_yaml
-from cteforge.domain.errors import StaleVersionError, StoreError
+from cteforge.domain.access import (
+    BUILTIN_ROLES,
+    REMOVED_TOOLS,
+    Role,
+    TokenInfo,
+    Tool,
+    ToolMode,
+    sorted_tools,
+)
+from cteforge.domain.codec import definition_from_recipe, definition_from_yaml, definition_to_yaml
+from cteforge.domain.errors import CodecError, StaleVersionError, StoreError
 from cteforge.domain.models import (
     Definition,
     DefinitionState,
     DefinitionVersionInfo,
     FormerId,
     JoinEdge,
-    Recipe,
 )
-from cteforge.domain.proposals import Proposal, ProposalStatus, proposal_with_definition_renamed
+from cteforge.domain.proposals import (
+    Proposal,
+    ProposalKind,
+    ProposalStatus,
+    proposal_with_definition_renamed,
+)
 from cteforge.domain.search import SearchVector
 from cteforge.domain.users import ActorKind, User
 from cteforge.store import tables as t
@@ -138,6 +150,193 @@ def _seed_builtin_roles(conn: Connection, now: dt.datetime) -> None:
             conn.execute(insert(t.roles).values(**(_role_values(role) | {"updated_at": now})))
 
 
+# ── Schema 3 (ADR 0026) ──────────────────────────────────────────────────────────────
+
+# Settings key holding what the schema-3 migration did, until services audit it
+# (`Store.take_migration_notes`): the audit log is another adapter, so the store leaves a
+# durable note in the same transaction instead of writing the event itself.
+MIGRATION_NOTES_SETTING = "pending_migration_audit"
+MIGRATION_ACTOR = "cteforge"
+_WITHDRAWN_COMMENT = (
+    "Withdrawn by the upgrade to composed definitions (ADR 0026): recipes no longer exist. "
+    "Propose it again as a composed definition (propose_definition with a composition)."
+)
+
+
+def _free_definition_id(conn: Connection, wanted: str) -> str:
+    """`wanted` when no definition has it and it is no former id; else `<wanted>_recipe`
+    (then `_recipe_2`, ...)."""
+    defs, fi = t.definitions, t.former_ids
+
+    def taken(id: str) -> bool:
+        exists = conn.execute(select(defs.c.id).where(defs.c.id == id)).first()
+        former = conn.execute(select(fi.c.former_id).where(fi.c.former_id == id)).first()
+        return exists is not None or former is not None
+
+    if not taken(wanted):
+        return wanted
+    candidate, n = f"{wanted}_recipe", 2
+    while taken(candidate):
+        candidate, n = f"{wanted}_recipe_{n}", n + 1
+    return candidate
+
+
+def _proposals_of(conn: Connection, kind: ProposalKind) -> list[Proposal]:
+    tp = t.proposals
+    rows = conn.execute(select(tp.c.data).where(tp.c.kind == kind.value).order_by(tp.c.seq))
+    return [Proposal.model_validate_json(data) for data in rows.scalars()]
+
+
+def _migrate_recipes(conn: Connection, now: dt.datetime) -> list[dict[str, Any]]:
+    """Each recipe (its latest version) → a composed definition, version 1 (no history):
+    same id when free, else `<id>_recipe`; llm_annotated, or verified by whoever verified
+    the recipe (the approver of the proposal that made its latest version verified; no
+    such record → llm_annotated). Authored by that proposal's author (else `cteforge`).
+    Returns one note per recipe ({recipe, definition, state} or {recipe, error})."""
+    rec, rv = t.recipes, t.recipe_versions
+    approved = {
+        (p.target_id, p.resulting_version): p
+        for p in _proposals_of(conn, ProposalKind.NEW_RECIPE)
+        if p.status is ProposalStatus.APPROVED
+    }
+    rows = conn.execute(
+        select(rv.c.data, rv.c.recipe_id, rv.c.version)
+        .join(rec, and_(rec.c.id == rv.c.recipe_id, rec.c.latest_version == rv.c.version))
+        .order_by(rec.c.id)
+    ).all()
+    notes: list[dict[str, Any]] = []
+    for row in rows:
+        data = json.loads(row.data)
+        made_by = approved.get((row.recipe_id, row.version))
+        verifier = None
+        if data.get("state") == DefinitionState.VERIFIED.value and made_by is not None:
+            verifier = made_by.decided_by
+        new_id = _free_definition_id(conn, row.recipe_id)
+        try:
+            definition = definition_from_recipe(data, id=new_id, verified_by=verifier)
+        except CodecError:
+            notes.append({"recipe": row.recipe_id, "error": "not convertible; left in place"})
+            continue
+        if definition.state is DefinitionState.VERIFIED:
+            when = made_by.decided_at if made_by is not None else None
+            definition = definition.model_copy(update={"verified_at": (when or now).date()})
+        conn.execute(
+            insert(t.definitions).values(
+                id=definition.id,
+                latest_version=1,
+                state=definition.state.value,
+                title=definition.title,
+                keywords=json.dumps(definition.keywords),
+                updated_at=now,
+            )
+        )
+        conn.execute(
+            insert(t.definition_versions).values(
+                definition_id=definition.id,
+                version=1,
+                yaml=definition_to_yaml(definition),
+                state=definition.state.value,
+                author=made_by.author if made_by is not None else MIGRATION_ACTOR,
+                created_at=now,
+                change_note=f"Migrated from recipe '{row.recipe_id}' v{row.version} (ADR 0026)",
+                logic_changed=True,
+                verified_by=definition.verified_by,
+                verified_at=definition.verified_at,
+            )
+        )
+        notes.append(
+            {"recipe": row.recipe_id, "definition": definition.id, "state": definition.state.value}
+        )
+    return notes
+
+
+def _withdraw_recipe_proposals(conn: Connection, now: dt.datetime) -> list[str]:
+    """Pending recipe proposals → withdrawn, with a comment saying why. Returns their ids."""
+    tp = t.proposals
+    withdrawn: list[str] = []
+    for proposal in _proposals_of(conn, ProposalKind.NEW_RECIPE):
+        if proposal.status is not ProposalStatus.PENDING:
+            continue
+        decided = proposal.model_copy(
+            update={
+                "status": ProposalStatus.WITHDRAWN,
+                "decided_by": MIGRATION_ACTOR,
+                "decided_at": now,
+                "comment": _WITHDRAWN_COMMENT,
+            }
+        )
+        conn.execute(
+            update(tp)
+            .where(tp.c.id == proposal.id)
+            .values(status=decided.status.value, data=decided.model_dump_json())
+        )
+        withdrawn.append(proposal.id)
+    return withdrawn
+
+
+def _strip_tools(raw: str) -> str | None:
+    """The JSON tool list without removed names (None when nothing changed)."""
+    names = json.loads(raw)
+    kept = [n for n in names if n not in REMOVED_TOOLS]
+    return None if kept == names else json.dumps(kept)
+
+
+def _strip_removed_tools(conn: Connection) -> int:
+    """Remove `list_recipes` / `propose_recipe` from every role's allowed/defaults and every
+    token's include/exclude. Returns how many rows changed."""
+    changed = 0
+    for table, key, columns in (
+        (t.roles, t.roles.c.name, ("allowed", "defaults")),
+        (t.tokens, t.tokens.c.id, ("include_tools", "exclude_tools")),
+    ):
+        for row in conn.execute(select(key, *(table.c[c] for c in columns))).all():
+            values = {c: stripped for c in columns if (stripped := _strip_tools(row._mapping[c]))}
+            if values:
+                conn.execute(update(table).where(key == row[0]).values(**values))
+                changed += 1
+    return changed
+
+
+def _migrate_join_edges(conn: Connection) -> int:
+    """Drop the old `state`; who added an edge and who (a person) confirmed it come from
+    its approved join proposals. Sources (mining) are recomputed by services. Returns how
+    many edges changed."""
+    approved = [
+        p for p in _proposals_of(conn, ProposalKind.NEW_JOIN) if p.status is ProposalStatus.APPROVED
+    ]
+    je = t.join_edges
+    changed = 0
+    for edge_id, data in conn.execute(select(je.c.id, je.c.data)).all():
+        raw = json.loads(data)
+        edge = JoinEdge.model_validate(raw)
+        mine = [p for p in approved if p.target_id == edge_id]
+        update_fields: dict[str, Any] = {}
+        if mine and edge.added_by is None:
+            first = mine[0]
+            update_fields |= {"added_by": first.author, "added_by_kind": first.author_kind.value}
+        people = [p for p in mine if p.decided_by_kind == ActorKind.HUMAN and not p.auto_applied]
+        if people and edge.confirmed_by is None:
+            update_fields["confirmed_by"] = people[-1].decided_by
+        if update_fields or "state" in raw:
+            new = edge.model_copy(update=update_fields)
+            conn.execute(update(je).where(je.c.id == edge_id).values(data=new.model_dump_json()))
+            changed += 1
+    return changed
+
+
+def _migrate_v2(conn: Connection, now: dt.datetime) -> None:
+    """Schema 2 → 3 (ADR 0026), in the caller's transaction. Leaves a note of what it did
+    in `settings` (MIGRATION_NOTES_SETTING) for services to audit."""
+    notes = {
+        "op": "migrate_adr_0026",
+        "recipes": _migrate_recipes(conn, now),
+        "withdrawn_proposals": _withdraw_recipe_proposals(conn, now),
+        "roles_tokens_changed": _strip_removed_tools(conn),
+        "join_edges_changed": _migrate_join_edges(conn),
+    }
+    conn.execute(insert(t.settings).values(key=MIGRATION_NOTES_SETTING, value=json.dumps(notes)))
+
+
 class _UpsertRace(StoreError):
     """An upsert's INSERT lost to a concurrent INSERT of the same key; retry it."""
 
@@ -152,8 +351,7 @@ def _expect_next(latest: int | None, version: int, what: str, id: str) -> None:
 
 
 class Store:
-    """Persistence for definitions, recipes, joins, proposals, users, settings and search
-    vectors."""
+    """Persistence for definitions, joins, proposals, users, settings and search vectors."""
 
     def __init__(self, url: str) -> None:
         self._engine = _make_engine(url)
@@ -203,9 +401,10 @@ class Store:
             self._engine.dispose()
 
     def init_schema(self) -> None:
-        """Create missing tables, migrate a version-1 database (ADR 0027), seed the
-        built-in roles. Idempotent; a concurrent first open by another process is retried
-        once."""
+        """Create missing tables, migrate an older database (version 1 → 2: ADR 0027
+        tokens; 2 → 3: ADR 0026 recipes → composed definitions, see `_migrate_v2`), seed
+        the built-in roles. Idempotent; a concurrent first open by another process is
+        retried once."""
         try:
             self._init_schema_once()
         except _NewerSchema:
@@ -231,8 +430,10 @@ class Store:
                         key="schema_version", value=str(t.STORE_SCHEMA_VERSION)
                     )
                 )
-            elif int(row.value) < 2:
-                _migrate_v1_tokens(conn, _now())
+            elif int(row.value) < t.STORE_SCHEMA_VERSION:
+                if int(row.value) < 2:
+                    _migrate_v1_tokens(conn, _now())
+                _migrate_v2(conn, _now())
                 conn.execute(
                     update(t.schema_meta)
                     .where(t.schema_meta.c.key == "schema_version")
@@ -383,7 +584,8 @@ class Store:
     ) -> Definition:
         """Give definition `old` the id `new`, in ONE transaction, everywhere it is stored:
         the `definitions` row, every version (row and the id inside its YAML; version
-        numbers, authors and states unchanged), every recipe version that uses it, every
+        numbers, authors and states unchanged), every version of every composed definition
+        that uses it as a part (ADR 0026), every
         proposal that targets or uses it (`proposal_with_definition_renamed`), and its
         search vectors (deleted: the search document names the id, so they are rebuilt).
         Records `old` as a former id of `new` (earlier former ids of `old` now point at
@@ -430,15 +632,15 @@ class Store:
                     proposal_id=proposal_id,
                 )
             )
-            rv = t.recipe_versions
-            for pk, data in conn.execute(select(rv.c.pk, rv.c.data)).all():
-                recipe = Recipe.model_validate_json(data)
-                if recipe.uses_definition(old):
-                    renamed_recipe = recipe.with_definition_renamed(old, new)
+            # Composed definitions using it (every version: pinned parts keep resolving).
+            for pk, text in conn.execute(select(dv.c.pk, dv.c.yaml)).all():
+                stored = definition_from_yaml(text)
+                if stored.uses_definition(old):
+                    renamed_uses = stored.with_definition_renamed(old, new)
                     conn.execute(
-                        update(rv)
-                        .where(rv.c.pk == pk)
-                        .values(data=renamed_recipe.model_dump_json())
+                        update(dv)
+                        .where(dv.c.pk == pk)
+                        .values(yaml=definition_to_yaml(renamed_uses))
                     )
             tp = t.proposals
             for seq, data in conn.execute(select(tp.c.seq, tp.c.data)).all():
@@ -474,47 +676,22 @@ class Store:
             rows = conn.execute(query).all()
         return [_former(row) for row in rows]
 
-    # ------------------------------------------------------------------- recipes
+    def definitions_using(self, definition_id: str) -> list[Definition]:
+        """Latest versions of the composed definitions that use `definition_id` as a part
+        (ADR 0026: "used by"; what a change to it reaches)."""
+        return [d for d in self.list_definitions() if d.uses_definition(definition_id)]
 
-    def add_recipe_version(self, r: Recipe, *, author: str) -> Recipe:
-        stale = StaleVersionError(f"Recipe '{r.id}' version {r.version} already exists")
-        with self._tx(conflict=stale) as conn:
-            _expect_next(self._latest(conn, t.recipes, r.id), r.version, "Recipe", r.id)
-            self._advance(conn, t.recipes, r.id, r.version)
-            conn.execute(
-                insert(t.recipe_versions).values(
-                    recipe_id=r.id,
-                    version=r.version,
-                    data=r.model_dump_json(),
-                    author=author,
-                    created_at=_now(),
-                )
-            )
-        return r
+    def migration_notes(self) -> dict[str, Any] | None:
+        """What the last schema migration did, until `clear_migration_notes` (services
+        audit it, then clear it). None when there is nothing to report."""
+        raw = self.get_setting(MIGRATION_NOTES_SETTING)
+        if raw is None:
+            return None
+        notes: dict[str, Any] = json.loads(raw)
+        return notes
 
-    def get_recipe(self, id: str, version: int | None = None) -> Recipe | None:
-        rv = t.recipe_versions
-        with self._read() as conn:
-            if version is None:
-                version = self._latest(conn, t.recipes, id)
-            data = conn.execute(
-                select(rv.c.data).where(rv.c.recipe_id == id, rv.c.version == version)
-            ).scalar_one_or_none()
-        return None if data is None else Recipe.model_validate_json(data)
-
-    def list_recipes(self) -> list[Recipe]:
-        rv, rec = t.recipe_versions, t.recipes
-        query = (
-            select(rv.c.data)
-            .join(rec, and_(rec.c.id == rv.c.recipe_id, rec.c.latest_version == rv.c.version))
-            .order_by(rec.c.id)
-        )
-        with self._read() as conn:
-            rows = conn.execute(query).scalars().all()
-        return [Recipe.model_validate_json(data) for data in rows]
-
-    def recipes_using(self, definition_id: str) -> list[Recipe]:
-        return [r for r in self.list_recipes() if r.uses_definition(definition_id)]
+    def clear_migration_notes(self) -> None:
+        self.delete_setting(MIGRATION_NOTES_SETTING)
 
     # ------------------------------------------------------------------ join map
 

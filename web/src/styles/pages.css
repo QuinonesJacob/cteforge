@@ -125,9 +125,6 @@
 .hit-meta { display: flex; flex-wrap: wrap; gap: var(--s2); align-items: center; }
 .hit-meaning { margin: 0; color: var(--text-muted); display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
 .hit .keywords { margin: 0; }
-.var-summary { display: flex; flex-direction: column; gap: 6px; margin-top: auto; }
-.var-group { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
-.var-group-label { font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.04em; color: var(--text-muted); font-weight: 600; min-width: 84px; }
 
 /* Definition */
 .overview { display: flex; flex-direction: column; gap: var(--s5); }
@@ -194,12 +191,7 @@ button.step-btn:hover { border-color: var(--accent); }
 .draft-item .badge { margin-left: 4px; }
 .facts-wrap > div { flex: 1 1 160px; }
 
-/* Review */
-.proposal-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: var(--s3); }
-.proposal-item { display: flex; flex-wrap: wrap; justify-content: space-between; gap: var(--s3); }
-.proposal-main { min-width: 0; flex: 1 1 320px; }
-.proposal-title { font-weight: 650; font-size: 1rem; }
-.proposal-side { display: flex; flex-wrap: wrap; gap: var(--s2); align-items: flex-start; }
+/* Proposal detail */
 .detail-grid { display: grid; grid-template-columns: minmax(0, 1fr) 340px; gap: var(--s4); align-items: start; }
 .payload { overflow: auto; max-height: 480px; white-space: pre; margin: 0; }
 
@@ -238,12 +230,41 @@ button.step-btn:hover { border-color: var(--accent); }
 }
 
 /* Responsive */
-/* Explore: one fieldset per composed definition */
-.compose-part { border: 1px solid var(--border); border-radius: var(--radius); padding: var(--s3); margin-bottom: var(--s3); }
-.compose-part legend { padding: 0 var(--s2); overflow-wrap: anywhere; }
+
+/* Library (ADR 0026): filters beside the rows */
+.library-layout { display: grid; grid-template-columns: 220px minmax(0, 1fr); gap: var(--s4); align-items: start; margin-top: var(--s4); }
+.library-filters { display: flex; flex-direction: column; gap: var(--s3); position: sticky; top: calc(var(--nav-h) + var(--s3)); }
+.filter-group { border: 1px solid var(--border); border-radius: var(--radius); padding: var(--s2) var(--s3); margin: 0; min-width: 0; }
+.filter-group legend { font-size: 0.75rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; color: var(--text-muted); padding: 0 var(--s1); }
+.filter-options { display: flex; flex-direction: column; gap: 4px; }
+.quick-filter { padding: var(--s2) var(--s3); border: 1px solid var(--accent); border-radius: var(--radius); background: var(--accent-soft); font-weight: 600; }
+.library-results { min-width: 0; }
+.library-row.is-proposal { border-style: dashed; }
+.row-people { margin: 0; }
+.pending-link { text-decoration: none; }
+.pending-link:hover { text-decoration: underline; }
+.badge-stack { display: flex; flex-wrap: wrap; gap: 4px; }
+.plain-list { list-style: none; margin: 0; padding: 0; }
+.row-buttons { display: flex; flex-wrap: wrap; gap: var(--s2); }
+
+/* Join map */
+.join-table td { vertical-align: top; }
+.join-form h2 { margin: 0; font-size: 1.05rem; }
+.key-pairs { border: 0; padding: 0; margin: 0 0 var(--s3); min-width: 0; display: flex; flex-direction: column; gap: var(--s2); align-items: flex-start; }
+.key-pair { display: flex; flex-wrap: wrap; gap: var(--s2); align-items: center; }
+.key-pair input { flex: 1 1 140px; }
+.evidence ul { margin: var(--s1) 0; padding-left: 1.2em; }
+.evidence p { margin: var(--s1) 0; }
+
+/* Composed definitions */
+.part-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: var(--s2); }
+.part-item { display: flex; flex-wrap: wrap; gap: var(--s2); align-items: center; }
 
 @media (max-width: 900px) {
   .detail-grid { grid-template-columns: minmax(0, 1fr); }
+  .library-layout { grid-template-columns: minmax(0, 1fr); }
+  .library-filters { position: static; flex-direction: row; flex-wrap: wrap; }
+  .library-filters .filter-group { flex: 1 1 150px; }
   .grid-3 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 

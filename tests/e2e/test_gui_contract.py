@@ -1,5 +1,6 @@
 """GUI ↔ API contract: every call in web/src/api/endpoints.ts, with the body shapes the GUI
-sends (lib/importBuilder.ts, lib/variableForm.ts, pages/*), against the real FastAPI app.
+sends (lib/importBuilder.ts, lib/variableForm.ts, lib/library.ts, lib/joins.ts, pages/*),
+against the real FastAPI app.
 Each response is checked for the fields web/src/api/types.ts declares and the GUI reads.
 
 If this fails, either the API or the GUI changed a field: fix both together.
@@ -119,10 +120,57 @@ DEFINITION_CARD = {
     "variables",
     "template",
     "history",
+    # ADR 0026: composed definitions, "used by", "joins to".
+    "composed",
+    "composition",
+    "used_by",
+    "joins",
 }
 # Renames (ADR 0024): GET /definitions/{id}/references, DefinitionCard.former_ids.
-REFERENCES = {"id", "version", "state", "recipes", "proposals", "former_ids", "outside_warning"}
-RECIPE_REF = {"recipe_id", "recipe_version", "title", "state", "alias", "pinned_version"}
+REFERENCES = {"id", "version", "state", "used_by", "proposals", "former_ids", "outside_warning"}
+USED_BY_REF = {"definition_id", "definition_version", "title", "state", "alias", "pinned_version"}
+# ADR 0026: CompositionCard / PartCard on composed definitions and their proposals.
+COMPOSITION_CARD = {
+    "parts",
+    "fixed",
+    "open_variables",
+    "select",
+    "compiled_sql",
+    "dialect",
+    "issues",
+}
+PART_CARD = {
+    "alias",
+    "id",
+    "pinned_version",
+    "version",
+    "title",
+    "state",
+    "latest_version",
+    "superseded",
+    "usable",
+    "composed",
+}
+# GET /library (LibraryPage / LibraryRow / ProposalBrief).
+LIBRARY_PAGE = {"rows", "total", "pending_count", "proposals_visible"}
+LIBRARY_ROW = {
+    "id",
+    "title",
+    "meaning",
+    "version",
+    "state",
+    "composed",
+    "owner",
+    "created_by",
+    "created_by_kind",
+    "verified_by",
+    "verified_by_kind",
+    "approval",
+    "latest_proposal",
+    "pending",
+    "needs_my_review",
+}
+PROPOSAL_BRIEF = {"id", "kind", "status", "author", "author_kind", "created_at", "summary"}
 PROPOSAL_REF = {
     "proposal_id",
     "kind",
@@ -136,8 +184,7 @@ FORMER_ID = {"former_id", "definition_id", "renamed_to", "renamed_by", "renamed_
 # Only with ?include_source=true (the revise flow): DefinitionCard.source_sql / annotations.
 SOURCE = {"source_sql", "annotations"}
 ANNOTATION = {"name", "type", "role", "literals", "column", "description", "allowed", "format"}
-RECIPE = {"id", "version", "title", "description", "uses", "values", "select", "dialect", "state"}
-JOIN_EDGE = {
+JOIN_CARD = {
     "id",
     "left_table",
     "right_table",
@@ -146,8 +193,18 @@ JOIN_EDGE = {
     "relationship",
     "usage_count",
     "traps",
-    "state",
+    "notes",
+    "sources",
+    "added_by",
+    "added_by_kind",
+    "confirmed_by",
+    "evidence",
+    "known",
+    "confirmed",
+    "pending_proposals",
 }
+EVIDENCE = {"claimed", "observed", "left", "right", "consistent", "profile", "checked_at"}
+SIDE_COUNT = {"table", "keys", "rows", "distinct_keys"}
 TABLE_CARD = {"name", "found", "columns", "used_by", "joins", "units"}
 LITERAL = {
     "id",
@@ -221,6 +278,7 @@ PROPOSAL_VIEW = {
     "resulting_version",
     "diff",
     "impact",
+    "composition",
 }
 PROPOSAL_OUTCOME = {"proposal", "definition", "issues", "auto_applied"}
 AUDIT_EVENT = {
@@ -296,6 +354,40 @@ def gui_proposal(sql: str, ann: dict[str, Any], owner: str, profile: str) -> dic
         "profile": profile,
         "summary": f"Import {ann['title']}",
     }
+
+
+def _library(gui: Gui, user: str, **lists: list[str]) -> dict[str, Any]:
+    """endpoints.ts listLibrary: list filters as repeated query params."""
+    params = [(k, v) for k, values in lists.items() for v in values]
+    response = gui.client.get(
+        "/api/v1/library",
+        params=params,
+        headers={"Authorization": f"Bearer {gui.tokens[user]}"},
+    )
+    assert response.status_code == 200, response.text
+    return fields(response.json(), LIBRARY_PAGE, "LibraryPage")
+
+
+def composed_definition(gui: Gui, user: str = "alice", id: str = "rr_apac") -> dict[str, Any]:
+    """A composed definition as an agent proposes it (MCP propose_definition); the GUI does
+    not create them, it shows them."""
+    return gui.call(
+        "POST",
+        "/proposals/definitions",
+        user,
+        body={
+            "composition": {
+                "uses": {"rr": {"id": "realization_rate"}},
+                "select": (
+                    "SELECT region, AVG(realization_rate) AS avg_rate FROM rr GROUP BY region"
+                ),
+                "fixed": {"rr": {"regions": ["APAC"]}},
+            },
+            "dialect": "duckdb",
+            "metadata": {"id": id, "title": "RR APAC by region"},
+            "summary": "composed",
+        },
+    )
 
 
 def gui_run(def_id: str, version: int, values: dict[str, Any], *, run: bool) -> dict[str, Any]:
@@ -414,23 +506,19 @@ def test_import_library_definition_and_run(gui: Gui, example) -> None:
     card = fields(outcome["definition"], DEFINITION_CARD, "DefinitionCard")
     assert card["state"] == "llm_annotated" and card["owner"] == "alice"
 
-    # Library: GET /definitions?q=&include_drafts=&limit=100.
-    hits = each(
-        gui.call(
-            "GET",
-            "/definitions",
-            "alice",
-            query={"q": "realization", "include_drafts": False, "limit": 100},
-        ),
-        SEARCH_HIT,
-        "SearchHit",
+    # Library (ADR 0026): GET /library?q=&trust=&approval=&created_by=&verified_by=.
+    page = fields(
+        gui.call("GET", "/library", "alice", query={"q": "realization"}),
+        LIBRARY_PAGE,
+        "LibraryPage",
     )
-    assert [h["id"] for h in hits] == ["realization_rate"] and hits[0]["state"] in STATES
-    assert hits[0]["match"] in SEARCH_MATCHES and hits[0]["note"] is None
-    each(hits[0]["variables"], VARIABLE_CARD, "VariableCard")
-    # An empty search (the Library's initial view) lists the library too; match is null.
-    listed = gui.call("GET", "/definitions", "alice", query={"q": "", "limit": 100})
-    assert listed and all(h["match"] is None for h in listed)
+    rows = each(page["rows"], LIBRARY_ROW, "LibraryRow")
+    assert [r["id"] for r in rows] == ["realization_rate"] and rows[0]["state"] in STATES
+    assert rows[0]["created_by"] == "alice" and rows[0]["approval"] == "approved"
+    fields(rows[0]["latest_proposal"], PROPOSAL_BRIEF, "ProposalBrief")
+    assert page["proposals_visible"] is True and page["pending_count"] == 0
+    filtered = _library(gui, "alice", trust=["verified"], approval=["pending", "approved"])
+    assert filtered["rows"] == [] and filtered["total"] == 1
 
     # Definition page: card (+ ?version=), history.
     card = fields(
@@ -557,15 +645,7 @@ def test_rename_from_the_definition_page(gui: Gui, example) -> None:
     gui.call(
         "POST", "/proposals/definitions", "alice", body=gui_proposal(sql, ann, "alice", "demo")
     )
-    recipe = {
-        "id": "rr_apac",
-        "title": "RR APAC",
-        "description": "",
-        "uses": {"rr": {"id": "realization_rate"}},
-        "values": {"rr": Q3_APAC},
-        "dialect": "duckdb",
-    }
-    gui.call("POST", "/proposals/recipes", "alice", body={"recipe": recipe, "summary": "r"})
+    assert composed_definition(gui)["auto_applied"] is True
     gui.call("PUT", "/settings", "root", body={"mode": "strict"})
     pending = gui.call(
         "POST",
@@ -580,8 +660,8 @@ def test_rename_from_the_definition_page(gui: Gui, example) -> None:
         REFERENCES,
         "DefinitionReferences",
     )
-    (used,) = each(refs["recipes"], RECIPE_REF, "RecipeReference")
-    assert (used["recipe_id"], used["alias"], used["pinned_version"]) == ("rr_apac", "rr", None)
+    (used,) = each(refs["used_by"], USED_BY_REF, "UsedByReference")
+    assert (used["definition_id"], used["alias"], used["pinned_version"]) == ("rr_apac", "rr", None)
     (proposal,) = each(refs["proposals"], PROPOSAL_REF, "ProposalReference")
     assert proposal["proposal_id"] == pending["proposal"]["id"]
     assert proposal["relation"] == "target" and refs["outside_warning"]
@@ -628,124 +708,136 @@ def test_rename_from_the_definition_page(gui: Gui, example) -> None:
     after = gui.call("GET", "/definitions/rr_monthly/references", "alice")
     each(after["former_ids"], FORMER_ID, "FormerId")
     assert after["proposals"][0]["target_id"] == "rr_monthly"
+    # The composed definition follows the rename (its part, and its page).
+    composed = gui.call("GET", "/definitions/rr_apac", "alice")
+    assert composed["composition"]["parts"][0]["id"] == "rr_monthly"
 
 
-def test_explore_recipes_compose_joins_tables_and_check(gui: Gui, example) -> None:
+def test_composed_definition_and_join_map(gui: Gui, example) -> None:
     sql, ann = example("realization_rate")
     gui.call(
         "POST", "/proposals/definitions", "alice", body=gui_proposal(sql, ann, "alice", "demo")
     )
-    select = "SELECT region, AVG(realization_rate) AS avg_rate FROM rr GROUP BY region"
-
-    # Compose tab: lib/variableForm.ts buildComposeRequest (floating refs, final SELECT).
-    composed = fields(
-        gui.call(
-            "POST",
-            "/run",
-            "alice",
-            body={
-                "uses": {"rr": {"id": "realization_rate"}},
-                "values": {"rr": Q3_APAC},
-                "select": select,
-                "run": True,
-                "limit": 100,
-                "profile": "demo",
-            },
-        ),
-        RUN_OUTCOME,
-        "RunOutcome",
+    outcome = fields(composed_definition(gui), PROPOSAL_OUTCOME, "ProposalOutcome")
+    assert outcome["auto_applied"] is True
+    # Proposal page: the composition (parts, fixed/open variables, compiled SQL).
+    view = fields(
+        gui.call("GET", f"/proposals/{outcome['proposal']['id']}", "alice"),
+        PROPOSAL_VIEW,
+        "ProposalView",
     )
-    assert composed["ran"] and composed["columns"] == ["region", "avg_rate"]
+    composition = fields(view["composition"], COMPOSITION_CARD, "CompositionCard")
+    assert composition["compiled_sql"].lstrip().upper().startswith("WITH")
 
-    # SaveRecipeForm: POST /proposals/recipes {recipe, summary}.
-    saved = fields(
-        gui.call(
-            "POST",
-            "/proposals/recipes",
-            "alice",
-            body={
-                "recipe": {
-                    "id": "apac_q3_rr",
-                    "title": "APAC Q3 realization",
-                    "description": "",
-                    "uses": {"rr": {"id": "realization_rate"}},
-                    "values": {"rr": Q3_APAC},
-                    "select": select,
-                    "dialect": composed["dialect"],
-                },
-                "summary": "Recipe apac_q3_rr",
-            },
-        ),
-        PROPOSAL_OUTCOME,
-        "ProposalOutcome",
+    # Definition page of a composed definition: parts, fixed/open variables, compiled SQL.
+    card = fields(
+        gui.call("GET", "/definitions/rr_apac", "alice"), DEFINITION_CARD, "DefinitionCard"
     )
-    assert saved["auto_applied"] is True
-    # Review page shows payload.recipe for recipe proposals.
-    view = gui.call("GET", f"/proposals/{saved['proposal']['id']}", "alice")
-    fields(view["payload"]["recipe"], RECIPE, "Recipe (proposal payload)")
-
-    # Recipes tab: GET /recipes?q=&include_drafts= → Recipe[]; run one by id.
-    recipes = each(
-        gui.call("GET", "/recipes", "alice", query={"q": "", "include_drafts": False}),
-        RECIPE,
-        "Recipe",
+    assert card["composed"] is True
+    composition = fields(card["composition"], COMPOSITION_CARD, "CompositionCard")
+    (part,) = each(composition["parts"], PART_CARD, "PartCard")
+    assert (part["alias"], part["id"], part["pinned_version"], part["version"]) == (
+        "rr",
+        "realization_rate",
+        None,
+        1,
     )
-    assert [r["id"] for r in recipes] == ["apac_q3_rr"]
-    assert recipes[0]["uses"] == {"rr": {"id": "realization_rate", "version": None}}
+    assert composition["fixed"] == {"rr": {"regions": ["APAC"]}}
+    names = [fields(v, VARIABLE_CARD, "VariableCard")["name"] for v in card["variables"]]
+    assert "rr.period" in names and "rr.regions" not in names
+    # Its Run tab: values[alias]["<part alias>.<var>"] (lib/variableForm.ts).
     ran = fields(
         gui.call(
             "POST",
             "/run",
             "alice",
-            body={"recipe_id": "apac_q3_rr", "values": {}, "run": True, "limit": 100},
+            body=gui_run("rr_apac", 1, {"rr.period": Q3_APAC["period"]}, run=True),
         ),
         RUN_OUTCOME,
         "RunOutcome",
     )
-    assert ran["ran"] and ran["rows"] == composed["rows"]
+    assert ran["ran"] and [r[0] for r in ran["rows"]] == ["APAC"]
+    assert [u["id"] for u in ran["used"]] == ["rr_apac", "realization_rate"]
+    # The part's page: "used by" and "joins to".
+    part_card = gui.call("GET", "/definitions/realization_rate", "alice")
+    (used,) = each(part_card["used_by"], USED_BY_REF, "UsedByReference")
+    assert used["definition_id"] == "rr_apac"
+    joins_to = each(part_card["joins"], JOIN_CARD, "JoinCard")
+    assert joins_to and all(j["known"] for j in joins_to)
+    # Library row: composed, created by alice.
+    rows = gui.call("GET", "/library", "alice", query={"q": "rr_apac"})["rows"]
+    assert [(r["id"], r["composed"]) for r in rows] == [("rr_apac", True)]
 
-    # Join map tab: GET /joins?table=&include_drafts= → JoinEdge[].
-    joins = each(
-        gui.call("GET", "/joins", "alice", query={"table": "", "include_drafts": False}),
-        JOIN_EDGE,
-        "JoinEdge",
-    )
+    # Join map page: GET /joins → JoinCard[] (known, confirmed, sources, evidence).
+    joins = each(gui.call("GET", "/joins", "alice"), JOIN_CARD, "JoinCard")
     assert joins and all(fields(k, {"left", "right"}, "JoinKey") for j in joins for k in j["keys"])
-    edge = joins[0]
+    edge = next(j for j in joins if j["id"] == "deals__invoices__deal_id=deal_id")
+    assert edge["sources"] == ["realization_rate", "rr_apac"] and edge["known"] is True
     by_table = gui.call("GET", "/joins", "alice", query={"table": edge["left_table"]})
     assert edge["id"] in {j["id"] for j in by_table}
-
-    # Tables tab: GET /tables (every library table) and ?name=&name=&profile=.
-    tables = each(gui.call("GET", "/tables", "alice"), TABLE_CARD, "TableCard")
-    assert "deals" in {t["name"] for t in tables}
-    params = [("name", "deals"), ("name", "accounts"), ("profile", "demo")]
-    response = gui.client.get(
-        "/api/v1/tables",
-        params=params,
-        headers={"Authorization": f"Bearer {gui.tokens['alice']}"},
-    )
-    assert response.status_code == 200
-    named = each(response.json(), TABLE_CARD, "TableCard")
-    assert [t["name"] for t in named] == ["deals", "accounts"]
-    each(named[0]["columns"], {"name", "type"}, "ColumnCard")
-    assert "realization_rate" in named[0]["used_by"]
-
-    # SQL tab: POST /check {sql, run, limit} → RunOutcome labeled by the join map.
-    checked = fields(
+    # JoinAnnotateForm (lib/joins.ts annotateRequest): only what changed, by id.
+    annotated = fields(
         gui.call(
             "POST",
-            "/check",
+            "/proposals/joins",
             "alice",
             body={
-                "sql": "SELECT region, COUNT(*) AS n FROM accounts GROUP BY region",
-                "run": True,
-                "limit": 100,
+                "action": "annotate",
+                "id": edge["id"],
+                "summary": "",
+                "relationship": "one_to_many",
+                "traps": ["one deal, many invoices"],
+                "notes": "partial payments",
             },
         ),
-        RUN_OUTCOME,
-        "RunOutcome",
+        PROPOSAL_OUTCOME,
+        "ProposalOutcome",
     )
-    assert checked["ran"] and checked["label"] in {"new_logic_on_known_joins", "exploratory"}
+    assert annotated["auto_applied"] is True
+    evidence = fields(
+        annotated["proposal"]["payload"]["evidence"], EVIDENCE, "RelationshipEvidence"
+    )
+    fields(evidence["left"], SIDE_COUNT, "SideCount")
+    after = next(j for j in gui.call("GET", "/joins", "alice") if j["id"] == edge["id"])
+    assert after["notes"] == "partial payments" and after["evidence"]["consistent"] is True
+    # JoinAddForm (lib/joins.ts addRequest): a person's new edge.
+    added = gui.call(
+        "POST",
+        "/proposals/joins",
+        "alice",
+        body={
+            "action": "add",
+            "left_table": "deals",
+            "right_table": "invoices",
+            "keys": [{"left": "status", "right": "status"}],
+            "join_type": "inner",
+            "summary": "",
+        },
+    )
+    assert added["auto_applied"] is True and added["proposal"]["payload"]["action"] == "add"
+    new_edge = next(
+        j for j in gui.call("GET", "/joins", "alice") if j["id"] == "deals__invoices__status=status"
+    )
+    assert new_edge["added_by"] == "alice" and new_edge["known"] is True
+    assert new_edge["sources"] == []
+    # Join proposals are approved, never verified: a structured 409.
+    gui.call("PUT", "/settings", "root", body={"mode": "strict"})
+    pending = gui.call(
+        "POST",
+        "/proposals/joins",
+        "alice",
+        body={"action": "annotate", "id": edge["id"], "notes": "x", "summary": ""},
+    )
+    refused = gui.call(
+        "POST",
+        f"/proposals/{pending['proposal']['id']}/approve",
+        "ann",
+        body={"verify": True, "comment": ""},
+        status=409,
+    )
+    assert "not verified" in refused["error"]["message"]
+    listed = next(j for j in gui.call("GET", "/joins", "alice") if j["id"] == edge["id"])
+    assert listed["pending_proposals"] == [pending["proposal"]["id"]]
 
 
 def test_review_queue_four_eyes_verify_and_audit(gui: Gui, example) -> None:
@@ -765,6 +857,13 @@ def test_review_queue_four_eyes_verify_and_audit(gui: Gui, example) -> None:
 
     # Nav badge: GET /proposals/count?status=pending → {count}.
     assert gui.call("GET", "/proposals/count", "alice", query={"status": "pending"}) == {"count": 1}
+    # Library (ADR 0026): the pending new definition is a row; "needs my review" for ann.
+    mine = gui.call("GET", "/library", "ann", query={"needs_my_review": True})
+    (row,) = each(mine["rows"], LIBRARY_ROW, "LibraryRow")
+    assert row["version"] is None and row["approval"] == "pending" and row["needs_my_review"]
+    (brief,) = each(row["pending"], PROPOSAL_BRIEF, "ProposalBrief")
+    assert brief["id"] == proposal_id and mine["pending_count"] == 1
+    assert gui.call("GET", "/library", "alice", query={"needs_my_review": True})["rows"] == []
     # Review page: list + detail (diff, impact, checks).
     listed = each(
         gui.call("GET", "/proposals", "ann", query={"status": "pending"}),
@@ -859,7 +958,7 @@ def test_review_queue_four_eyes_verify_and_audit(gui: Gui, example) -> None:
 def test_settings_users_and_tokens(gui: Gui) -> None:
     # SettingsPage: GET /tools for the checklists (lib/tools.ts groupCatalog).
     catalog = each(gui.call("GET", "/tools", "alice"), TOOL_INFO, "ToolInfo")
-    assert [t["group"] for t in catalog][0] == "use" and len(catalog) == 20
+    assert [t["group"] for t in catalog][0] == "use" and len(catalog) == 18
     users = each(gui.call("GET", "/users", "root"), USER_VIEW, "UserView")
     assert {u["name"] for u in users} == {"root", "alice", "ann"}
     for u in users:
@@ -961,7 +1060,7 @@ def test_settings_users_and_tokens(gui: Gui) -> None:
     # narrow root's own follow-role token, so keep manage_role on.)
     fewer = [t["name"] for t in catalog if t["name"] != "check_and_run"]
     edited = gui.call("PUT", "/roles/admin", "root", body={"description": "x", "defaults": fewer})
-    assert edited["defaults"] == fewer and len(edited["allowed"]) == 20
+    assert edited["defaults"] == fewer and len(edited["allowed"]) == 18
     gui.call(
         "PUT",
         "/roles/support_bot",

@@ -51,9 +51,9 @@ from cteforge.domain.access import Tool
 from cteforge.domain.audit import AuditKind
 from cteforge.domain.models import Definition, DefinitionState
 from cteforge.domain.users import User
-from cteforge.services import _audit, _library, _meaning
+from cteforge.services import _audit, _compose, _library, _meaning
 from cteforge.services.auth import require
-from cteforge.services.cards import SearchHit, search_hit
+from cteforge.services.cards import SearchHit, search_hit, variable_card
 from cteforge.services.context import AppContext, team_mode
 
 MAX_LIMIT = 100
@@ -197,7 +197,9 @@ def search(
     docs = [_doc(d, formers.get(d.id, ())) for d in candidates]
     if not terms:
         ranked = sorted(docs, key=lambda doc: _order(doc, terms, 0.0))
-        hits = [search_hit(doc.definition, 0.0) for doc in ranked[:limit]]
+        hits = _open_variables(
+            ctx, [search_hit(doc.definition, 0.0) for doc in ranked[:limit]], ranked
+        )
         _record(ctx, user, query, hits, include_drafts, question)
         return hits
     keyword = {
@@ -226,8 +228,26 @@ def search(
                 note=meaning.note,
             )
         )
+    hits = _open_variables(ctx, hits, matched)
     _record(ctx, user, query, hits, include_drafts, question)
     return hits
+
+
+def _open_variables(ctx: AppContext, hits: list[SearchHit], docs: list[_Doc]) -> list[SearchHit]:
+    """A composed definition's hit lists its open variables (`<alias>.<var>`; ADR 0026)."""
+    by_key = {_key(doc): doc.definition for doc in docs}
+    mode = team_mode(ctx)
+    out = []
+    for hit in hits:
+        definition = by_key.get((hit.id, hit.version))
+        if definition is not None and definition.composition is not None:
+            variables = [
+                variable_card(spec).model_copy(update={"name": name})
+                for name, spec in _compose.open_variables(ctx, definition, mode)
+            ]
+            hit = hit.model_copy(update={"variables": variables})
+        out.append(hit)
+    return out
 
 
 def _key(doc: _Doc) -> tuple[str, int]:

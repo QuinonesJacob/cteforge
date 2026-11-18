@@ -21,7 +21,6 @@ from cteforge.domain.models import (
     DefinitionState,
     JoinEdge,
     JoinKey,
-    Recipe,
     TeamMode,
     TrustLabel,
 )
@@ -207,14 +206,19 @@ def test_raw_tables_joined_by_a_known_join_map_edge(ctx: AppContext) -> None:
     uses = {"rr": {"id": "realization_rate"}}
     before = compile_and_run(ctx, AGENT, uses=uses, select=select, run=False)
     assert before.label is TrustLabel.EXPLORATORY
-    ctx.store.upsert_join(
-        JoinEdge(
-            id="accounts__deals__account_id",
-            left_table="accounts",
-            right_table="deals",
-            keys=[JoinKey(left="account_id", right="account_id")],
-        )
+    edge = JoinEdge(
+        id="accounts__deals__account_id",
+        left_table="accounts",
+        right_table="deals",
+        keys=[JoinKey(left="account_id", right="account_id")],
+        added_by="bot",
+        added_by_kind="agent",
     )
+    # ADR 0026: an edge an agent added is not known until a person approves it.
+    ctx.store.upsert_join(edge)
+    unconfirmed = compile_and_run(ctx, AGENT, uses=uses, select=select, run=False)
+    assert unconfirmed.label is TrustLabel.EXPLORATORY
+    ctx.store.upsert_join(edge.model_copy(update={"confirmed_by": "ann"}))
     after = compile_and_run(ctx, AGENT, uses=uses, select=select)
     # Known join, but raw tables are read: new logic, never "built from verified parts".
     assert after.ran and after.label is TrustLabel.NEW_LOGIC_KNOWN_JOINS
@@ -232,6 +236,7 @@ def test_raw_tables_on_a_known_join_are_refused_in_strict_mode(ctx: AppContext) 
             left_table="accounts",
             right_table="deals",
             keys=[JoinKey(left="account_id", right="account_id")],
+            sources=["realization_rate"],
         )
     )
     set_team_mode(ctx, TeamMode.STRICT)
@@ -479,7 +484,7 @@ def test_bad_inputs_raise(ctx: AppContext) -> None:
         compile_and_run(ctx, AGENT, uses=uses, values={"rr": {"period": "2025-Q3"}})
     with pytest.raises(RenderError):
         compile_and_run(ctx, AGENT, uses={"rr": {"identifier": "realization_rate"}})
-    with pytest.raises(PolicyError):
+    with pytest.raises(RenderError, match="uses"):
         compile_and_run(ctx, AGENT)
     with pytest.raises(PolicyError, match="dialect"):
         compile_and_run(ctx, AGENT, uses=uses, dialect=Dialect.SNOWFLAKE)
@@ -493,42 +498,6 @@ def test_definition_profile_is_the_default(ctx: AppContext) -> None:
         compile_and_run(ctx, AGENT, uses={"rr": {"id": "realization_rate"}})
     out = compile_and_run(ctx, AGENT, uses={"rr": {"id": "realization_rate"}}, profile="demo")
     assert out.ran
-
-
-# ── recipes ──────────────────────────────────────────────────────────────────────────
-
-
-def _recipe(**update) -> Recipe:
-    base = Recipe(
-        id="apac_q3",
-        title="APAC Q3",
-        uses={"rr": DefinitionRef(id="realization_rate")},
-        values={"rr": Q3_APAC},
-        select="SELECT region, AVG(realization_rate) AS avg_rate FROM rr GROUP BY region",
-        dialect=Dialect.DUCKDB,
-        state=DefinitionState.LLM_ANNOTATED,
-    )
-    return base.model_copy(update=update)
-
-
-def test_recipe_runs_with_its_values_and_overrides(ctx: AppContext) -> None:
-    add(ctx, rr_verified())
-    ctx.store.add_recipe_version(_recipe(), author="analyst")
-    out = compile_and_run(ctx, AGENT, recipe_id="apac_q3")
-    assert out.ran and [r[0] for r in out.rows] == ["APAC"]
-    assert out.columns == ["region", "avg_rate"]
-    assert out.label is TrustLabel.BUILT_FROM_VERIFIED
-    other = compile_and_run(ctx, AGENT, recipe_id="apac_q3", values={"rr": {"regions": ["EMEA"]}})
-    assert [r[0] for r in other.rows] == ["EMEA"]
-    with pytest.raises(PolicyError):
-        compile_and_run(ctx, AGENT, recipe_id="apac_q3", select="SELECT 1")
-
-
-def test_draft_recipe_is_refused(ctx: AppContext) -> None:
-    add(ctx, rr_verified())
-    ctx.store.add_recipe_version(_recipe(state=DefinitionState.DRAFT), author="analyst")
-    out = compile_and_run(ctx, AGENT, recipe_id="apac_q3")
-    assert not out.ran and IssueCode.DRAFT_NOT_USABLE in {i.code for i in out.issues}
 
 
 # ── values used ──────────────────────────────────────────────────────────────────────

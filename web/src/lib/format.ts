@@ -36,16 +36,9 @@ export function formatValue(value: unknown): string {
   return String(value);
 }
 
-/** Impact preview → list of affected recipe ids. */
-export function impactRecipes(impact: ProposalImpact | undefined): string[] {
-  if (!impact) return [];
-  if (Array.isArray(impact)) return impact.map(String);
-  return Array.isArray(impact.recipes) ? impact.recipes.map(String) : [];
-}
-
-export function impactCount(impact: ProposalImpact | undefined): number {
-  if (impact && !Array.isArray(impact) && typeof impact.count === "number") return impact.count;
-  return impactRecipes(impact).length;
+/** Impact preview → ids of the composed definitions using the target (ADR 0026). */
+export function impactIds(impact: ProposalImpact | undefined): string[] {
+  return Array.isArray(impact) ? impact.map(String) : [];
 }
 
 export function plural(n: number, word: string, many = `${word}s`): string {

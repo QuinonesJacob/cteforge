@@ -1,30 +1,31 @@
 import { Link } from "react-router-dom";
 import type { DefinitionReferences } from "../api/types";
 import { formatDate, plural } from "../lib/format";
-import { recipeUse } from "../lib/rename";
+import { partUse } from "../lib/rename";
 
 /**
  * What inside cteforge uses a definition's ID (ADR 0024), grouped by kind in collapsible
- * lists with links: recipes, pending proposals, former IDs. Used before a rename and on a
+ * lists with links: composed definitions using it (ADR 0026), pending proposals, former IDs. Used before a rename and on a
  * rename proposal (references as the proposer saw them).
  */
 export function ReferencesList({ refs }: { refs: DefinitionReferences }) {
-  const { recipes, proposals, former_ids: formers } = refs;
-  if (recipes.length === 0 && proposals.length === 0 && formers.length === 0) {
+  const { proposals, former_ids: formers } = refs;
+  const usedBy = refs.used_by ?? [];
+  if (usedBy.length === 0 && proposals.length === 0 && formers.length === 0) {
     return <p className="muted small">Nothing inside cteforge uses this ID.</p>;
   }
   return (
     <div aria-label="References">
-      {recipes.length > 0 && (
+      {usedBy.length > 0 && (
         <details className="details ref-group" open>
-          <summary>{plural(recipes.length, "recipe")}</summary>
+          <summary>{plural(usedBy.length, "composed definition")}</summary>
           <ul>
-            {recipes.map((r) => (
-              <li key={`${r.recipe_id}:${r.alias}`}>
-                <Link to="/explore" className="mono">
-                  {r.recipe_id}
+            {usedBy.map((r) => (
+              <li key={`${r.definition_id}:${r.alias}`}>
+                <Link to={`/definitions/${encodeURIComponent(r.definition_id)}`} className="mono">
+                  {r.definition_id}
                 </Link>{" "}
-                v{r.recipe_version} — alias <code>{r.alias}</code>, {recipeUse(r.pinned_version)}
+                v{r.definition_version} — as part <code>{r.alias}</code>, {partUse(r.pinned_version)}
               </li>
             ))}
           </ul>

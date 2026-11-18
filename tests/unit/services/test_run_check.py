@@ -50,6 +50,7 @@ def _edge() -> JoinEdge:
         left_table="deals",
         right_table="accounts",
         keys=[JoinKey(left="account_id", right="account_id")],
+        sources=["some_definition"],  # mined: known (ADR 0026)
     )
 
 
@@ -176,12 +177,14 @@ def test_known_join_still_connects_its_tables(ctx: AppContext) -> None:
     assert out.issues == []
 
 
-def test_draft_join_edge_is_not_known(ctx: AppContext) -> None:
-    from cteforge.domain.models import DefinitionState
-
-    ctx.store.upsert_join(_edge().model_copy(update={"state": DefinitionState.DRAFT}))
-    out = check_and_run(ctx, AGENT, JOIN_SQL)
-    assert out.label is TrustLabel.EXPLORATORY
+def test_agent_added_join_edge_is_not_known_until_a_person_confirms(ctx: AppContext) -> None:
+    agent_edge = _edge().model_copy(
+        update={"sources": [], "added_by": "bot", "added_by_kind": "agent"}
+    )
+    ctx.store.upsert_join(agent_edge)
+    assert check_and_run(ctx, AGENT, JOIN_SQL).label is TrustLabel.EXPLORATORY
+    ctx.store.upsert_join(agent_edge.model_copy(update={"confirmed_by": "ann"}))
+    assert check_and_run(ctx, AGENT, JOIN_SQL).label is TrustLabel.NEW_LOGIC_KNOWN_JOINS
 
 
 def test_concurrent_runs_never_mix_result_sets(ctx: AppContext) -> None:
@@ -216,6 +219,7 @@ def _invoice_edge() -> JoinEdge:
         left_table="deals",
         right_table="invoices",
         keys=[JoinKey(left="deal_id", right="deal_id")],
+        sources=["some_definition"],  # mined: known (ADR 0026)
     )
 
 

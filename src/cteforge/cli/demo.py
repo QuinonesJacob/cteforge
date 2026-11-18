@@ -49,6 +49,24 @@ DEMO_JOIN_KEYS: dict[str, list[str]] = {
     "booked_vs_collected": ["region"],
 }
 
+# A composed definition the demo agent proposes (ADR 0026): built from two example
+# definitions by reference, so the Library shows one made by an agent from parts.
+DEMO_COMPOSITION: dict[str, Any] = {
+    "metadata": {
+        "id": "realization_with_booked",
+        "title": "Realization rate next to booked revenue (by month and region)",
+        "meaning": "Monthly realization rate per region beside the region's booked revenue "
+        "for the same period. Built from realization_rate and booked_vs_collected.",
+        "keywords": ["realization", "booked", "composed"],
+        "grain": "one row per month per region",
+    },
+    "composition": {
+        "uses": {"rr": {"id": "realization_rate"}, "bc": {"id": "booked_vs_collected"}},
+        "select": "SELECT rr.month, rr.region, rr.realization_rate, bc.booked "
+        "FROM rr JOIN bc ON rr.region = bc.region",
+    },
+}
+
 CONNECTIONS_YML = f"""\
 # Written by `cteforge demo`. Synthetic data only. See examples/connections.example.yml.
 profiles:
@@ -118,7 +136,8 @@ def demo(
     force: Annotated[bool, typer.Option("--force", help="Replace an existing demo db")] = False,
 ) -> None:
     """Seed a DuckDB warehouse, init the db, create an admin and an agent, and propose the
-    example definitions (they auto-apply in open mode). Prints tokens and next steps."""
+    example definitions (they auto-apply in open mode) plus one composed definition by the
+    agent (ADR 0026). Prints tokens and next steps."""
     target = Path(directory).expanduser().resolve()
     source = Path(examples).expanduser().resolve() if examples else EXAMPLES
     _prepare(target, source, force)
@@ -158,6 +177,17 @@ def demo(
             applied = "auto-applied" if outcome.auto_applied else str(outcome.proposal.status)
             typer.echo(f"  {outcome.proposal.target_id}: {applied} ({status})")
             echo_issues(outcome.issues)
+        composed = propose_definition(
+            ctx,
+            agent_user,
+            composition=DEMO_COMPOSITION["composition"],
+            dialect=Dialect.DUCKDB,
+            metadata=DEMO_COMPOSITION["metadata"],
+            profile=PROFILE,
+            summary="Demo: a composed definition proposed by the agent",
+        )
+        applied = "auto-applied" if composed.auto_applied else str(composed.proposal.status)
+        typer.echo(f"  {composed.proposal.target_id} (composed, by {agent}): {applied}")
 
     env_lines = "".join(f"export {k}={shlex.quote(v)}\n" for k, v in env.items())
     (target / ENV_FILE).write_text(

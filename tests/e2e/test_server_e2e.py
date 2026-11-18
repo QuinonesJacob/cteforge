@@ -315,10 +315,19 @@ async def test_mcp_over_streamable_http_with_the_agent_token(server: Server) -> 
         assert init.serverInfo.name
         tools = (await session.list_tools()).tools
         # A contributor agent (ADR 0027): use + build tools, list/review proposals.
-        assert len(tools) == 14 and "compile_and_run" in {t.name for t in tools}
+        assert len(tools) == 12 and "compile_and_run" in {t.name for t in tools}
         assert not {"list_users", "manage_user", "manage_role"} & {t.name for t in tools}
+        # ADR 0026: no recipe tools; the demo's composed definition runs by id.
+        assert not {"list_recipes", "propose_recipe"} & {t.name for t in tools}
+        composed = _structured(
+            await session.call_tool(
+                "compile_and_run",
+                {"uses": {"c": {"id": "realization_with_booked"}}, "run": False},
+            )
+        )
+        assert composed["usable"] and "realization_with_booked@1" in composed["definitions"]
         hits = _structured(await session.call_tool("search", {"query": "realization rate"}))
-        assert hits["result"][0]["id"].startswith("realization_rate")
+        assert "realization_rate" in [h["id"] for h in hits["result"][:3]]
         run = _structured(
             await session.call_tool(
                 "compile_and_run",
@@ -359,7 +368,7 @@ async def test_mcp_over_stdio_as_the_agent(demo: Demo) -> None:
     )
     async with stdio_client(params) as (read, write), ClientSession(read, write) as session:
         await session.initialize()
-        assert len((await session.list_tools()).tools) == 14  # the role's defaults
+        assert len((await session.list_tools()).tools) == 12  # the role's defaults
         hits = _structured(await session.call_tool("search", {"query": "booked collected"}))
         assert hits["result"][0]["id"] == "booked_vs_collected"
         refused = _structured(

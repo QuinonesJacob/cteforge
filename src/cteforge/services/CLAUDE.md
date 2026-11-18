@@ -53,8 +53,11 @@ Support modules (shared by use-cases; not use-cases themselves):
   keyword|meaning|both|None, `note`), SearchDocument, SearchIndexReport, RunOutcome (with `used`:
   UsedDefinition per version — state, verified_by, verified_at; `values_used` per alias),
   TableCard / ColumnCard, ParseReport, ProposalOutcome, ProposalView,
-  DefinitionDrift, TeamSettings, AuditPage, DefinitionReferences / RecipeReference /
-  ProposalReference (ADR 0024; DefinitionCard.former_ids); access cards (ADR 0027):
+  DefinitionDrift, TeamSettings, AuditPage, DefinitionReferences / UsedByReference /
+  ProposalReference (ADR 0024, 0026; DefinitionCard.former_ids); ADR 0026: PartCard,
+  CompositionCard (DefinitionCard.composition / ProposalView.composition), JoinCard (edge +
+  known, confirmed, pending_proposals), DefinitionCard.composed / used_by / joins,
+  LibraryPage / LibraryRow / ProposalBrief; access cards (ADR 0027):
   ToolInfo + `tool_catalog()`, RoleCard (+ `role_card`, `users` count), TokenCard (+
   `token_card`: effective tools now, state active|revoked|expired; never the value or
   hash), NewToken {token (shown once), info}, UserView (user + tokens), MeCard (tools,
@@ -68,18 +71,38 @@ Support modules (shared by use-cases; not use-cases themselves):
   connection's dialect: `profile`, else the default connection → PolicyError); version
   visibility (`usable_states`, `visible_states`,
   `newest_in_states` — search shows, and compile_and_run floats to, the same version);
-  rebuilding a stored definition (`original_sql`, `annotations_of`, `annotation_file`);
-  the join map (`canonical_edge`, `join_edge_id`, `mined_edges`, `refresh_join_map`: joins
-  between base tables, also through CTEs/derived tables whose key columns pass through
-  unchanged from one base table (parsing's JoinInfo `*_base_table`/`base_keys`); usage_count
-  over all latest definitions; `same_table`, `matching_edge`); definition lookup by id
+  rebuilding a stored definition (`original_sql` — a composed definition's final SELECT,
+  "" when none —, `annotations_of`, `annotation_file`);
+  the join map (`canonical_edge`, `join_edge_id`, `flip_relationship`, `mined_edges(definition,
+  sql=None)` — composed ones only from their compiled SQL —, `refresh_join_map(ctx,
+  sql_of)`: mines every latest definition, inserts new edges, recomputes `sources` and
+  usage_count, keeps annotations; joins between base tables, also through CTEs/derived
+  tables whose key columns pass through unchanged from one base table (parsing's JoinInfo
+  `*_base_table`/`base_keys`); `known_edges` (ADR 0026: mined, added or confirmed by a
+  person); `same_table`, `matching_edge`, `final_select_joins` (raw-table joins of a final
+  SELECT vs known edges); `join_cards(ctx, user, edges)` → JoinCard); definition lookup by id
   (ADR 0024): `get_definition` / `definition_not_found` — the ONE place a missing id
   becomes NotFoundError, a former id naming the current one ("Definition 'a' was renamed
-  to 'c' on <date>; use the new ID."), used by describe, run, recipe checks, review,
+  to 'c' on <date>; use the new ID."), used by describe, run, compositions, review,
   propose, revalidate; `check_id_available` (exists / another definition's former id →
   PolicyError; `renaming=` may take back its own); `definition_references` →
-  DefinitionReferences (latest recipe versions using it, pending proposals targeting or
-  using it, former ids, `OUTSIDE_WARNING`).
+  DefinitionReferences (`used_by`: latest composed definitions using it, pending proposals
+  targeting or using it, former ids, `OUTSIDE_WARNING`); `used_by(ctx, id)`.
+- `_compose.py` — composed definitions (ADR 0026; no permission checks, no audit):
+  `resolve` (pinned / floating part; `part_not_usable` error, `part_superseded` info),
+  `split_values` (`<alias>.<var>` or per alias), `compile_definition(ctx, definition,
+  values, target, *, mode, prefix)` → Compiled (SQL; issues; dotted values; the SQL and
+  composed definitions used, for trust; joins_known / raw_tables of unverified final
+  SELECTs; blocking) — recursive, cycles → PolicyError `composition_cycle`, depth ≤ 10;
+  `compiled_sql` (never raises), `cycle_issue`, `open_variables`, `composition_card`,
+  `checked_composition(ctx, user, …)` (proposal checks: read-only select, template + same
+  query back, parts resolve, fixed names open variables, no cycle, compiles + EXPLAIN,
+  results compared when the select is annotated; state llm_annotated / draft; a final
+  SELECT reading raw tables needs `user` to hold check_and_run before it runs on the
+  warehouse); `require_exploratory(user, raw)` (the ADR 0027 raw-table gate).
+- `_upgrade.py` — run by `open_context` once per open: audits the store's schema-3
+  migration note (admin event, op `migrate_adr_0026`, actor `cteforge`, fail closed, then
+  cleared) and re-mines the join map once per database (setting `join_map_version`).
 - `_meaning.py` — meaning search (ADR 0023; no permission checks, no audit):
   `document_for(definition, former_ids=())` (domain search document + `_library.mined_edges`;
   `former_ids_of(ctx)` maps current id → former ids);
@@ -91,23 +114,29 @@ Support modules (shared by use-cases; not use-cases themselves):
   `index_definition` (after apply; only with a loaded model; never raises), `indexable`,
   `warm_up`, `start_background` (daemon thread: load + backfill).
 - `_apply.py` — proposal plumbing shared by propose, propose_other, review and library_io
-  (no permission checks of its own): definition checks via import_query, recipe checks
-  (render + compose dry-run), owner rule, `submit` (store + auto-apply via trust.approval),
+  (no permission checks of its own): definition checks via import_query, composition
+  checks (`checked_composition` → `_compose`), owner rule, `submit` (store + auto-apply via trust.approval),
   `apply_proposal` (new version / join edge; VERIFIED only on a human verify, never for a
-  DRAFT proposal; refreshes the join map; then `_meaning.index_definition`), diff/impact `view`, `validation_detail`; renames (ADR 0024): `rename_proposal` (payload
+  DRAFT proposal; a person's approval of a join sets `confirmed_by`; refreshes the join
+  map; then `_meaning.index_definition`), diff/impact (used by) + composition `view`,
+  `validation_detail`; renames (ADR 0024): `rename_proposal` (payload
   from_id, to_id, references), applied by `Store.rename_definition` (no new version, no
   diff; `_check_base` refuses a rename whose target was renamed meanwhile —
   `stale_rename_error` — or whose new id was taken; `verify_refusal` refuses verify). DRAFT
-  definition proposals are never auto-applied. Join proposals are checked on the default
-  profile (`join_checks`: tables and key columns exist) and carry `payload.base_join`
-  (stale → StaleVersionError). `ensure_read_only` (called first by `checked_definition`)
+  definition proposals are never auto-applied. Join proposals (`join_proposal(..., action)`)
+  are checked on the default profile (`join_checks`: tables and key columns exist;
+  `relationship_evidence`: COUNT(*) vs COUNT(DISTINCT key) per side through
+  compose.relationship, `relationship_contradicted` error, evidence in the payload and on
+  the edge) and carry `payload.base_join` (stale → StaleVersionError); an agent's `add`
+  never auto-applies; joins are never verified. A composed definition proposal is
+  re-checked for cycles when applied. `ensure_read_only` (called first by `checked_definition`)
   refuses definition SQL that is not one read-only SELECT/UNION (compose.checks.
   ensure_query) with PolicyError + a `not_read_only` issue, before any check runs.
   Decisions are serialized in-process (`DECISIONS`, the stored
   proposal is re-read and must be pending); separate processes are not covered.
 - `import_query.py` — the checks engine for a trusted query + annotations (DESIGN §7:
   same query back, types, EXPLAIN, result comparison): `import_query`, `fetch_schema`,
-  `analyze_query`; plus the M1 file-based `import_files` / `analyze_file` used by the CLI.
+  `analyze_query`, `compare_queries` (also used for composed definitions); plus the M1 file-based `import_files` / `analyze_file` used by the CLI.
   Runtime (not EXPLAIN) failures of check runs keep only the error class: driver messages
   can quote data values and proposal issues are readable by any viewer. SQL in another
   dialect than the warehouse's is checked transpiled to it (`dialect_mismatch` warning;
@@ -116,7 +145,11 @@ Support modules (shared by use-cases; not use-cases themselves):
 - `render_definition.py` — M1 file-based render/run (CLI). No ctx/user (pre-M3 path).
 Use-cases (one file each; a use-case never imports another use-case — share via support
 modules or the core):
-- `search.py` — `search(ctx, user, query, *, limit=10, include_drafts=False, question=None) -> list[SearchHit]` (DESIGN §19, ADR 0017, 0023):
+- `library.py` — `list_library(ctx, user, *, q="", trust=None, approval=None,
+  created_by=None, verified_by=None, needs_my_review=False) -> LibraryPage` (ADR 0026: the
+  GUI's Library — definitions + the proposals touching them; see its docstring for the
+  rows and filters).
+- `search.py` — `search(ctx, user, query, *, limit=10, include_drafts=False, question=None) -> list[SearchHit]` (DESIGN §19, ADR 0017, 0023; a composed definition's hit lists its open variables):
   BM25 keyword ranking (unchanged) + `_meaning.similarities`, merged by reciprocal rank
   fusion (`RRF_K` 60; equal scores share a rank). Without meaning matches the scores are
   plain BM25.
@@ -130,13 +163,17 @@ modules or the core):
   Markdown search document); `definition_history(ctx, user, id) ->
   list[DefinitionVersionInfo]`; `search_document(ctx, user, id, version=None) ->
   SearchDocument`; `definition_references(ctx, user, id) -> DefinitionReferences` (ADR
-  0024). A former id raises NotFoundError naming the current id; the card has `former_ids`.
+  0024). A former id raises NotFoundError naming the current id; the card has `former_ids`,
+  `used_by`, `joins` (edges touching its tables) and, for a composed definition,
+  `composition` and its open variables (ADR 0026).
 - `parse_query.py` — `parse_query(ctx, user, sql, dialect=None, profile=None) -> ParseReport`
   (dialect None → `_library.resolve_dialect`; with no profile named, a stale stored default
   connection adds a `default_connection_missing` warning).
-- `propose.py` — `propose_definition(ctx, user, *, sql, dialect=None, metadata, annotations,
-  profile=None, summary="")` (dialect None → `_library.resolve_dialect` with `profile` or
-  metadata.profile), `revise_definition(ctx, user, *, id, base_version, sql=None,
+- `propose.py` — `propose_definition(ctx, user, *, sql=None, composition=None, dialect=None,
+  metadata, annotations=(), profile=None, summary="")` (exactly one of sql / composition —
+  `CompositionInput` {uses, select?, fixed?}, ADR 0026 — else PolicyError; dialect None →
+  `_library.resolve_dialect` with `profile` or metadata.profile),
+  `revise_definition(ctx, user, *, id, base_version, sql=None, composition=None,
   dialect=None, metadata=None, annotations=None, summary="")` → ProposalOutcome (DESIGN §18).
   Stale base → raises StaleVersionError with the `stale_base_version` Issue on `.issues`.
   `rename_definition(ctx, user, *, id, new_id, base_version=None, summary="")` →
@@ -144,31 +181,32 @@ modules or the core):
   it): valid Ident (CodecError), not the same id / not taken / not another definition's
   former id (PolicyError); same auto-apply rule as revisions. `propose_definition` refuses a
   former id.
-- `propose_other.py` — `propose_join(ctx, user, *, left_table, right_table, keys,
-  join_type="inner", relationship=None, traps=(), summary="")`,
-  `propose_recipe(ctx, user, *, recipe, summary="")` → ProposalOutcome. `RecipeInput` is
-  the caller's recipe (MCP/API schema); a mapping setting `version`, `state` or
-  `schema_version` raises CodecError (cteforge sets them on apply).
+- `propose_other.py` — `propose_join(ctx, user, *, action="annotate", id=None,
+  left_table=None, right_table=None, keys=None, join_type=None, relationship=None,
+  traps=None, notes=None, summary="")` → ProposalOutcome (ADR 0026: annotate an existing
+  edge by id or tables + keys — NotFoundError otherwise; add an edge not in the map —
+  PolicyError otherwise).
 - `review.py` — `list_proposals(ctx, user, status=None)`, `get_proposal(ctx, user, id)` →
   ProposalView (diff + impact); `approve(ctx, user, id, *, verify=False, comment="")` →
   ProposalOutcome; `reject(ctx, user, id, comment)`, `withdraw(ctx, user, id)` →
   ProposalView; `verify_definition(ctx, user, id, version)` → DefinitionCard;
   `count_proposals(ctx, user, status=None)` → int (nav badge: no diffs, not audited).
-- `run.py` — `compile_and_run(ctx, user, *, uses=None, recipe_id=None, values=None,
-  select=None, dialect=None, profile=None, run=True, limit=100, question=None)`,
+- `run.py` — `compile_and_run(ctx, user, *, uses, values=None, select=None, dialect=None,
+  profile=None, run=True, limit=100, question=None)` (composed definitions by id, through
+  `_compose`),
   `check_and_run(ctx, user, sql, *, profile=None, run=True, limit=100, question=None)` →
   RunOutcome (render → compose → trust → explain → run → audit; SQL tagged per ADR 0008).
   A `dialect` other than the profile's is compile-only (`run=False`; no EXPLAIN,
   `checks_incomplete`); with `run=True` it is a PolicyError (DESIGN §12).
   check_and_run adds a `matches_definition` info issue when the SQL is AST-equal to a
   usable definition's original query (use compile_and_run with that id instead).
-- `catalog.py` — discovery: `list_recipes(ctx, user, *, query="", include_drafts=False)`
-  → list[Recipe]; `list_joins(ctx, user, *, table=None, include_drafts=False)` →
-  list[JoinEdge]; `describe_tables(ctx, user, tables=None, *, profile=None)` →
+- `catalog.py` — discovery: `list_joins(ctx, user, *, table=None, known_only=False,
+  definition=None)` → list[JoinCard]; `describe_tables(ctx, user, tables=None, *, profile=None)` →
   list[TableCard] (columns + types from the warehouse, definitions reading it, join edges,
   units the library's variables declare; at most 50 tables). Visibility as search.
 - `revalidate.py` — `revalidate(ctx, user, ids=None) -> list[DefinitionDrift]`: drift check
-  over latest versions (DESIGN §10, §18); reports, never changes state.
+  over latest versions (DESIGN §10, §18; composed definitions through
+  `_compose.checked_composition`); reports, never changes state.
 - `admin.py` — users, roles, tokens, settings (ADR 0018, 0027; who-may rules from
   trust.approval): `bootstrap_admin(ctx, name, kind)` → (User, "default" token shown once;
   only while no users exist), `create_user(ctx, user, name, role, kind, *,
@@ -190,7 +228,8 @@ modules or the core):
 - `audit_log.py` — `list_audit(ctx, user, *, limit=100, actor=None, kind=None,
   definition_id=None, since=None) -> AuditPage` (limit 1..1000, exact `has_more`).
 - `library_io.py` — export/import the library as YAML files (git optional, ADR 0003) via
-  files/library.py: `export_library(ctx, user, directory, *, prune=False)` → written paths;
+  files/library.py (composed definitions included; legacy recipe files imported as
+  composed definitions): `export_library(ctx, user, directory, *, prune=False)` → written paths;
   `import_library(ctx, user, directory, *, profile=None)` → list[ProposalOutcome] (every
   changed file becomes a proposal; unchanged files are skipped; every definition proposal
   is built and checked before any is stored; each submitted proposal is audited at once;
@@ -211,17 +250,19 @@ several calls) and whether a failed write fails the call (closed) or is only log
 | search | search | search | best effort |
 | get_definition, definition_history, search_document, definition_references | get_definition | get_definition (op) | best effort |
 | parse_query | parse_query (a build tool) | parse_query (SQL as SHA-256 only) | best effort |
-| compile_and_run | compile_and_run; a final SELECT that reads raw tables (or table functions) also check_and_run (exploratory SQL) | compile_and_run | closed: written before rows return |
+| compile_and_run | compile_and_run; a final SELECT that reads raw tables (or table functions) also check_and_run (exploratory SQL) — the caller's `select` and the stored final SELECT of any composed definition used, verified or not, nested too (`_compose.require_exploratory`, `Compiled.reads_raw`) | compile_and_run | closed: written before rows return |
 | check_and_run | check_and_run | check_and_run | closed: written before rows return |
 | revalidate(ids) / revalidate() | compile_and_run / review_proposal with review_all (whole library) | revalidate | closed |
 | propose_definition | propose_definition; owner rule (`_apply.check_owner`: any owner needs review_all) | propose (op) | closed |
 | revise_definition, rename_definition | revise_definition; owner rule | propose (op; a rename also lists `old@v` and `new@v` and `extra.renamed_from/renamed_to`) | closed |
-| propose_join / propose_recipe | propose_join / propose_recipe | propose (op) | closed |
+| propose_join (add / annotate) | propose_join | propose (op, `extra.action`) | closed |
 | import_library | propose_definition | propose (op) | closed |
 | list_proposals, get_proposal | list_proposals | review (op) | best effort |
-| list_recipes, list_joins, describe_tables | the tool of the same name | get_definition (op) | best effort |
+| list_joins, describe_tables | the tool of the same name (pending proposals on edges only with list_proposals) | get_definition (op) | best effort |
+| list_library | search; proposal rows/badges/statuses only with list_proposals; `needs_my_review` needs review_proposal (membership; four-eyes per row via can_approve) | search (op=list_library) | best effort |
 | count_proposals | list_proposals | none (cheap badge poll) | — |
-| approve, reject | review_proposal on target (review_all, or the definition's owner; recipes/joins need review_all; a VERIFIED target needs a human or an admin agent); four-eyes (human admins exempt, agents never); approve(verify=True) also verify | review (op) | closed |
+| approve, reject | review_proposal on target (review_all, or the definition's owner; joins need review_all; a VERIFIED target — or a join a person confirmed — needs a human or an admin agent); four-eyes (human admins exempt, agents never); approve(verify=True) also verify (never for joins or renames) | review (op) | closed |
+| (open_context) schema-3 migration report | — (system, actor `cteforge`) | admin (op=migrate_adr_0026) | closed (opening fails, the note stays) |
 | withdraw | the build tool of the proposal's kind, and the proposal's author | review (op) | closed |
 | verify_definition | verify (humans whose role allows it; agents only with the admin role; owners may not); four-eyes over every author since the last logic change | review (op) | closed |
 | list_audit | view_audit; then bad `kind` / naive `since` → PolicyError | admin (op=list_audit) | best effort |

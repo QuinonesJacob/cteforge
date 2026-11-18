@@ -1,6 +1,8 @@
-import { render, screen } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import type { LibraryRow, ProposalBrief, ProposalKind } from "../api/types";
 import { AuthProvider } from "../state/AuthContext";
 import { ToastProvider } from "../state/ToastContext";
 import { mockApi } from "../test/fetchMock";
@@ -8,20 +10,31 @@ import { LibraryPage } from "./LibraryPage";
 
 afterEach(() => vi.unstubAllGlobals());
 
-const hit = (id: string, match: string, note: string | null = null) => ({
+const brief = (id: string, kind: ProposalKind, author = "bot"): ProposalBrief => ({
   id,
-  version: 1,
-  title: id,
-  meaning: "",
-  state: "llm_annotated",
-  score: 0.03,
-  match,
-  note,
-  keywords: [],
-  variables: [],
+  kind,
+  status: "pending",
+  author,
+  author_kind: "agent",
+  created_at: "2026-11-17T00:00:00Z",
+  summary: "",
 });
 
-function renderPage(path = "/?q=money") {
+const row = (partial: Partial<LibraryRow> & Pick<LibraryRow, "id">): LibraryRow => ({
+  title: partial.id,
+  meaning: "",
+  version: 1,
+  state: "llm_annotated",
+  composed: false,
+  approval: "approved",
+  pending: [],
+  needs_my_review: false,
+  ...partial,
+});
+
+const page = (rows: LibraryRow[]) => ({ body: { rows, total: rows.length, pending_count: 2, proposals_visible: true } });
+
+function renderPage(path = "/") {
   render(
     <MemoryRouter initialEntries={[path]}>
       <ToastProvider>
@@ -33,26 +46,70 @@ function renderPage(path = "/?q=money") {
   );
 }
 
-describe("LibraryPage search", () => {
-  it("marks meaning-only hits", async () => {
+describe("LibraryPage (ADR 0026)", () => {
+  it("shows definitions, a pending new definition and revision badges", async () => {
     mockApi({
-      "GET /me": () => ({ body: { name: "vic", role: "viewer", kind: "human" } }),
-      "GET /definitions": () => ({ body: [hit("by_words", "both"), hit("by_meaning", "meaning")] }),
+      "GET /me": () => ({ body: { name: "ann", role: "approver", kind: "human" } }),
+      "GET /library": () =>
+        page([
+          row({ id: "new_one", version: null, state: "llm_annotated", approval: "pending", latest_proposal: brief("p1", "new_definition"), pending: [brief("p1", "new_definition")], needs_my_review: true }),
+          row({ id: "rr", pending: [brief("p2", "revise_definition"), brief("p3", "rename_definition")] }),
+          row({ id: "combo", composed: true, created_by: "bot", created_by_kind: "agent" }),
+        ]),
     });
     renderPage();
-    expect(await screen.findByText("by_meaning")).toBeInTheDocument();
-    expect(screen.getAllByText("matched by meaning")).toHaveLength(1);
-    expect(screen.queryByRole("note")).not.toBeInTheDocument();
+    expect(await screen.findByRole("link", { name: "new_one" })).toHaveAttribute("href", "/review/p1");
+    expect(screen.getByText("Pending approval")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Revision pending" })).toHaveAttribute("href", "/review/p2");
+    expect(screen.getByRole("link", { name: "Rename pending" })).toHaveAttribute("href", "/review/p3");
+    expect(screen.getByRole("link", { name: "rr" })).toHaveAttribute("href", "/definitions/rr");
+    expect(screen.getByText("composed")).toBeInTheDocument();
+    expect(screen.getByText("Created by bot (agent)")).toBeInTheDocument();
+    // Default view: rejected and withdrawn are not checked; approval is left to the server.
+    expect(screen.getByRole("checkbox", { name: "Rejected" })).not.toBeChecked();
+    expect(screen.getByRole("checkbox", { name: "Pending" })).toBeChecked();
   });
 
-  it("shows the note when meaning search could not run", async () => {
-    const note = "Meaning search is unavailable; these results match by keyword only.";
-    mockApi({
-      "GET /me": () => ({ body: { name: "vic", role: "viewer", kind: "human" } }),
-      "GET /definitions": () => ({ body: [hit("a", "keyword", note), hit("b", "keyword", note)] }),
+  it("sends the filters to the server", async () => {
+    const user = userEvent.setup();
+    const api = mockApi({
+      "GET /me": () => ({ body: { name: "ann", role: "approver", kind: "human" } }),
+      "GET /library": () => page([row({ id: "rr" })]),
     });
     renderPage();
-    expect(await screen.findByRole("note")).toHaveTextContent(note);
-    expect(screen.queryByText("matched by meaning")).not.toBeInTheDocument();
+    await screen.findByRole("link", { name: "rr" });
+    const libraryUrls = () => api.fn.mock.calls.map((c) => String(c[0])).filter((u) => u.includes("/library"));
+    expect(libraryUrls()[0]).toBe("/api/v1/library");
+    await user.click(screen.getByRole("checkbox", { name: "Verified" }));
+    await user.click(screen.getByRole("checkbox", { name: "Rejected" }));
+    await waitFor(() =>
+      expect(libraryUrls().at(-1)).toBe("/api/v1/library?trust=verified&approval=pending&approval=approved&approval=rejected"),
+    );
+    await user.click(screen.getByRole("checkbox", { name: "Needs my review" }));
+    await waitFor(() => expect(libraryUrls().at(-1)).toContain("needs_my_review=true"));
+  });
+
+  it("opens with Needs my review from /?review=mine and hides it without review_proposal", async () => {
+    const api = mockApi({
+      "GET /me": () => ({ body: { name: "ann", role: "approver", kind: "human" } }),
+      "GET /library": () => page([]),
+    });
+    renderPage("/?review=mine");
+    expect(await screen.findByText("Nothing needs your review")).toBeInTheDocument();
+    const urls = api.fn.mock.calls.map((c) => String(c[0])).filter((u) => u.includes("/library"));
+    expect(urls.at(-1)).toContain("needs_my_review=true");
+  });
+
+  it("offers no review or approval filters to a narrow token", async () => {
+    const api = mockApi({
+      "GET /me": () => ({ body: { name: "vic", role: "viewer", kind: "human", tools: ["search", "get_definition"] } }),
+      "GET /library": () => ({ body: { rows: [row({ id: "rr" })], total: 1, pending_count: 0, proposals_visible: false } }),
+    });
+    renderPage("/?review=mine");
+    await screen.findByRole("link", { name: "rr" });
+    expect(screen.queryByRole("checkbox", { name: "Needs my review" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("checkbox", { name: "Pending" })).not.toBeInTheDocument();
+    const urls = api.fn.mock.calls.map((c) => String(c[0])).filter((u) => u.includes("/library"));
+    expect(urls.every((u) => !u.includes("needs_my_review"))).toBe(true);
   });
 });

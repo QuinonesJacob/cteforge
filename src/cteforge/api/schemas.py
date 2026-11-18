@@ -1,15 +1,15 @@
 """Request bodies for the HTTP API (src/cteforge/api/CLAUDE.md). Responses reuse the
 services' card models. Unknown fields are refused (422) so typos never pass silently.
 
-Structured inputs the services already validate (metadata, annotations, recipes, uses,
-values) are passed through as plain JSON; services raise the CteforgeError that the API
+Structured inputs the services already validate (metadata, annotations, compositions,
+uses, values) are passed through as plain JSON; services raise the CteforgeError that the API
 maps to a status code.
 """
 
 from __future__ import annotations
 
 import datetime as dt
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -32,12 +32,12 @@ class ParseRequest(BaseModel):
 
 
 class RunRequest(BaseModel):
-    """compile_and_run: `uses` (alias → {id, version?}) or `recipe_id`."""
+    """compile_and_run: `uses` (alias → {id, version?}); composed definitions included
+    (their variables are `<alias>.<var>`; ADR 0026)."""
 
     model_config = _REQUEST
 
-    uses: dict[str, Any] | None = None
-    recipe_id: str | None = None
+    uses: dict[str, Any]
     values: dict[str, dict[str, Any]] | None = None
     select: str | None = None
     dialect: Dialect | None = None
@@ -64,14 +64,16 @@ class RevalidateRequest(BaseModel):
 
 
 class ProposeDefinitionRequest(BaseModel):
-    """`dialect` omitted → the connection's: the profile's, else the default connection's."""
+    """Exactly one of `sql` / `composition` ({uses, select?, fixed?}; ADR 0026). `dialect`
+    omitted → the connection's: the profile's, else the default connection's."""
 
     model_config = _REQUEST
 
-    sql: str
+    sql: str | None = None
+    composition: dict[str, Any] | None = None
     dialect: Dialect | None = None
     metadata: dict[str, Any]
-    annotations: list[dict[str, Any]]
+    annotations: list[dict[str, Any]] = Field(default_factory=list)
     profile: str | None = None
     summary: str = ""
 
@@ -81,6 +83,7 @@ class ReviseDefinitionRequest(BaseModel):
 
     base_version: int
     sql: str | None = None
+    composition: dict[str, Any] | None = None
     dialect: Dialect | None = None
     metadata: dict[str, Any] | None = None
     annotations: list[dict[str, Any]] | None = None
@@ -99,23 +102,21 @@ class RenameDefinitionRequest(BaseModel):
 
 
 class ProposeJoinRequest(BaseModel):
-    """keys: [{left, right}, ...] or [[left, right], ...]."""
+    """ADR 0026. `action` add (tables + keys of a new edge) or annotate (an existing edge
+    by `id`, or tables + keys: relationship / traps / notes). keys: [{left, right}, ...]
+    or [[left, right], ...]. Omitted `traps` / `notes` leave them unchanged (annotate)."""
 
     model_config = _REQUEST
 
-    left_table: str
-    right_table: str
-    keys: list[dict[str, str] | list[str]]
-    join_type: str = "inner"
+    action: Literal["add", "annotate"] = "annotate"
+    id: str | None = None
+    left_table: str | None = None
+    right_table: str | None = None
+    keys: list[dict[str, str] | list[str]] | None = None
+    join_type: str | None = None
     relationship: str | None = None
-    traps: list[str] = Field(default_factory=list)
-    summary: str = ""
-
-
-class ProposeRecipeRequest(BaseModel):
-    model_config = _REQUEST
-
-    recipe: dict[str, Any]
+    traps: list[str] | None = None
+    notes: str | None = None
     summary: str = ""
 
 

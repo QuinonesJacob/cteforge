@@ -43,7 +43,7 @@ Typer CLI: the local admin tool. Thin adapter over services. Project root: ../..
   `search-index download-model` (into CTEFORGE_EMBED_CACHE; no store, no user) · `run --use alias=id[@v] ... [--vars JSON] [--select SQL] [--profile]
   [--dialect] [--limit] [--compile-only] [--sql] [--question] [--json]` (`--vars` is
   alias → variable → value; exit 1 when refused or any error issue) · `references ID
-  [--json]` (recipes, pending proposals, former ids + the outside-cteforge warning; ADR
+  [--json]` (composed definitions using it, pending proposals, former ids + the outside-cteforge warning; ADR
   0024) · `rename OLD NEW [--summary] [--json]` (proposes the rename; same policy as any
   change: applied at once only in open mode on a non-verified definition) · `export DIR
   [--prune]` · `import-library DIR [--profile] [--json]`.
@@ -77,7 +77,7 @@ If something does not clearly fit one of the above, it does not belong here.
 ## Common misplacements
 - Any logic beyond calling a service and printing the result — services/.
 - Importing api/ or mcp/ statically — load them by name at call time (see server.py).
-- File I/O for the library (definitions, recipes, joins) — services.library_io / files/.
+- File I/O for the library (definitions, joins) — services.library_io / files/.
 
 ## Interactions
 Imports services (and domain for types/errors only). Tests: tests/unit/cli/ (CliRunner,

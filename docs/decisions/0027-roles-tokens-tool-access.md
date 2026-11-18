@@ -191,6 +191,11 @@ deactivation, tokens); granting the admin role; editing the admin role.
   `review_proposal` or `verify`.
 - `verified_by_kind` on the definition card is looked up from the users table (a user's
   kind never changes); proposals store `decided_by_kind`.
+- ADR 0026 (implemented 2026-11-18) removed `list_recipes` and `propose_recipe` from the
+  catalog; the store migration strips them from stored roles and tokens. The raw-table
+  gate above (a final SELECT over raw tables also needs `check_and_run`) applies to the
+  stored final SELECT of every composed definition used — verified or not, nested too —
+  and to proposal checks and revalidation of a composed definition, which run its query.
 
 ## Addendum (2026-11-17): security re-review
 - Functions that read a table / schema by NAME or run a SQL string have no table reference

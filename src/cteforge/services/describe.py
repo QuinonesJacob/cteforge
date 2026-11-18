@@ -2,7 +2,10 @@
 what references it (DESIGN §6, §15, §19; ADR 0024).
 
 Needs Tool.GET_DEFINITION (viewer). Any state can be described, drafts included: describing
-is how a person or agent learns why something is not usable. Audit is best-effort here
+is how a person or agent learns why something is not usable. The card carries "used by"
+(composed definitions using it), the join-map edges touching its tables ("joins to") and,
+for a composed definition (ADR 0026), its parts, fixed/open variables and full compiled
+SQL; its `variables` are then the open ones (`<alias>.<var>`). Audit is best-effort here
 (`fail_closed=False`): a lookup returns no warehouse data. A former id (renamed) fails
 with a NotFoundError naming the current id (`_library.definition_not_found`).
 """
@@ -13,17 +16,18 @@ from typing import NoReturn
 
 from cteforge.domain.access import Tool
 from cteforge.domain.audit import AuditKind
-from cteforge.domain.models import DefinitionVersionInfo
+from cteforge.domain.models import Definition, DefinitionVersionInfo
 from cteforge.domain.users import User
-from cteforge.services import _audit, _library, _meaning
+from cteforge.services import _audit, _compose, _library, _meaning
 from cteforge.services.auth import require
 from cteforge.services.cards import (
     DefinitionCard,
     DefinitionReferences,
     SearchDocument,
     card_from_definition,
+    variable_card,
 )
-from cteforge.services.context import AppContext
+from cteforge.services.context import AppContext, team_mode
 
 
 def _require(ctx: AppContext, user: User, what: str) -> None:
@@ -64,7 +68,9 @@ def get_definition(
         _not_found(ctx, user, id, version, "get_definition")
     formers = [f.former_id for f in ctx.store.former_ids(id)]
     card = card_from_definition(definition, ctx.store.definition_history(id))
-    card = card.model_copy(update={"former_ids": formers})
+    card = card.model_copy(
+        update={"former_ids": formers, **_library_context(ctx, user, definition)}
+    )
     if card.verified_by is not None:
         verifier = ctx.store.get_user(card.verified_by)
         if verifier is not None:
@@ -88,6 +94,33 @@ def get_definition(
         extra={"op": "get_definition"},
     )
     return card
+
+
+def _library_context(ctx: AppContext, user: User, definition: Definition) -> dict[str, object]:
+    """Card fields that need the library (ADR 0026): used by, joins to, and for a composed
+    definition its composition card and open variables."""
+    tables = set(definition.tables)
+    edges = [
+        e
+        for e in ctx.store.list_joins()
+        if any(
+            _library.same_table(t, e.left_table) or _library.same_table(t, e.right_table)
+            for t in tables
+        )
+        or definition.id in e.sources
+    ]
+    fields: dict[str, object] = {
+        "used_by": _library.used_by(ctx, definition.id),
+        "joins": _library.join_cards(ctx, user, edges),
+    }
+    if definition.composition is not None:
+        mode = team_mode(ctx)
+        fields["composition"] = _compose.composition_card(ctx, definition, mode=mode)
+        fields["variables"] = [
+            variable_card(spec).model_copy(update={"name": name})
+            for name, spec in _compose.open_variables(ctx, definition, mode)
+        ]
+    return fields
 
 
 def definition_history(ctx: AppContext, user: User, id: str) -> list[DefinitionVersionInfo]:
@@ -134,10 +167,11 @@ def search_document(
 
 
 def definition_references(ctx: AppContext, user: User, id: str) -> DefinitionReferences:
-    """Everything inside cteforge that uses definition `id` (ADR 0024): recipes (which
-    alias, pinned or floating), pending proposals targeting or using it, and its former
-    ids — what a rename updates — plus a warning about references cteforge can't see.
-    Raises NotFoundError (a former id names the current one)."""
+    """Everything inside cteforge that uses definition `id` (ADR 0024, 0026): composed
+    definitions using it ("used by": which alias, pinned or floating), pending proposals
+    targeting or using it, and its former ids — what a rename updates — plus a warning
+    about references cteforge can't see. Raises NotFoundError (a former id names the
+    current one)."""
     _require(ctx, user, "definition_references")
     definition = ctx.store.get_definition(id)
     if definition is None:

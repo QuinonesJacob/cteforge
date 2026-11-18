@@ -164,6 +164,19 @@ function ImportFlow({ reviseId }: { reviseId: string | null }) {
     return <ErrorState error={base.error} title={`Could not load ${reviseId}`} onRetry={base.reload} />;
   const card = base.data ?? null;
 
+  // A composed definition (ADR 0026) has parts and a final SELECT, not trusted SQL to edit.
+  if (card?.composed)
+    return (
+      <div className="page">
+        <PageHeader title={`Revise ${card.title}`} />
+        <p className="callout callout-info" role="note">
+          <strong>{card.id}</strong> is a composed definition: it is built from other definitions. Its parts and final
+          SELECT change through a proposal with a composition (agents: <code>revise_definition</code>); its description
+          on the definition's Edit tab.
+        </p>
+      </div>
+    );
+
   if (!can(user))
     return (
       <div className="page">

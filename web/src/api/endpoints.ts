@@ -2,12 +2,11 @@
 import { request } from "./client";
 import type {
   AuditEvent,
-  CheckRequest,
-  JoinEdge,
-  Recipe,
-  RecipeInput,
+  JoinCard,
+  LibraryFilter,
+  LibraryPage,
+  ProposeJoinRequest,
   ReviseDefinitionRequest,
-  TableCard,
   AuditPage,
   CreatedUser,
   DefinitionCard,
@@ -23,7 +22,6 @@ import type {
   RenameDefinitionRequest,
   RunOutcome,
   RunRequest,
-  SearchHit,
   Settings,
   SettingsUpdate,
   User,
@@ -47,9 +45,21 @@ export const getMe = (opts: Opts & { anonymous?: boolean; token?: string } = {})
   request<User>("GET", "/me", opts);
 export const listProfiles = (opts: Opts = {}) => request<Profile[]>("GET", "/profiles", opts);
 
+// ── Library (ADR 0026): definitions + the proposals touching them, filtered server-side ──
+export const listLibrary = (filter: LibraryFilter, opts: Opts = {}) =>
+  request<LibraryPage>("GET", "/library", {
+    ...opts,
+    query: {
+      q: filter.q,
+      trust: filter.trust,
+      approval: filter.approval,
+      created_by: filter.created_by,
+      verified_by: filter.verified_by,
+      needs_my_review: filter.needs_my_review || undefined,
+    },
+  });
+
 // ── Definitions ──
-export const searchDefinitions = (q: string, includeDrafts: boolean, opts: Opts = {}) =>
-  request<SearchHit[]>("GET", "/definitions", { ...opts, query: { q, include_drafts: includeDrafts, limit: 100 } });
 export const getDefinition = (id: string, version?: number, opts: Opts & { includeSource?: boolean } = {}) =>
   request<DefinitionCard>("GET", `/definitions/${enc(id)}`, {
     signal: opts.signal,
@@ -73,22 +83,19 @@ export const reviseDefinition = (id: string, body: ReviseDefinitionRequest) =>
   request<ProposalOutcome>("POST", `/proposals/definitions/${enc(id)}/revise`, { body });
 export const renameDefinition = (id: string, body: RenameDefinitionRequest) =>
   request<ProposalOutcome>("POST", `/proposals/definitions/${enc(id)}/rename`, { body });
-export const proposeRecipe = (recipe: RecipeInput, summary: string) =>
-  request<ProposalOutcome>("POST", "/proposals/recipes", { body: { recipe, summary } });
+/** Join map changes (ADR 0026): annotate an existing edge, or add one no definition contains. */
+export const proposeJoin = (body: ProposeJoinRequest) =>
+  request<ProposalOutcome>("POST", "/proposals/joins", { body });
 
-// ── Catalog: recipes, join map, tables (DESIGN §3, §6) ──
-export const listRecipes = (q: string, includeDrafts: boolean, opts: Opts = {}) =>
-  request<Recipe[]>("GET", "/recipes", { ...opts, query: { q, include_drafts: includeDrafts } });
-export const listJoins = (table: string, includeDrafts: boolean, opts: Opts = {}) =>
-  request<JoinEdge[]>("GET", "/joins", { ...opts, query: { table, include_drafts: includeDrafts } });
-/** No names: every table the library reads (at most 50). */
-export const describeTables = (names: string[], profile: string, opts: Opts = {}) =>
-  request<TableCard[]>("GET", "/tables", { ...opts, query: { name: names, profile } });
+// ── Join map (DESIGN §3, ADR 0026) ──
+export const listJoins = (filter: { table?: string; known_only?: boolean; definition?: string }, opts: Opts = {}) =>
+  request<JoinCard[]>("GET", "/joins", {
+    ...opts,
+    query: { table: filter.table, known_only: filter.known_only || undefined, definition: filter.definition },
+  });
 
 // ── Run ──
 export const runQuery = (body: RunRequest) => request<RunOutcome>("POST", "/run", { body });
-/** Exploratory SQL (check_and_run): labeled new_logic_on_known_joins or exploratory. */
-export const checkSql = (body: CheckRequest) => request<RunOutcome>("POST", "/check", { body });
 
 // ── Proposals ──
 export const listProposals = (status: ProposalStatus, opts: Opts = {}) =>

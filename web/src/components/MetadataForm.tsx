@@ -25,10 +25,10 @@ export function MetadataForm({ value, onChange, errors, showErrors, idTouched, o
   const err = (k: keyof MetadataDraft) => (showErrors ? errors[k] : undefined);
   const idReadOnly = idLocked || !idEditing;
   const idHint = idLocked
-    ? "Agents and recipes use this name. To change it, use Rename ID on the definition page."
+    ? "Agents and composed definitions use this name. To change it, use Rename ID on the definition page."
     : idEditing
-      ? "Agents and recipes use this name. lower_snake_case: letters, digits, single underscores."
-      : "Filled in from the title. Agents and recipes use this name.";
+      ? "Agents and composed definitions use this name. lower_snake_case: letters, digits, single underscores."
+      : "Filled in from the title. Agents and composed definitions use this name.";
   return (
     <div className="meta-form">
       <div className="grid-2">

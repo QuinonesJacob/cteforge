@@ -25,7 +25,8 @@ export function reviewsAll(u: User | null | undefined): boolean {
 /** Import / revise / the Edit tab: parse and propose. */
 export const canPropose = (u: User | null) => can(u, "parse_query") && can(u, "propose_definition");
 export const canRevise = (u: User | null) => can(u, "revise_definition");
-export const canProposeRecipe = (u: User | null) => can(u, "propose_recipe");
+/** Annotate or add join-map edges (ADR 0026). */
+export const canProposeJoin = (u: User | null) => can(u, "propose_join");
 /** Approve or reject any proposal (review_proposal with review_all). */
 export const canApprove = (u: User | null) => can(u, "review_proposal") && reviewsAll(u);
 /** The verify tool; an agent only with the admin role (toolsOf drops it otherwise). */

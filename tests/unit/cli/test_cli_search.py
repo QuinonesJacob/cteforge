@@ -49,9 +49,9 @@ def test_search_with_meaning_off_shows_keyword(demo_cli) -> None:
 def test_rebuild(fresh_demo, fake) -> None:
     result = fresh_demo("search-index", "rebuild")
     assert result.exit_code == 0, result.output
-    assert "fake/bag-of-words: 3 versions; 3 embedded, 0 unchanged" in result.stdout
+    assert "fake/bag-of-words: 4 versions; 4 embedded, 0 unchanged" in result.stdout
     report = json.loads(fresh_demo("search-index", "rebuild", "--json").stdout)
-    assert report["embedded"] == 0 and report["unchanged"] == 3
+    assert report["embedded"] == 0 and report["unchanged"] == 4
 
 
 def test_rebuild_needs_admin(fresh_demo, fake) -> None:

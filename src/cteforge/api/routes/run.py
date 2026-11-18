@@ -26,7 +26,6 @@ def run(ctx: Ctx, user: CurrentUser, body: RunRequest) -> RunOutcome:
         ctx,
         user,
         uses=body.uses,
-        recipe_id=body.recipe_id,
         values=body.values,
         select=body.select,
         dialect=body.dialect,

@@ -1,8 +1,15 @@
 import type { DefinitionCard } from "../api/types";
+import { CompositionView } from "./CompositionView";
+import { JoinTable } from "./JoinTable";
 import { SqlViewer } from "./SqlViewer";
+import { UsedByList } from "./UsedByList";
 import { VariableTable } from "./VariableTable";
 
-/** Meaning, usage notes, facts, variables and the SQL template of one definition version. */
+/**
+ * Meaning, usage notes, facts, variables and the SQL of one definition version; for a
+ * composed definition (ADR 0026) its parts, fixed/open variables and compiled SQL instead of
+ * a template. Also "joins to" (join-map edges touching its tables) and "used by".
+ */
 export function DefinitionOverview({ d }: { d: DefinitionCard }) {
   return (
     <div className="overview">
@@ -47,12 +54,33 @@ export function DefinitionOverview({ d }: { d: DefinitionCard }) {
       </section>
       <section>
         <h2>Variables</h2>
+        {d.composed && (
+          <p className="muted small">
+            Open variables of its parts, named <code>&lt;part&gt;.&lt;variable&gt;</code>.
+          </p>
+        )}
         <VariableTable variables={d.variables} />
       </section>
-      <section>
-        <h2>SQL template</h2>
-        <p className="muted small">Placeholders are highlighted. Everything else is the trusted logic, kept as written.</p>
-        <SqlViewer sql={d.template} label={`${d.id} v${d.version} (${d.source_dialect})`} />
+      {d.composed && d.composition ? (
+        <CompositionView composition={d.composition} label={`${d.id} v${d.version}`} />
+      ) : (
+        <section>
+          <h2>SQL template</h2>
+          <p className="muted small">Placeholders are highlighted. Everything else is the trusted logic, kept as written.</p>
+          <SqlViewer sql={d.template} label={`${d.id} v${d.version} (${d.source_dialect})`} />
+        </section>
+      )}
+      <section aria-label="Joins to">
+        <h2>Joins to …</h2>
+        {(d.joins ?? []).length ? (
+          <JoinTable joins={d.joins ?? []} label={`Joins of ${d.id}`} />
+        ) : (
+          <p className="muted small">No join-map edges touch its tables.</p>
+        )}
+      </section>
+      <section className="card" aria-label="Used by">
+        <h2>Used by</h2>
+        <UsedByList usedBy={d.used_by ?? []} />
       </section>
     </div>
   );

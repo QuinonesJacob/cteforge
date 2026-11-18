@@ -24,7 +24,11 @@ from sqlalchemy import (
 
 # 2: roles, tokens, users.active (ADR 0027). A version-1 database is migrated on open
 # (Store.init_schema): each user's token_sha256 becomes a token named "default".
-STORE_SCHEMA_VERSION = 2
+# 3: ADR 0026 — recipes became composed definitions (migrated on open; the recipe tables
+# are kept, read only by that migration), pending recipe proposals withdrawn, removed tool
+# names stripped from roles and tokens, join edges lose `state` (confirmed_by/added_by set
+# from approved join proposals).
+STORE_SCHEMA_VERSION = 3
 
 _ID = 200  # Max length of ids and names used as keys.
 _ENUM = 32  # Max length of enum values (state, status, role, kind).
@@ -66,6 +70,8 @@ definition_versions = Table(
     UniqueConstraint("definition_id", "version", name="uq_definition_versions_id_version"),
 )
 
+# Legacy (ADR 0026): read only by the schema-3 migration, which turns each recipe into a
+# composed definition. Nothing writes them any more.
 recipes = Table(
     "recipes",
     metadata,

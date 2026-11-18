@@ -239,7 +239,7 @@ def open_context(
             audit.close()
         raise
     chosen = default_embedder(config) if embedder is _DEFAULT else cast(Embedder | None, embedder)
-    return AppContext(
+    ctx = AppContext(
         config=config,
         store=store,
         audit=audit,
@@ -247,6 +247,16 @@ def open_context(
         clock=clock,
         embedder=chosen,
     )
+    # Data upgrades that need the services (audit the store migration, re-mine the join
+    # map once). Imported here: _upgrade builds on modules that import this one.
+    from cteforge.services import _upgrade
+
+    try:
+        _upgrade.after_open(ctx)
+    except BaseException:
+        ctx.close()
+        raise
+    return ctx
 
 
 # ── Settings helpers ─────────────────────────────────────────────────────────────────

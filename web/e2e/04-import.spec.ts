@@ -71,7 +71,7 @@ test("import a trusted query, build variables, auto-apply, then run it", async (
   const idField = page.getByLabel(/^ID/);
   await expect(idField).toHaveValue("invoices_by_status");
   await expect(idField).toHaveAttribute("readonly", "");
-  await expect(page.getByText("Filled in from the title. Agents and recipes use this name.")).toBeVisible();
+  await expect(page.getByText("Filled in from the title. Agents and composed definitions use this name.")).toBeVisible();
   await page.getByRole("button", { name: "Edit ID" }).click();
   await expect(idField).not.toHaveAttribute("readonly", "");
   await page.getByRole("button", { name: "Use title" }).click();

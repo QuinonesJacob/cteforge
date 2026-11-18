@@ -313,19 +313,16 @@ def test_library_files_rebuild_a_fresh_library(workdir: Path) -> None:
             metadata=METADATA,
             annotations=ANNOTATIONS["variables"],
         )
-        recipe = propose_other.propose_recipe(
+        composed = propose.propose_definition(
             ctx,
             agent,
-            recipe={
-                "id": "apac_q3_realization",
-                "title": "APAC realization, Q3 2025",
-                "dialect": "duckdb",
-                "uses": {"rr": {"id": RR}},
-                "values": {"rr": Q3_APAC},
-            },
+            composition={"uses": {"rr": {"id": RR}}, "fixed": {"rr": Q3_APAC}},
+            dialect="duckdb",
+            metadata={"id": "apac_q3_realization", "title": "APAC realization, Q3 2025"},
         )
-        assert recipe.auto_applied and recipe.issues == []
-        expected = run.compile_and_run(ctx, agent, recipe_id="apac_q3_realization")
+        assert composed.auto_applied and composed.issues == []
+        uses = {"q": {"id": "apac_q3_realization"}}
+        expected = run.compile_and_run(ctx, agent, uses=uses)
         assert expected.row_count == 3
         library_io.export_library(ctx, root, workdir / "out")
 
@@ -334,11 +331,11 @@ def test_library_files_rebuild_a_fresh_library(workdir: Path) -> None:
         outcomes = library_io.import_library(fresh, agent, workdir / "out")
         assert [(o.proposal.kind, o.auto_applied, o.issues) for o in outcomes] == [
             (ProposalKind.NEW_DEFINITION, True, []),
-            (ProposalKind.NEW_RECIPE, True, []),
+            (ProposalKind.NEW_DEFINITION, True, []),  # the composed one
         ]
         assert outcomes[0].definition is not None
         assert outcomes[0].definition.state is DefinitionState.LLM_ANNOTATED
-        rerun = run.compile_and_run(fresh, agent, recipe_id="apac_q3_realization")
+        rerun = run.compile_and_run(fresh, agent, uses=uses)
         assert rerun.ran and rerun.label is TrustLabel.LLM_ANNOTATED
         assert rerun.rows == expected.rows
         library_io.export_library(fresh, root, workdir / "again")

@@ -15,8 +15,12 @@ test("a wrong token shows an error and stays on sign-in", async ({ page }) => {
 test("the admin token signs in; the nav shows the admin", async ({ page }) => {
   await signIn(page, tokens.admin);
   const nav = page.getByRole("navigation", { name: "Primary" });
-  for (const link of ["Library", "Import", "Review", "Audit", "Settings"])
+  for (const link of ["Join map", "Import", "Audit", "Settings"])
     await expect(nav.getByRole("link", { name: link, exact: true })).toBeVisible();
+  // ADR 0026: one Library (its badge counts pending proposals); no Explore or Review page.
+  await expect(nav.getByRole("link", { name: /^Library/ })).toBeVisible();
+  await expect(nav.getByRole("link", { name: "Explore" })).toHaveCount(0);
+  await expect(nav.getByRole("link", { name: "Review" })).toHaveCount(0);
   const userButton = page.getByRole("button", { name: /admin/ });
   await expect(userButton).toContainText("admin");
   await userButton.click();

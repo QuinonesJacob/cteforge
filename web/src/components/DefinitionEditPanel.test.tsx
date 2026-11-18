@@ -15,8 +15,8 @@ const def: DefinitionCard = {
 
 const refs: DefinitionReferences = {
   id: "rr", version: 2, state: "verified", former_ids: [], outside_warning: "Outside references break.",
-  recipes: [{ recipe_id: "rr_emea", recipe_version: 1, title: "EMEA", state: "llm_annotated", alias: "rr", pinned_version: null }],
-  proposals: [{ proposal_id: "p9", kind: "new_recipe", target_id: "r9", summary: "Saved Q3", author: "bot", created_at: "2026-11-16T00:00:00Z", relation: "uses" }],
+  used_by: [{ definition_id: "rr_emea", definition_version: 1, title: "EMEA", state: "llm_annotated", alias: "rr", pinned_version: null }],
+  proposals: [{ proposal_id: "p9", kind: "new_definition", target_id: "r9", summary: "Saved Q3", author: "bot", created_at: "2026-11-16T00:00:00Z", relation: "uses" }],
 };
 
 afterEach(() => vi.unstubAllGlobals());
@@ -72,7 +72,7 @@ describe("DefinitionEditPanel", () => {
         </ToastProvider>
       </MemoryRouter>,
     );
-    expect(await screen.findByText("1 recipe")).toBeInTheDocument();
+    expect(await screen.findByText("1 composed definition")).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "Saved Q3" })).toHaveAttribute("href", "/review/p9");
     expect(screen.getByText(/Outside references break/)).toBeInTheDocument();
     const rename = screen.getByRole("button", { name: "Rename ID" });

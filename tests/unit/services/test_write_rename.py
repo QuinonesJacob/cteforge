@@ -30,7 +30,6 @@ from cteforge.services import describe, review
 from cteforge.services.context import AppConfig, AppContext, open_context, set_team_mode
 from cteforge.services.library_io import export_library, import_library
 from cteforge.services.propose import propose_definition, rename_definition, revise_definition
-from cteforge.services.propose_other import propose_recipe
 from cteforge.services.revalidate import revalidate
 from cteforge.services.run import compile_and_run
 from cteforge.services.search import search
@@ -77,16 +76,20 @@ def _propose(ctx: AppContext, user: User = ALICE, **meta: Any):
     )
 
 
-def _recipe(ctx: AppContext, id: str = "rr_emea", version: int | None = None) -> None:
+def _composed(ctx: AppContext, id: str = "rr_emea", version: int | None = None):
+    """A composed definition using OLD (ADR 0026: what recipes were)."""
     uses = {"rr": {"id": OLD} | ({"version": version} if version else {})}
-    recipe = {
-        "id": id,
-        "title": "Realization EMEA",
-        "uses": uses,
-        "values": {"rr": {"regions": ["EMEA"]}},
-        "dialect": "duckdb",
-    }
-    assert propose_recipe(ctx, BOT, recipe=recipe).auto_applied
+    return propose_definition(
+        ctx,
+        BOT,
+        composition={"uses": uses, "fixed": {"rr": {"regions": ["EMEA"]}}},
+        dialect="duckdb",
+        metadata={"id": id, "title": "Realization EMEA"},
+    )
+
+
+def _recipe(ctx: AppContext, id: str = "rr_emea", version: int | None = None) -> None:
+    assert _composed(ctx, id, version).auto_applied
 
 
 @pytest.fixture
@@ -101,13 +104,13 @@ def library(ctx: AppContext) -> AppContext:
 # ── references ────────────────────────────────────────────────────────────────────────
 
 
-def test_references_list_recipes_and_pending_proposals(library: AppContext) -> None:
+def test_references_list_composed_definitions_and_pending_proposals(library: AppContext) -> None:
     ctx = library
     set_team_mode(ctx, TeamMode.STRICT)
     pending = revise_definition(ctx, BOT, id=OLD, base_version=2, metadata={"grain": "x"})
     refs = describe.definition_references(ctx, ALICE, OLD)
     assert (refs.id, refs.version) == (OLD, 2)
-    assert [(r.recipe_id, r.alias, r.pinned_version) for r in refs.recipes] == [
+    assert [(r.definition_id, r.alias, r.pinned_version) for r in refs.used_by] == [
         ("rr_emea", "rr", None),
         ("rr_pinned", "rr", 1),
     ]
@@ -135,11 +138,15 @@ def test_open_mode_rename_applies_everywhere_without_a_new_version(library: AppC
     assert [h.id for h in ctx.store.definition_history(NEW)] == [NEW, NEW]
     assert ctx.store.get_definition(NEW, 1).id == NEW
     assert ctx.store.get_definition(NEW).state is DefinitionState.LLM_ANNOTATED
-    # Recipes point at the new id (pins kept) and still run.
-    assert ctx.store.get_recipe("rr_emea").uses["rr"].id == NEW
-    assert ctx.store.get_recipe("rr_pinned").uses["rr"].model_dump() == {"id": NEW, "version": 1}
-    assert compile_and_run(ctx, BOT, recipe_id="rr_emea").ran
-    assert compile_and_run(ctx, BOT, recipe_id="rr_pinned").definitions == [f"{NEW}@1"]
+    # Composed definitions point at the new id (pins kept) and still run.
+    assert ctx.store.get_definition("rr_emea").composition.uses["rr"].id == NEW
+    pinned = ctx.store.get_definition("rr_pinned").composition.uses["rr"]
+    assert pinned.model_dump() == {"id": NEW, "version": 1}
+    assert compile_and_run(ctx, BOT, uses={"r": {"id": "rr_emea"}}).ran
+    assert compile_and_run(ctx, BOT, uses={"r": {"id": "rr_pinned"}}).definitions == [
+        "rr_pinned@1",
+        f"{NEW}@1",
+    ]
     # The old id is recorded with who and when.
     (former,) = ctx.store.former_ids(NEW)
     assert (former.former_id, former.renamed_by, former.renamed_at) == (OLD, "bot", FIXED)
@@ -174,13 +181,11 @@ def test_a_former_id_fails_naming_the_new_one_in_every_lookup(library: AppContex
         with pytest.raises(NotFoundError) as info:
             call()
         assert str(info.value) == RENAMED
-    # A recipe proposal using the old id gets the same message as a not_found issue.
-    bad = propose_recipe(
-        ctx,
-        BOT,
-        recipe={"id": "r2", "title": "t", "uses": {"rr": {"id": OLD}}, "dialect": "duckdb"},
-    )
-    assert [(i.code, i.message) for i in bad.issues] == [(IssueCode.NOT_FOUND, f"'rr': {RENAMED}")]
+    # A composition using the old id gets the same message as a not_found issue.
+    bad = _composed(ctx, "r2")
+    assert [(i.code, i.message) for i in bad.issues] == [
+        (IssueCode.NOT_FOUND, f"Part 'rr': {RENAMED}")
+    ]
 
 
 def test_keyword_search_finds_the_old_name(library: AppContext) -> None:
@@ -188,8 +193,10 @@ def test_keyword_search_finds_the_old_name(library: AppContext) -> None:
     _propose(ctx, id="other_rate", title="Collections", meaning="m", keywords=[])
     rename_definition(ctx, ALICE, id=OLD, new_id="rr_by_month", summary="")
     hits = search(library, BOT, "realization_rate")
-    assert hits[0].id == "rr_by_month"
-    assert "former_ids" in hits[0].matched_fields
+    # (The composed definitions built on it also mention "realization" in their titles.)
+    hit = next(h for h in hits if h.id == "rr_by_month")
+    assert "former_ids" in hit.matched_fields
+    assert hits.index(hit) < [h.id for h in hits].index("other_rate")
 
 
 def test_chains_report_the_current_id_and_a_rename_can_be_undone(library: AppContext) -> None:
@@ -259,7 +266,7 @@ def test_strict_mode_waits_and_the_reviewer_sees_references(library: AppContext)
     view = review.get_proposal(ctx, APPROVER, out.proposal.id)
     assert view.impact == ["rr_emea", "rr_pinned"] and view.diff == ""
     refs = view.payload["references"]
-    assert [r["recipe_id"] for r in refs["recipes"]] == ["rr_emea", "rr_pinned"]
+    assert [r["definition_id"] for r in refs["used_by"]] == ["rr_emea", "rr_pinned"]
     with pytest.raises(PolicyError, match="nothing to verify"):
         review.approve(ctx, APPROVER, out.proposal.id, verify=True)
     applied = review.approve(ctx, APPROVER, out.proposal.id)
@@ -288,10 +295,12 @@ def test_pending_proposals_follow_the_rename(library: AppContext) -> None:
     ctx = library
     set_team_mode(ctx, TeamMode.STRICT)
     revision = revise_definition(ctx, BOT, id=OLD, base_version=2, metadata={"grain": "g"})
-    recipe = propose_recipe(
+    recipe = propose_definition(
         ctx,
         BOT,
-        recipe={"id": "r3", "title": "t", "uses": {"x": {"id": OLD}}, "dialect": "duckdb"},
+        composition={"uses": {"x": {"id": OLD}}},
+        dialect="duckdb",
+        metadata={"id": "r3", "title": "t"},
     )
     first = rename_definition(ctx, ALICE, id=OLD, new_id=NEW)
     second = rename_definition(ctx, ALICE, id=OLD, new_id="other_name")
@@ -299,7 +308,8 @@ def test_pending_proposals_follow_the_rename(library: AppContext) -> None:
     moved = ctx.store.get_proposal(revision.proposal.id)
     assert moved.target_id == NEW and moved.status is ProposalStatus.PENDING
     assert yaml.safe_load(moved.payload["definition_yaml"])["id"] == NEW
-    assert ctx.store.get_proposal(recipe.proposal.id).payload["recipe"]["uses"]["x"]["id"] == NEW
+    composed = yaml.safe_load(ctx.store.get_proposal(recipe.proposal.id).payload["definition_yaml"])
+    assert composed["composition"]["uses"]["x"]["id"] == NEW
     # The revision still applies (a rename keeps the version), now under the new id.
     applied = review.approve(ctx, APPROVER, revision.proposal.id)
     assert (applied.definition.id, applied.definition.version) == (NEW, 3)

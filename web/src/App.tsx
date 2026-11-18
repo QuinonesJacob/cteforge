@@ -1,15 +1,14 @@
-import { Route, Routes } from "react-router-dom";
+import { Navigate, Route, Routes } from "react-router-dom";
 import { AppLayout } from "./components/AppLayout";
 import { Loading } from "./components/Loading";
 import { ToastViewport } from "./components/ToastViewport";
 import { AuditPage } from "./pages/AuditPage";
 import { DefinitionPage } from "./pages/DefinitionPage";
-import { ExplorePage } from "./pages/ExplorePage";
 import { ImportPage } from "./pages/ImportPage";
+import { JoinMapPage } from "./pages/JoinMapPage";
 import { LibraryPage } from "./pages/LibraryPage";
 import { NotFoundPage } from "./pages/NotFoundPage";
 import { ProposalPage } from "./pages/ProposalPage";
-import { ReviewPage } from "./pages/ReviewPage";
 import { SettingsPage } from "./pages/SettingsPage";
 import { SignInPage } from "./pages/SignInPage";
 import { useAuth } from "./state/AuthContext";
@@ -34,9 +33,11 @@ export function App() {
       <Routes>
         <Route path="/" element={<LibraryPage />} />
         <Route path="/definitions/:id" element={<DefinitionPage />} />
-        <Route path="/explore" element={<ExplorePage />} />
+        {/* ADR 0026: Explore and the Review list are gone; their links land in the Library. */}
+        <Route path="/explore" element={<Navigate to="/" replace />} />
+        <Route path="/joins" element={<JoinMapPage />} />
         <Route path="/import" element={<ImportPage />} />
-        <Route path="/review" element={<ReviewPage />} />
+        <Route path="/review" element={<Navigate to="/?review=mine" replace />} />
         <Route path="/review/:id" element={<ProposalPage />} />
         <Route path="/audit" element={<AuditPage />} />
         <Route path="/settings" element={<SettingsPage />} />

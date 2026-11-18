@@ -7,7 +7,7 @@ Project root: ../../../CLAUDE.md
 - `tables.py` — SQLAlchemy Core `MetaData` + tables: `schema_meta`, `definitions` (latest
   pointer + indexed columns), `definition_versions` (codec YAML text per version + author,
   created_at, change_note, logic_changed, state, verified_by/at), `recipes`/`recipe_versions`
-  (JSON), `join_edges` (JSON + indexed tables), `proposals` (JSON + indexed status/target),
+  (legacy JSON: read only by the schema-3 migration), `join_edges` (JSON + indexed tables), `proposals` (JSON + indexed status/target),
   `users` (name, role = a role name, kind, `active`, legacy token_sha256 unique — a
   random never-matched value for new users and after migration; ADR 0027), `roles` (name PK, description,
   allowed/defaults JSON tool lists, review_all, builtin, updated_at), `tokens` (id PK,
@@ -22,13 +22,21 @@ Project root: ../../../CLAUDE.md
   proposal_id; `create_all`, no migration).
 - `store.py` — the `Store` class (public API below). Nothing else is imported by services.
 
-Schema version (`tables.STORE_SCHEMA_VERSION`) is 2. `init_schema` runs `create_all`, adds
+Schema version (`tables.STORE_SCHEMA_VERSION`) is 3. `init_schema` runs `create_all`, adds
 `users.active` and `tokens.parent_token_id` (+ its index) to older tables (explicit,
 idempotent `ALTER TABLE`, static DDL), on a
 version-1 database migrates each user's `token_sha256` to a `default` token (follow_role)
-for users with no token rows, then bumps the version; seeds missing built-in roles
-(`domain.access.BUILTIN_ROLES`, edits kept); refuses a newer version. A failed first open
-(concurrent process) is retried once.
+for users with no token rows; on a version-1 or -2 database runs the ADR 0026 migration
+(`_migrate_v2`, same transaction): each recipe (latest version) → a composed definition v1
+(same id when free and not a former id, else `<id>_recipe`[`_n`]; llm_annotated, or
+verified by the approver of the proposal that verified it — no record → llm_annotated),
+pending `new_recipe` proposals → withdrawn by `cteforge` with a comment, `list_recipes` /
+`propose_recipe` stripped from roles' allowed/defaults and tokens' include/exclude, join
+edges' `state` dropped and `added_by` / `confirmed_by` set from approved join proposals;
+it leaves a note in `settings` (`MIGRATION_NOTES_SETTING`) for services to audit
+(`migration_notes` / `clear_migration_notes`); then bumps the version; seeds missing
+built-in roles (`domain.access.BUILTIN_ROLES`, edits kept); refuses a newer version. A
+failed first open (concurrent process) is retried once.
 
 If something does not clearly fit one of the above, it does not belong here.
 "Not forbidden" is not the same as "allowed."
@@ -50,7 +58,8 @@ class Store:
     def set_definition_state(self, id: str, version: int, state: DefinitionState, *,
                              verified_by: str | None = None, verified_at: date | None = None) -> Definition
     # renaming (ADR 0024) — one transaction: definitions row, every version (+ id in its
-    # YAML), every recipe version using it, every proposal naming it
+    # YAML), every version of every composed definition using it (parts; pins kept), every
+    # proposal naming it
     # (domain.proposals.proposal_with_definition_renamed), search vectors deleted, former id
     # recorded (earlier former ids re-pointed; taking back an own former id removes it)
     def rename_definition(self, old: str, new: str, *, renamed_by: str,
@@ -59,11 +68,11 @@ class Store:
         # StoreError: old missing, new exists, new is another definition's former id
     def former_id(self, id: str) -> FormerId | None
     def former_ids(self, definition_id: str | None = None) -> list[FormerId]  # oldest first
-    # recipes
-    def add_recipe_version(self, r: Recipe, *, author: str) -> Recipe     # same version rule
-    def get_recipe(self, id: str, version: int | None = None) -> Recipe | None
-    def list_recipes(self) -> list[Recipe]
-    def recipes_using(self, definition_id: str) -> list[Recipe]           # latest versions; impact preview
+    # composed definitions (ADR 0026)
+    def definitions_using(self, definition_id: str) -> list[Definition]  # latest composed versions using it ("used by")
+    # schema migration report (ADR 0026)
+    def migration_notes(self) -> dict | None                              # what the last migration did
+    def clear_migration_notes(self) -> None
     # join map
     def upsert_join(self, edge: JoinEdge) -> JoinEdge                     # replace by id
     def get_join(self, id: str) -> JoinEdge | None

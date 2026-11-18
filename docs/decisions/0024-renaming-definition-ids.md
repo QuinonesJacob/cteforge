@@ -69,3 +69,10 @@ outside cteforge (agent instructions, scripts) that cteforge can't see.
 - **Reuse:** a former ID can't become another definition's ID (new or by rename). A
   definition may take back one of its **own** former IDs (undoing a rename); that row is
   then removed, since the ID is current again.
+
+## Addendum (2026-11-18): composed definitions (ADR 0026)
+Recipes no longer exist. "References" are now the composed definitions that use the
+definition as a part (`DefinitionReferences.used_by`: alias, pinned or floating) and the
+pending proposals that target it or whose composed definition uses it. A rename rewrites
+the parts of every version of every composed definition using it (pins kept) and of
+pending proposals' definitions, in the same transaction.

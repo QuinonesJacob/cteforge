@@ -22,7 +22,7 @@ from cteforge.domain.errors import (
     StaleVersionError,
 )
 from cteforge.domain.issues import IssueCode
-from cteforge.domain.models import DefinitionState, Recipe, TeamMode
+from cteforge.domain.models import Composition, Definition, DefinitionState, TeamMode
 from cteforge.domain.proposals import ProposalKind, ProposalStatus
 from cteforge.domain.users import ActorKind, User, UserRole
 from cteforge.services import review
@@ -437,13 +437,15 @@ def test_withdraw_author_only(ctx: AppContext) -> None:
 
 def test_list_and_get_with_diff_and_impact(ctx: AppContext) -> None:
     _propose(ctx)
-    ctx.store.add_recipe_version(
-        Recipe(
+    ctx.store.add_definition_version(
+        Definition(
             id="rr_emea",
             title="RR EMEA",
-            uses={"rr": {"id": "realization_rate"}},
-            values={"rr": {"regions": ["EMEA"]}},
-            dialect=Dialect.DUCKDB,
+            template="SELECT * FROM rr",
+            composition=Composition(
+                uses={"rr": {"id": "realization_rate"}}, fixed={"rr": {"regions": ["EMEA"]}}
+            ),
+            source_dialect=Dialect.DUCKDB,
         ),
         author="alice",
     )
@@ -456,7 +458,7 @@ def test_list_and_get_with_diff_and_impact(ctx: AppContext) -> None:
     view = review.get_proposal(ctx, VIEWER, change.proposal.id)
     assert view.impact == ["rr_emea"]
     assert "--- realization_rate@v1" in view.diff and "+title: RR" in view.diff
-    assert len(review.list_proposals(ctx, VIEWER)) == 2
+    assert len(review.list_proposals(ctx, VIEWER)) == 2  # (rr_emea was stored directly)
     with pytest.raises(NotFoundError):
         review.get_proposal(ctx, VIEWER, "missing")
 
@@ -545,6 +547,7 @@ def test_concurrent_approve_and_reject_only_one_wins(
         pending = propose_join(
             c,
             ALICE,
+            action="add",
             left_table="deals",
             right_table="accounts",
             keys=[["account_id", "account_id"]],

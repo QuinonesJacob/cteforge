@@ -28,13 +28,11 @@ class Tool(StrEnum):
     CHECK_AND_RUN = "check_and_run"
     DESCRIBE_TABLES = "describe_tables"
     LIST_JOINS = "list_joins"
-    LIST_RECIPES = "list_recipes"  # until ADR 0026 removes recipes
     # build
     PARSE_QUERY = "parse_query"
     PROPOSE_DEFINITION = "propose_definition"
     REVISE_DEFINITION = "revise_definition"
     PROPOSE_JOIN = "propose_join"
-    PROPOSE_RECIPE = "propose_recipe"  # until ADR 0026
     # review
     LIST_PROPOSALS = "list_proposals"
     REVIEW_PROPOSAL = "review_proposal"  # approve / reject
@@ -45,6 +43,12 @@ class Tool(StrEnum):
     MANAGE_USER = "manage_user"
     MANAGE_ROLE = "manage_role"
     MANAGE_SETTINGS = "manage_settings"
+
+
+# Tool names removed from the catalog (ADR 0026: recipes became composed definitions).
+# Stored roles and tokens are stripped of them by the store migration; reads drop any
+# unknown name anyway.
+REMOVED_TOOLS: frozenset[str] = frozenset({"list_recipes", "propose_recipe"})
 
 
 class ToolGroup(StrEnum):
@@ -62,14 +66,12 @@ TOOL_GROUPS: dict[ToolGroup, tuple[Tool, ...]] = {
         Tool.CHECK_AND_RUN,
         Tool.DESCRIBE_TABLES,
         Tool.LIST_JOINS,
-        Tool.LIST_RECIPES,
     ),
     ToolGroup.BUILD: (
         Tool.PARSE_QUERY,
         Tool.PROPOSE_DEFINITION,
         Tool.REVISE_DEFINITION,
         Tool.PROPOSE_JOIN,
-        Tool.PROPOSE_RECIPE,
     ),
     ToolGroup.REVIEW: (Tool.LIST_PROPOSALS, Tool.REVIEW_PROPOSAL, Tool.VERIFY),
     ToolGroup.ADMIN: (

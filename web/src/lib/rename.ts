@@ -21,13 +21,13 @@ export function checkRename(currentId: string, newId: string, confirm: string): 
   return { ready: Boolean(id) && idError === null && confirm === id, idError };
 }
 
-/** How many things inside cteforge name the ID. */
+/** How many things inside cteforge name the ID (composed definitions using it, proposals). */
 export function referenceCount(refs: DefinitionReferences | undefined | null): number {
   if (!refs) return 0;
-  return refs.recipes.length + refs.proposals.length;
+  return refs.used_by.length + refs.proposals.length;
 }
 
-/** Plain-language form of a recipe reference: which version it uses. */
-export function recipeUse(pinned: number | null | undefined): string {
+/** Plain-language form of a part reference (ADR 0026): which version it uses. */
+export function partUse(pinned: number | null | undefined): string {
   return pinned == null ? "follows the latest version" : `pins v${pinned}`;
 }

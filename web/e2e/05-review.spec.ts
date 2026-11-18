@@ -44,19 +44,22 @@ test("admin switches the team to strict mode in Settings", async ({ page }) => {
   await expect(page.getByRole("radio", { name: /Strict/ })).toBeChecked();
 });
 
-test("an agent's revision waits in Review; a second human approves and verifies it", async ({ page }) => {
+test("an agent's revision waits in the Library; a second human approves and verifies it", async ({ page }) => {
   const summary = "Add cash conversion keyword";
   const id = await revise("realization_rate", tokens.agent, "cash conversion", summary);
 
-  // The admin sees it pending in the Review queue.
-  await signIn(page, tokens.admin, "/review");
-  await expect(page.getByRole("tab", { name: /Pending/ })).toHaveAttribute("aria-selected", "true");
-  const item = page.locator(".proposal-item").filter({ hasText: summary });
-  await expect(item).toBeVisible();
-  await expect(item).toContainText("claude-agent");
-  await expect(item).toContainText("pending");
-  await expect(page.getByRole("link", { name: /Review/ }).getByLabel(/pending/)).toBeVisible();
-  await screenshot(page, "05-review-queue");
+  // The admin sees it in the Library under "Needs my review": a badge on the definition's
+  // row links to the proposal (ADR 0026: no separate Review page).
+  await signIn(page, tokens.admin, "/?review=mine");
+  const row = page.locator("article.hit").filter({ hasText: "Realization Rate (monthly, by region)" });
+  await expect(row.getByText("Needs my review")).toBeVisible();
+  const badge = row.getByRole("link", { name: "Revision pending" });
+  await expect(badge).toHaveAttribute("href", `/review/${id}`);
+  await expect(page.getByRole("navigation", { name: "Primary" }).getByRole("link", { name: /^Library/ }).getByLabel(/pending/)).toBeVisible();
+  await screenshot(page, "05-library-needs-review");
+  await badge.click();
+  await expect(page.getByRole("heading", { level: 1, name: summary })).toBeVisible();
+  await expect(page.getByText("claude-agent").first()).toBeVisible();
 
   // Ben (approver, human, not the author) approves with "also verify".
   await page.getByRole("button", { name: /admin/ }).click();

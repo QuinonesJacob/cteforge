@@ -9,7 +9,6 @@ from cteforge.api.schemas import (
     ApproveRequest,
     ProposeDefinitionRequest,
     ProposeJoinRequest,
-    ProposeRecipeRequest,
     RejectRequest,
     RenameDefinitionRequest,
     ReviseDefinitionRequest,
@@ -29,6 +28,7 @@ def propose_definition(
         ctx,
         user,
         sql=body.sql,
+        composition=body.composition,
         dialect=body.dialect,
         metadata=body.metadata,
         annotations=body.annotations,
@@ -47,6 +47,7 @@ def revise_definition(
         id=id,
         base_version=body.base_version,
         sql=body.sql,
+        composition=body.composition,
         dialect=body.dialect,
         metadata=body.metadata,
         annotations=body.annotations,
@@ -73,19 +74,17 @@ def propose_join(ctx: Ctx, user: CurrentUser, body: ProposeJoinRequest) -> Propo
     return propose_other.propose_join(
         ctx,
         user,
+        action=body.action,
+        id=body.id,
         left_table=body.left_table,
         right_table=body.right_table,
         keys=body.keys,
         join_type=body.join_type,
         relationship=body.relationship,
         traps=body.traps,
+        notes=body.notes,
         summary=body.summary,
     )
-
-
-@router.post("/proposals/recipes", response_model=ProposalOutcome)
-def propose_recipe(ctx: Ctx, user: CurrentUser, body: ProposeRecipeRequest) -> ProposalOutcome:
-    return propose_other.propose_recipe(ctx, user, recipe=body.recipe, summary=body.summary)
 
 
 @router.get("/proposals", response_model=list[ProposalView])

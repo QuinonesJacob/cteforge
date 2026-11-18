@@ -16,8 +16,10 @@ from cteforge.domain.users import ActorKind
 class ProposalKind(StrEnum):
     NEW_DEFINITION = "new_definition"
     REVISE_DEFINITION = "revise_definition"
+    # Legacy (ADR 0026 removed recipes): only proposals stored before then carry it; the
+    # store migration withdrew the pending ones. Nothing creates it any more.
     NEW_RECIPE = "new_recipe"
-    NEW_JOIN = "new_join"
+    NEW_JOIN = "new_join"  # add an edge, or annotate one (payload.action; ADR 0026)
     RENAME_DEFINITION = "rename_definition"  # A definition's ID changes (ADR 0024).
 
 
@@ -43,11 +45,13 @@ class Proposal(BaseModel):
 
     id: str  # uuid4 hex
     kind: ProposalKind
-    target_id: str  # Definition / recipe / join id the proposal creates or changes.
+    target_id: str  # Definition / join id the proposal creates or changes.
     base_version: int | None = None  # revise_definition: version it was based on.
-    # Payload by kind: definitions → {"definition_yaml": str}; recipes → {"recipe": dict};
-    # joins → {"join": dict}; renames → {"from_id", "to_id", "references": dict (the
-    # DefinitionReferences seen when proposed)}. Always plain JSON-compatible data.
+    # Payload by kind: definitions → {"definition_yaml": str, "logic_changed": bool};
+    # joins → {"join": dict, "base_join": dict | None, "action": "add" | "annotate",
+    # "evidence": RelationshipEvidence dict | None}; renames → {"from_id", "to_id",
+    # "references": dict (the DefinitionReferences seen when proposed)}; legacy recipes →
+    # {"recipe": dict}. Always plain JSON-compatible data.
     payload: dict[str, Any]
     checks: list[Issue] = Field(default_factory=list)
     summary: str = ""  # Author's one-line description of the change.
@@ -65,19 +69,20 @@ class Proposal(BaseModel):
 
 def proposal_with_definition_renamed(p: Proposal, old: str, new: str) -> Proposal | None:
     """`p` with every stored copy of definition id `old` replaced by `new` (ADR 0024), or
-    None when it names `old` nowhere: a definition proposal's `target_id` and the id in its
-    definition YAML; the uses of a recipe proposal's recipe. A rename proposal's `from_id`
-    / `to_id` are the record of what it asked for and are kept (only its target moves)."""
+    None when it names `old` nowhere: a definition proposal's `target_id`, the id in its
+    definition YAML and the parts its composition uses (ADR 0026); the uses of a legacy
+    recipe proposal. A rename proposal's `from_id` / `to_id` are the record of what it
+    asked for and are kept (only its target moves)."""
     update: dict[str, Any] = {}
     payload = dict(p.payload)
     if p.kind in DEFINITION_KINDS and p.target_id == old:
         update["target_id"] = new
-        text = payload.get("definition_yaml")
-        if isinstance(text, str):
-            definition = definition_from_yaml(text)
-            payload["definition_yaml"] = definition_to_yaml(
-                definition.model_copy(update={"id": new})
-            )
+    text = payload.get("definition_yaml")
+    if p.kind in DEFINITION_KINDS and isinstance(text, str):
+        definition = definition_from_yaml(text)
+        renamed = definition.with_definition_renamed(old, new)
+        if renamed is not definition:
+            payload["definition_yaml"] = definition_to_yaml(renamed)
             update["payload"] = payload
     recipe = payload.get("recipe")
     if p.kind is ProposalKind.NEW_RECIPE and isinstance(recipe, dict):

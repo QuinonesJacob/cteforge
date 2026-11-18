@@ -5,14 +5,15 @@ from __future__ import annotations
 import datetime as dt
 import re
 from enum import StrEnum
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from pydantic import AfterValidator, BaseModel, ConfigDict, Field, model_validator
 
 from cteforge.domain.dialects import Dialect
 from cteforge.domain.variables import PLACEHOLDER_FIELDS, RangeShape, Role, VariableType
 
-SCHEMA_VERSION = 1
+# 2: a definition's body may be a composition (ADR 0026). Version-1 files still load.
+SCHEMA_VERSION = 2
 _IDENT = re.compile(r"^[a-z][a-z0-9_]*$")
 
 
@@ -168,6 +169,50 @@ class VariableSpec(BaseModel):
         return [self.slots[i : i + size] for i in range(0, len(self.slots), size)]
 
 
+class DefinitionRef(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    id: Ident
+    version: int | None = None  # None = float on the latest usable version (DESIGN §15).
+
+
+class Composition(BaseModel):
+    """The body of a composed definition (ADR 0026): other definitions used as parts, by
+    alias, and the variables this definition always sets on them. The final SELECT over the
+    aliases is the definition's `template` (its own literals may be annotated like any
+    SQL); an empty template means exactly one part, used as is (with `fixed` values).
+
+    A part without `version` floats to its latest usable version, so a fix to a part
+    reaches every definition built on it; a `version` pins it. The definition's open
+    variables are its parts' variables that `fixed` does not set, named `<alias>.<var>`."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    uses: dict[str, DefinitionRef] = Field(min_length=1)  # alias -> part
+    fixed: dict[str, dict[str, Any]] = Field(default_factory=dict)  # alias -> var -> value
+
+    @model_validator(mode="after")
+    def _consistent(self) -> Composition:
+        for alias in self.uses:
+            _check_ident(alias)
+        unknown = sorted(set(self.fixed) - set(self.uses))
+        if unknown:
+            raise ValueError(f"fixed names aliases that are not in uses: {unknown}")
+        return self
+
+    def uses_definition(self, id: str) -> bool:
+        return any(ref.id == id for ref in self.uses.values())
+
+    def with_definition_renamed(self, old: str, new: str) -> Composition:
+        """Every use of definition `old` pointing at `new` (ADR 0024); pinned versions are
+        kept (a rename keeps version numbers)."""
+        uses = {
+            alias: ref.model_copy(update={"id": new}) if ref.id == old else ref
+            for alias, ref in self.uses.items()
+        }
+        return self.model_copy(update={"uses": uses})
+
+
 class Definition(BaseModel):
     """A trusted query (M1: whole query; M2: one CTE) with its typed variables."""
 
@@ -186,6 +231,9 @@ class Definition(BaseModel):
     # `$period__start` (DuckDB), `:period__start` (Snowflake); see VariableSlot.placeholder.
     template: str
     variables: list[VariableSpec] = Field(default_factory=list)
+    # ADR 0026: set for a composed definition (parts + fixed values); `template` is then
+    # its final SELECT over the part aliases ("" = exactly one part, used as is).
+    composition: Composition | None = None
     tables: list[str] = Field(default_factory=list)
     outputs: list[str] = Field(default_factory=list)
     grain: str | None = None  # Plain language, e.g. "one row per account per month".
@@ -196,8 +244,38 @@ class Definition(BaseModel):
     verified_by: str | None = None
     verified_at: dt.date | None = None
 
+    @model_validator(mode="after")
+    def _body(self) -> Definition:
+        if self.composition is None:
+            if not self.template.strip():
+                raise ValueError("a definition needs SQL (template) or a composition")
+            return self
+        if not self.template.strip() and len(self.composition.uses) != 1:
+            raise ValueError("a composition without a final SELECT must use exactly one part")
+        clash = sorted({v.name for v in self.variables} & set(self.composition.uses))
+        if clash:
+            raise ValueError(f"variables may not be named like a part alias: {clash}")
+        return self
+
+    @property
+    def composed(self) -> bool:
+        return self.composition is not None
+
     def variable(self, name: str) -> VariableSpec | None:
         return next((v for v in self.variables if v.name == name), None)
+
+    def uses_definition(self, id: str) -> bool:
+        """A composed definition that uses definition `id` as a part."""
+        return self.composition is not None and self.composition.uses_definition(id)
+
+    def with_definition_renamed(self, old: str, new: str) -> Definition:
+        """This definition with its own id and every part reference `old` → `new`."""
+        update: dict[str, Any] = {}
+        if self.id == old:
+            update["id"] = new
+        if self.composition is not None and self.composition.uses_definition(old):
+            update["composition"] = self.composition.with_definition_renamed(old, new)
+        return self.model_copy(update=update) if update else self
 
 
 class DefinitionVersionInfo(BaseModel):
@@ -239,8 +317,49 @@ class JoinKey(BaseModel):
     right: str  # column on right_table
 
 
+RELATIONSHIPS = ("one_to_one", "one_to_many", "many_to_one", "many_to_many")
+JOIN_TYPES = ("inner", "left", "right", "full")
+Kind = Literal["human", "agent"]  # domain.users.ActorKind values (no import: users → access → here)
+
+
+class SideCount(BaseModel):
+    """One side of a relationship check: rows with every key set, and distinct keys."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    table: str
+    keys: list[str]
+    rows: int
+    distinct_keys: int
+
+    @property
+    def unique(self) -> bool:
+        return self.rows == self.distinct_keys
+
+
+class RelationshipEvidence(BaseModel):
+    """What the warehouse says about a relationship claim (ADR 0026): COUNT(*) vs
+    COUNT(DISTINCT key) on each side. `observed` is what the data shows now; data can
+    show `one` where the claim says `many` (a subset), never the reverse."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    claimed: str
+    observed: str
+    left: SideCount
+    right: SideCount
+    consistent: bool  # Every side the claim calls "one" is unique in the data.
+    profile: str | None = None
+    checked_at: dt.datetime | None = None
+
+
 class JoinEdge(BaseModel):
-    """Join map entry (DESIGN §3): mined from trusted SQL or proposed. A reference, not a gate."""
+    """Join map entry (DESIGN §3, ADR 0026): mined from definitions' SQL, or added by a
+    proposal. A reference, not a gate.
+
+    `is_known()` (counts for trust labels): mined from a definition (`sources`), added by a
+    person, or confirmed by a person (`confirmed_by`: a human approved a proposal on it).
+    An agent-added edge is not known until a person approves it."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -250,42 +369,23 @@ class JoinEdge(BaseModel):
     keys: list[JoinKey] = Field(min_length=1)
     join_type: str = "inner"  # inner, left, right, full
     relationship: str | None = None  # one_to_one, one_to_many, many_to_one, many_to_many
-    usage_count: int = 0  # How many definitions use it.
+    usage_count: int = 0  # How many definitions use it (len(sources)).
     traps: list[str] = Field(default_factory=list)  # e.g. "fan-out: one deal has many invoices"
-    state: DefinitionState = DefinitionState.LLM_ANNOTATED
+    notes: str = ""
+    sources: list[str] = Field(default_factory=list)  # Definition ids it was mined from.
+    added_by: str | None = None  # Who proposed it when no definition contained it.
+    added_by_kind: Kind | None = None
+    confirmed_by: str | None = None  # A PERSON who approved a proposal on this edge.
+    evidence: RelationshipEvidence | None = None  # Last relationship check (annotate).
 
+    @model_validator(mode="before")
+    @classmethod
+    def _legacy(cls, data: Any) -> Any:
+        """Edges stored before ADR 0026 carried `state`; it no longer means anything
+        (known/confirmed replace it; the store migration sets confirmed_by)."""
+        if isinstance(data, dict) and "state" in data:
+            data = {k: v for k, v in data.items() if k != "state"}
+        return data
 
-class DefinitionRef(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    id: Ident
-    version: int | None = None  # None = float on the latest usable version (DESIGN §15).
-
-
-class Recipe(BaseModel):
-    """Saved query as definitions + values + optional final SELECT (DESIGN §3, §17)."""
-
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    schema_version: int = SCHEMA_VERSION
-    id: Ident
-    version: int = 1
-    title: str
-    description: str = ""
-    uses: dict[str, DefinitionRef]  # alias -> definition
-    values: dict[str, dict[str, Any]] = Field(default_factory=dict)  # alias -> var -> value
-    select: str | None = None  # Final SELECT over the aliases, in `dialect`.
-    dialect: Dialect
-    state: DefinitionState = DefinitionState.DRAFT
-
-    def uses_definition(self, id: str) -> bool:
-        return any(ref.id == id for ref in self.uses.values())
-
-    def with_definition_renamed(self, old: str, new: str) -> Recipe:
-        """This recipe with every use of definition `old` pointing at `new` (ADR 0024);
-        pinned versions are kept (a rename keeps version numbers)."""
-        uses = {
-            alias: ref.model_copy(update={"id": new}) if ref.id == old else ref
-            for alias, ref in self.uses.items()
-        }
-        return self.model_copy(update={"uses": uses})
+    def is_known(self) -> bool:
+        return bool(self.sources) or self.added_by_kind == "human" or self.confirmed_by is not None

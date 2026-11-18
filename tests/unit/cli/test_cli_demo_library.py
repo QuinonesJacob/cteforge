@@ -30,6 +30,8 @@ BLANK_ENV = dict.fromkeys(
 
 RR_VARS = '{"rr": {"period": {"start": "2025-07-01", "end": "2025-10-01"}, "regions": ["APAC"]}}'
 EXAMPLE_IDS = {"realization_rate", "booked_vs_collected", "realization_rate_by_grain"}
+# The demo agent's composed definition (ADR 0026), built from two of the examples.
+COMPOSED_ID = "realization_with_booked"
 
 
 # ── demo ─────────────────────────────────────────────────────────────────────────────
@@ -94,7 +96,7 @@ def test_search_realization(demo_cli: Invoke):
     assert result.exit_code == 0, result.output
     assert "realization_rate " in result.output and "llm_annotated" in result.output
     hits = json.loads(demo_cli("search", "realization", "--json").stdout)
-    assert hits[0]["id"] in {"realization_rate", "realization_rate_by_grain"}
+    assert hits[0]["id"] in {"realization_rate", "realization_rate_by_grain", COMPOSED_ID}
     assert {"realization_rate", "realization_rate_by_grain"} <= {h["id"] for h in hits}
     none = demo_cli("search", "zzzunmatched")
     assert none.exit_code == 0 and "no matches" in none.output
@@ -210,7 +212,7 @@ def test_export_and_unchanged_import(demo_cli: Invoke, tmp_path: Path):
     out = tmp_path / "lib"
     result = demo_cli("export", str(out))
     assert result.exit_code == 0, result.output
-    assert {p.stem for p in (out / "definitions").glob("*.yml")} == EXAMPLE_IDS
+    assert {p.stem for p in (out / "definitions").glob("*.yml")} == EXAMPLE_IDS | {COMPOSED_ID}
     again = demo_cli("import-library", str(out))
     assert again.exit_code == 0, again.output
     assert "nothing changed" in again.output
@@ -231,7 +233,7 @@ def _retitle(path: Path, title: str) -> None:
 
 def test_review_flow(fresh_demo: Invoke, tmp_path: Path):
     listed = fresh_demo("proposals", "list")
-    assert listed.exit_code == 0 and listed.output.count("approved (auto)") == 3
+    assert listed.exit_code == 0 and listed.output.count("approved (auto)") == 4
 
     assert fresh_demo("settings", "mode", "strict").exit_code == 0  # nothing auto-applies
     lib = tmp_path / "lib"
@@ -285,12 +287,18 @@ def test_references_and_rename(fresh_demo: Invoke):
     refs = fresh_demo("references", "realization_rate")
     assert refs.exit_code == 0, refs.output
     assert "realization_rate v1" in refs.stdout and "outside cteforge" in refs.stdout
+    # The demo's composed definition uses it (ADR 0026: "used by").
+    assert "USED BY" in refs.stdout and COMPOSED_ID in refs.stdout
     as_json = json.loads(fresh_demo("references", "realization_rate", "--json").stdout)
     assert as_json["id"] == "realization_rate" and as_json["former_ids"] == []
+    assert [u["definition_id"] for u in as_json["used_by"]] == [COMPOSED_ID]
     renamed = fresh_demo("rename", "realization_rate", "rr_monthly", "--summary", "clearer")
     assert renamed.exit_code == 0, renamed.output
     assert "rename_definition" in renamed.stdout and "auto-applied" in renamed.stdout
     missing = fresh_demo("run", "--use", "x=realization_rate")
     assert missing.exit_code == 1 and "was renamed to 'rr_monthly'" in missing.output
     assert "formerly realization_rate" in fresh_demo("references", "rr_monthly").stdout
+    # The composed definition follows the rename and still runs.
+    composed = fresh_demo("run", "--use", f"c={COMPOSED_ID}", "--compile-only")
+    assert composed.exit_code == 0, composed.output
     assert fresh_demo("rename", "rr_monthly", "Bad Name").exit_code == 1

@@ -41,7 +41,7 @@ from starlette.applications import Starlette
 from cteforge.domain.access import Tool, ToolMode
 from cteforge.domain.dialects import Dialect
 from cteforge.domain.errors import CteforgeError, PermissionDeniedError, PolicyError
-from cteforge.domain.models import Annotation, DefinitionRef, JoinEdge, JoinKey, Recipe
+from cteforge.domain.models import Annotation, DefinitionRef, JoinKey
 from cteforge.domain.proposals import ProposalStatus
 from cteforge.domain.users import ActorKind, User
 from cteforge.mcp import descriptions as text
@@ -60,6 +60,7 @@ from cteforge.services import (
 from cteforge.services import run as run_service
 from cteforge.services.cards import (
     DefinitionCard,
+    JoinCard,
     ParseReport,
     ProposalOutcome,
     ProposalView,
@@ -72,7 +73,7 @@ from cteforge.services.cards import (
     json_safe,
 )
 from cteforge.services.context import AppConfig, AppContext, open_context
-from cteforge.services.propose import DefinitionMetadata
+from cteforge.services.propose import CompositionInput, DefinitionMetadata
 
 logger = logging.getLogger(__name__)
 
@@ -87,8 +88,6 @@ TOOL_NAMES = (
     "propose_definition",
     "revise_definition",
     "propose_join",
-    "propose_recipe",
-    "list_recipes",
     "list_joins",
     "describe_tables",
     "list_proposals",
@@ -319,13 +318,13 @@ _SourceDialect = Annotated[
         )
     ),
 ]
-_Annotations = Annotated[
-    list[Annotation],
+_Composition = Annotated[
+    CompositionInput | None,
     Field(
         description=(
-            "One object per variable: {name, type, role ('fixed' default | 'changeable'), "
-            "literals: [literal IDs from parse_query], column?, description?, allowed?, "
-            "format?, unit?}. type: date_range, date, text_list, text, number, boolean, grain."
+            'A definition built from others: {"uses": {alias: {"id", "version"?}}, '
+            '"select"?: final read-only SELECT over the aliases, "fixed"?: {alias: '
+            "{variable: value}}}. Give `sql` or `composition`, not both."
         )
     ),
 ]
@@ -398,18 +397,21 @@ def build_server(
         mcp_context: Context,
         uses: Annotated[
             dict[str, DefinitionRef] | None,
-            Field(description='alias -> {"id": <definition id>, "version"?: <int>}'),
+            Field(
+                description='alias -> {"id": <definition id>, "version"?: <int>}; composed '
+                "definitions too"
+            ),
         ] = None,
         values: Annotated[
             dict[str, dict[str, Any]] | None,
-            Field(description="alias -> {variable name: value in its input_format}"),
+            Field(
+                description="alias -> {variable name: value in its input_format}; a composed "
+                'definition\'s variables are "<part alias>.<variable>"'
+            ),
         ] = None,
         select: Annotated[
             str | None,
             Field(description="Optional final read-only SELECT over the aliases."),
-        ] = None,
-        recipe_id: Annotated[
-            str | None, Field(description="Run a saved recipe instead of `uses`.")
         ] = None,
         dialect: Annotated[
             Dialect | None,
@@ -430,7 +432,6 @@ def build_server(
                 ctx,
                 user,
                 uses=uses,
-                recipe_id=recipe_id,
                 values=values,
                 select=select,
                 dialect=dialect,
@@ -470,10 +471,23 @@ def build_server(
         )
 
     async def propose_definition_tool(
-        sql: Annotated[str, Field(description="The trusted query exactly as the user gave it.")],
         metadata: _Metadata,
-        annotations: _Annotations,
         mcp_context: Context,
+        sql: Annotated[
+            str | None,
+            Field(description="The trusted query exactly as the user gave it (or `composition`)."),
+        ] = None,
+        composition: _Composition = None,
+        annotations: Annotated[
+            list[Annotation] | None,
+            Field(
+                description="Variables of `sql` (or of the composition's final SELECT): "
+                "{name, type, role ('fixed' default | 'changeable'), literals: [literal IDs "
+                "from parse_query], column?, description?, allowed?, format?, unit?}. "
+                "type: date_range, date, text_list, text, number, boolean, grain. Not needed "
+                "for a composition's parts."
+            ),
+        ] = None,
         dialect: _SourceDialect = None,
         profile: _Profile = None,
         summary: _Summary = "",
@@ -485,9 +499,10 @@ def build_server(
                 ctx,
                 user,
                 sql=sql,
+                composition=composition,
                 dialect=dialect,
                 metadata=metadata,
-                annotations=annotations,
+                annotations=annotations or [],
                 profile=profile,
                 summary=summary,
             ),
@@ -498,6 +513,7 @@ def build_server(
         base_version: Annotated[int, Field(ge=1, description="Its current version.")],
         mcp_context: Context,
         sql: Annotated[str | None, Field(description="New SQL, if the SQL changes.")] = None,
+        composition: _Composition = None,
         dialect: Annotated[
             Dialect | None, Field(description="Dialect of `sql`; default the current one.")
         ] = None,
@@ -527,6 +543,7 @@ def build_server(
                 id=id,
                 base_version=base_version,
                 sql=sql,
+                composition=composition,
                 dialect=dialect,
                 metadata=metadata,
                 annotations=annotations,
@@ -536,21 +553,36 @@ def build_server(
         )
 
     async def propose_join_tool(
-        left_table: Annotated[str, Field(description="Table name, as in the SQL.")],
-        right_table: Annotated[str, Field(description="Table name, as in the SQL.")],
-        keys: Annotated[
-            list[JoinKey],
-            Field(min_length=1, description='[{"left": <left column>, "right": <right column>}]'),
-        ],
         mcp_context: Context,
-        join_type: Annotated[str, Field(description="inner, left, right or full.")] = "inner",
+        action: Annotated[
+            Literal["add", "annotate"],
+            Field(
+                description="annotate: relationship / traps / notes on an existing edge (by "
+                "`id`, or tables + keys). add: an edge no definition contains."
+            ),
+        ] = "annotate",
+        id: Annotated[str | None, Field(description="annotate: the edge id (list_joins).")] = None,
+        left_table: Annotated[str | None, Field(description="Table name, as in the SQL.")] = None,
+        right_table: Annotated[str | None, Field(description="Table name, as in the SQL.")] = None,
+        keys: Annotated[
+            list[JoinKey] | None,
+            Field(description='[{"left": <left_table column>, "right": <right_table column>}]'),
+        ] = None,
+        join_type: Annotated[
+            str | None, Field(description="add: inner (default), left, right or full.")
+        ] = None,
         relationship: Annotated[
             str | None,
-            Field(description="one_to_one, one_to_many, many_to_one or many_to_many."),
+            Field(
+                description="one_to_one, one_to_many, many_to_one or many_to_many, from "
+                "left_table to right_table (by `id`: in the edge's own orientation). "
+                "Checked against the warehouse."
+            ),
         ] = None,
         traps: Annotated[
             list[str] | None, Field(description="Known pitfalls, in plain words.")
         ] = None,
+        notes: Annotated[str | None, Field(description="Anything else people should know.")] = None,
         summary: _Summary = "",
     ) -> ProposalOutcome:
         return await _call(
@@ -559,44 +591,16 @@ def build_server(
             lambda user: propose_other.propose_join(
                 ctx,
                 user,
+                action=action,
+                id=id,
                 left_table=left_table,
                 right_table=right_table,
                 keys=keys,
                 join_type=join_type,
                 relationship=relationship,
-                traps=traps or (),
+                traps=traps,
+                notes=notes,
                 summary=summary,
-            ),
-        )
-
-    async def propose_recipe_tool(
-        recipe: Annotated[
-            propose_other.RecipeInput,
-            Field(description="{id, title, description?, uses, values?, select?, dialect}"),
-        ],
-        mcp_context: Context,
-        summary: _Summary = "",
-    ) -> ProposalOutcome:
-        return await _call(
-            mcp_context,
-            resolve_user,
-            lambda user: propose_other.propose_recipe(ctx, user, recipe=recipe, summary=summary),
-        )
-
-    async def list_recipes_tool(
-        mcp_context: Context,
-        query: Annotated[
-            str, Field(description="Optional words to filter by (id, title, description).")
-        ] = "",
-        include_drafts: Annotated[
-            bool, Field(description="Also list drafts (they cannot be run).")
-        ] = False,
-    ) -> list[Recipe]:
-        return await _call(
-            mcp_context,
-            resolve_user,
-            lambda user: catalog.list_recipes(
-                ctx, user, query=query, include_drafts=include_drafts
             ),
         )
 
@@ -605,14 +609,14 @@ def build_server(
         table: Annotated[
             str | None, Field(description="Only edges touching this table; omit for all.")
         ] = None,
-        include_drafts: Annotated[
-            bool, Field(description="Also list draft edges (they do not count as known).")
+        known_only: Annotated[
+            bool, Field(description="Only edges that count as known for trust labels.")
         ] = False,
-    ) -> list[JoinEdge]:
+    ) -> list[JoinCard]:
         return await _call(
             mcp_context,
             resolve_user,
-            lambda user: catalog.list_joins(ctx, user, table=table, include_drafts=include_drafts),
+            lambda user: catalog.list_joins(ctx, user, table=table, known_only=known_only),
         )
 
     async def describe_tables_tool(
@@ -826,9 +830,7 @@ def build_server(
             text.REVISE_DEFINITION,
             _WRITE,
         ),
-        (propose_join_tool, "propose_join", "Propose a join", text.PROPOSE_JOIN, _WRITE),
-        (propose_recipe_tool, "propose_recipe", "Propose a recipe", text.PROPOSE_RECIPE, _WRITE),
-        (list_recipes_tool, "list_recipes", "List saved recipes", text.LIST_RECIPES, _READ),
+        (propose_join_tool, "propose_join", "Propose a join change", text.PROPOSE_JOIN, _WRITE),
         (list_joins_tool, "list_joins", "List the join map", text.LIST_JOINS, _READ),
         (
             describe_tables_tool,

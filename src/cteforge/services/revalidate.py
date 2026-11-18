@@ -8,6 +8,10 @@ are re-run with the checks engine in `import_query` — nothing is re-implemente
    the annotations (type compatibility per variable), runs the same-query-back check,
    EXPLAINs the rendered template and compares its results with the rebuilt original.
 Drift is reported, never acted on: no state, version or proposal changes (DESIGN §18).
+A composed definition (ADR 0026) is re-checked with its composition checks
+(`_compose.checked_composition`: parts resolve now — floating parts at their latest usable
+version —, the whole compiles and EXPLAINs, annotated final SELECTs compared); any error is
+drift.
 
 `drift` issues (one per finding; the engine's own issues follow them in `issues`):
 - error: the checks no longer pass (any error issue: compile failure, type mismatch,
@@ -42,7 +46,7 @@ from cteforge.domain.errors import (
 from cteforge.domain.issues import Issue, IssueCode, Severity, has_errors
 from cteforge.domain.models import Definition
 from cteforge.domain.users import User
-from cteforge.services import _audit, _library
+from cteforge.services import _audit, _compose, _library
 from cteforge.services.auth import permitted, require
 from cteforge.services.cards import DefinitionDrift
 from cteforge.services.context import AppContext
@@ -53,7 +57,7 @@ def _drift(severity: Severity, message: str, variable: str | None = None) -> Iss
     return Issue(code=IssueCode.DRIFT, severity=severity, message=message, variable=variable)
 
 
-def _check(ctx: AppContext, definition: Definition) -> DefinitionDrift:
+def _check(ctx: AppContext, user: User, definition: Definition) -> DefinitionDrift:
     base = {"id": definition.id, "version": definition.version, "state": definition.state}
     try:
         profile = ctx.warehouses.resolve_name(definition.profile)
@@ -66,6 +70,8 @@ def _check(ctx: AppContext, definition: Definition) -> DefinitionDrift:
         return DefinitionDrift(
             **base, profile=definition.profile, checked=False, ok=True, issues=[issue]
         )
+    if definition.composition is not None:
+        return _check_composed(ctx, user, definition, profile)
     try:
         outcome = import_query(
             _library.original_sql(definition),
@@ -115,6 +121,52 @@ def _check(ctx: AppContext, definition: Definition) -> DefinitionDrift:
     )
 
 
+def _check_composed(
+    ctx: AppContext, user: User, definition: Definition, profile: str
+) -> DefinitionDrift:
+    base = {"id": definition.id, "version": definition.version, "state": definition.state}
+    assert definition.composition is not None
+    meta = {"id": definition.id, "title": definition.title, "version": definition.version}
+    try:
+        _, issues = _compose.checked_composition(
+            ctx,
+            user,
+            definition.composition,
+            _library.original_sql(definition) or None,
+            definition.source_dialect,
+            _library.annotations_of(definition),
+            meta,
+            ctx.warehouses.get(profile),
+        )
+    except PermissionDeniedError as exc:
+        # Its final SELECT reads raw tables: checking it runs exploratory SQL (ADR 0027).
+        issue = Issue(
+            code=IssueCode.CHECKS_INCOMPLETE,
+            severity=Severity.WARNING,
+            message=f"Not checked: {exc}",
+        )
+        return DefinitionDrift(**base, profile=profile, checked=False, ok=True, issues=[issue])
+    except CteforgeError as exc:
+        issue = _drift(
+            Severity.ERROR,
+            f"The composed definition can no longer be checked on profile '{profile}' "
+            f"({type(exc).__name__}).",
+        )
+        return DefinitionDrift(**base, profile=profile, checked=True, ok=False, issues=[issue])
+    drift: list[Issue] = []
+    if has_errors(issues):
+        codes = sorted({i.code.value for i in issues if i.severity is Severity.ERROR})
+        drift.append(
+            _drift(Severity.ERROR, f"The composition checks no longer pass ({', '.join(codes)}).")
+        )
+    for issue in issues:
+        if issue.code is IssueCode.CHECKS_INCOMPLETE:
+            drift.append(_drift(Severity.WARNING, issue.message))
+    return DefinitionDrift(
+        **base, profile=profile, checked=True, ok=not drift, issues=[*drift, *issues]
+    )
+
+
 def revalidate(ctx: AppContext, user: User, ids: list[str] | None = None) -> list[DefinitionDrift]:
     """Drift report for the latest version of each definition (or of `ids`, in that order).
     Raises NotFoundError for an unknown id. Never changes anything."""
@@ -136,7 +188,7 @@ def revalidate(ctx: AppContext, user: User, ids: list[str] | None = None) -> lis
             definitions = []
             for id in dict.fromkeys(ids):
                 definitions.append(_library.get_definition(ctx, id))
-    report = [_check(ctx, d) for d in definitions]
+    report = [_check(ctx, user, d) for d in definitions]
     _audit.record(
         ctx,
         user,

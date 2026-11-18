@@ -12,9 +12,11 @@ I/O adapter: definition files on disk. Project root: ../../../CLAUDE.md
   secrets_env values that aren't env-var names) with CodecError, never echoing values.
   Relative DuckDB `options.path` resolves next to the file.
 - `library.py` — library directory for git export/import (ADR 0003):
-  `write_library(dir, *, definitions, recipes, joins, prune=False) -> list[Path]` and
-  `read_library(dir) -> LibraryFiles` (`definitions/<id>.yml` codec YAML,
-  `recipes/<id>.yml`, `joins/<id>.yml` as model fields). CodecError names the file only.
+  `write_library(dir, *, definitions, joins, prune=False) -> list[Path]` and
+  `read_library(dir) -> LibraryFiles` (`definitions/<id>.yml` codec YAML, SQL or composed;
+  `joins/<id>.yml` as model fields; legacy `recipes/<id>.yml` read as composed definitions
+  via `codec.definition_from_recipe` and removed by a `prune` export). CodecError names the
+  file only.
 
 If something does not clearly fit one of the above, it does not belong here.
 "Not forbidden" is not the same as "allowed."

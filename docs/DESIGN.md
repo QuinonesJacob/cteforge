@@ -35,27 +35,35 @@ that this was where the real value was. cteforge builds that use directly into t
 One line: **"Paste the SQL you already trust. No semantic model required."**
 
 A semantic model still emerges bottom-up: fixed CTE logic ≈ metrics, the join map ≈
-relationships, changeable variables ≈ dimensions/filters, recipes ≈ saved queries.
+relationships, changeable variables ≈ dimensions/filters, composed definitions ≈ saved
+queries.
 Export to WrenAI/dbt formats is a possible later feature, not a goal. See ADR 0001, 0002.
 
 ## 3. Core concepts
 
-> **Planned (ADR 0026, accepted, not built):** recipes become **composed definitions** (a
-> definition whose body is parts + a final select, parts referenced live); the join map
-> stays mined from definitions, and `propose_join` gains `annotate` / `add` (agent-added
-> edges never auto-apply). Library and Review become one GUI page.
-
-- **Definition** — one trusted CTE plus: title, plain-language meaning, keywords/synonyms,
+- **Definition** — one trusted query plus: title, plain-language meaning, keywords/synonyms,
   "use when", "don't use when", source dialect, tables read, output columns, **grain**
   (e.g. one row per account per month), join keys, variables, state, verifier + date, version.
+  Its body is either **SQL** (imported trusted SQL) or a **composition** (ADR 0026, §17):
+  other definitions used as parts by alias (`uses`: alias → `{id, version?}`), a final
+  SELECT over the aliases (the definition's template; its own literals can be annotated)
+  and `fixed` values it always sets on its parts. Parts are live references: a part
+  without `version` floats to its latest usable version, so fixing a definition fixes
+  everything composed from it; a `version` pins it. A composed definition's variables are
+  its parts' open variables, named `<alias>.<var>`. Any definition can be a part (nesting
+  is allowed; cycles are refused).
 - **Variable** — a typed hole in a definition's SQL (§4), with a role: `changeable` or `fixed`.
-- **Recipe** — a saved query expressed as definitions + variable values + an optional final
-  `SELECT`. Not a copy of SQL: fixing a definition fixes every recipe that uses it.
-- **Join map** — join edges mined from trusted SQL: tables, keys, relationship type,
-  usage count, known traps. A reference for exploration, not a restriction.
+- **Join map** — join edges mined from every applied definition's SQL (composed ones from
+  their compiled SQL): tables, keys, join type, the definitions it was mined from
+  (`sources`), and what mining cannot see — `relationship`, `traps`, `notes` — added
+  through proposals (`propose_join` annotate / add). An edge is **known** (counts for trust
+  labels) when it is mined from a definition, added by a person or confirmed by a person;
+  an edge an agent adds never auto-applies and is not known until a person approves it.
+  **Confirmed**: a person approved it, or it was mined from a verified definition. A
+  reference for exploration, not a restriction.
 - **Trust label** — attached to every result (§8).
-- **Proposal** — any change (new/edited definition, recipe, join) from a person or an agent,
-  pending approval according to permissions (§18).
+- **Proposal** — any change (new/edited definition, join annotation or new edge, rename)
+  from a person or an agent, pending approval according to permissions (§18).
 - **Issue** — a structured problem or warning (`code`, `severity`, `message`, optional
   `variable`/`literal`) returned by every check, render and run, so agents and the GUI can
   act on it instead of parsing prose.
@@ -107,17 +115,13 @@ Rules:
 
 ## 6. MCP tools (M4)
 
-> **Planned (ADR 0026, accepted, not built):** `propose_recipe` / `list_recipes` /
-> `recipe_id` go; `propose_definition` takes `sql` or `composition`; `propose_join` takes
-> `action: add | annotate`.
-
 | Use the library | Build the library |
 |---|---|
 | `search(query)` — ranked definitions + their variables | `parse_query(sql, dialect?)` — literals with IDs, columns + types, structural facts, range/grain suggestions, joins |
-| `get_definition(id)` — full card: meaning, variables with input formats, outputs, grain | `propose_definition(sql, dialect?, metadata, annotations)` (an omitted `dialect`: §12) |
-| `compile_and_run(uses, values, select?)` or `(recipe_id, values)` | `revise_definition(id, base_version, sql?, metadata?, annotations?)`; with `new_id` alone it proposes a rename (ADR 0024) |
-| `check_and_run(sql)` — exploratory, labeled; SQL that is a definition's original query gets a `matches_definition` hint to use `compile_and_run` instead | `propose_join(...)` · `propose_recipe(...)` (`version`, `state`, `schema_version` are set by cteforge, never by the caller) |
-| `list_recipes(query?)` · `list_joins(table?)` · `describe_tables(tables?)` — discovery: saved recipes, join-map keys, columns + types (+ units the library declares) | |
+| `get_definition(id)` — full card: meaning, variables with input formats, outputs, grain, used by, joins to; for a composed definition its parts, fixed/open variables and compiled SQL | `propose_definition(sql \| composition, dialect?, metadata, annotations?)` — exactly one of `sql` / `composition` ({uses, select?, fixed?}; parts need no annotations; an omitted `dialect`: §12) |
+| `compile_and_run(uses, values, select?)` — composed definitions are used by id like any other (values `<alias>.<var>`); `run=false` returns the full compiled SQL | `revise_definition(id, base_version, sql? \| composition?, metadata?, annotations?)`; with `new_id` alone it proposes a rename (ADR 0024) |
+| `check_and_run(sql)` — exploratory, labeled; SQL that is a definition's original query gets a `matches_definition` hint to use `compile_and_run` instead | `propose_join(action: annotate \| add, …)` — relationship / traps / notes on an existing edge, or an edge no definition contains (checked against the warehouse; an agent's `add` never auto-applies) |
+| `list_joins(table?, known_only?)` · `describe_tables(tables?)` — discovery: join-map edges (keys, relationship, traps, notes, sources, known, confirmed), columns + types (+ units the library declares) | (`version`, `state`, `schema_version` are set by cteforge, never by the caller) |
 
 | Review (when allowed) | Admin (when allowed) |
 |---|---|
@@ -161,6 +165,15 @@ Result labels, best to worst: `verified` · `built_from_verified_parts` · `llm_
 `new_logic_on_known_joins` · `exploratory`. Policy (trust/, pure):
 - One verified definition, no final SELECT → `verified`. A final SELECT over verified
   definitions joining only on known keys → `built_from_verified_parts`.
+- A composed definition (ADR 0026) no person has verified is labeled like an agent's final
+  SELECT over its parts: `built_from_verified_parts` at best, `exploratory` when its final
+  SELECT joins on unknown keys. Once a person verifies it, its final SELECT and choice of
+  parts count as reviewed (`verified` over verified parts); its parts' states still cap
+  the label (verifying the whole does not verify the parts). A floating part with no
+  usable version makes it unusable (`part_not_usable`); a pinned part that was superseded
+  is shown (`part_superseded`).
+- Known joins (§3): mined from a definition, added by a person, or confirmed by a person.
+  An agent cannot raise labels by declaring joins.
 - Any `llm_annotated` definition caps the label at `llm_annotated`.
 - Raw SQL (`check_and_run`) → `new_logic_on_known_joins` if every join matches the join map,
   else `exploratory`. Joins in a final SELECT that aren't known → `exploratory`.
@@ -182,8 +195,8 @@ with cteforge as its own authorization server.
 - Every change is a proposal. **Roles are configurable** (ADR 0027): each role has
   **Allowed** tools (the ceiling) and **On by default** tools (what a new token starts
   with) from one catalog — use (`search`, `get_definition`, `compile_and_run`,
-  `check_and_run`, `describe_tables`, `list_joins`, `list_recipes`), build (`parse_query`,
-  `propose_definition`, `revise_definition`, `propose_join`, `propose_recipe`), review
+  `check_and_run`, `describe_tables`, `list_joins`), build (`parse_query`,
+  `propose_definition`, `revise_definition`, `propose_join`), review
   (`list_proposals`, `review_proposal`, `verify`), admin (`view_audit`, `list_users`,
   `manage_user`, `manage_role`, `manage_settings`) — plus `review_all` (approve anything,
   else only what the user owns). Built-ins keep today's behaviour: viewer (use +
@@ -208,7 +221,8 @@ with cteforge as its own authorization server.
   edit roles other than admin, approve / reject and verify (four-eyes, no exemption).
   Human-only: seeing or minting tokens, anything touching an admin user, granting the admin
   role, editing the admin role. The last active admin cannot be demoted or deactivated.
-- Full version history per definition with diffs; **impact preview** ("affects 14 recipes").
+- Full version history per definition with diffs; **impact preview** ("used by 14 composed
+  definitions").
 - Git is an optional export/import, not the source of truth. See ADR 0003.
 - Users and settings: team settings (strict/open mode, **default connection**;
   `manage_settings`) and users/roles/tokens (`list_users`, `manage_user`, `manage_role`)
@@ -386,7 +400,8 @@ Revising a definition keeps its source dialect.
   ID (the audit log is not). A former ID is never given to another definition.
 - A new version is created by any change to SQL, variables, grain, outputs, or join keys.
   Metadata-only edits (keywords, notes) also bump the version but are flagged as non-logic.
-- Recipes either **pin** a version or **float** on the latest approved version (default).
+- Parts of a composed definition either **pin** a version or **float** on the latest
+  usable version (default; ADR 0026).
 - The definition file format carries `schema_version` for format migrations.
 
 ## 16. Milestones
@@ -399,33 +414,54 @@ Revising a definition keeps its source dialect.
 | M2 | Compose definitions (§17); trust labels (§8) | done |
 | M3 | Store (SQLite/Postgres), proposals (§18), versions, permissions (incl. four-eyes), audit | done (Postgres untested in CI; SQLite tested) |
 | M4 | MCP server (§6) | done (stdio + streamable HTTP at `/mcp`; e2e-tested) |
-| M5 | HTTP API + GUI (import flow, library, revise, explore: recipes/compose/join map/tables/SQL, review queue) | done; GUI↔API contract e2e-tested |
+| M5 | HTTP API + GUI (Library with review in it, definition pages, import flow, revise, rename, Join map, Audit, Settings; ADR 0026 replaced Explore and the Review page) | done; GUI↔API contract e2e-tested |
 | M6 | Snowflake/BigQuery/Postgres/Databricks connectors, EXPLAIN/dry-run, statement timeouts, drift check | built; verified against real engines in CI (`.github/workflows/ci.yml`): DuckDB, Postgres 16, ClickHouse 25.8 and MySQL 8.4 (service containers); ClickHouse 26.10 also locally. Redshift, Snowflake, BigQuery and Databricks (incl. their timeouts and read-only setup) are unit-tested against fake drivers only and unverified against real warehouses |
 
-## 17. Composition (M2)
+## 17. Composition (M2; composed definitions: ADR 0026)
 
-A recipe (or an ad-hoc `compile_and_run`) names definitions by alias, gives values per alias,
-and optionally a final SELECT written by the agent over those aliases.
-- Each definition is rendered on its own (templating), then compose **hoists** its inner CTEs
-  into one top-level WITH, renaming them `<alias>__<cte>` to avoid collisions, and adds the
-  definition's final SELECT as a CTE named `<alias>`. Order follows dependencies.
+A composed definition (stored) or an ad-hoc `compile_and_run` names definitions by alias,
+gives values per alias, and optionally a final SELECT over those aliases.
+- Each definition is rendered on its own (templating; a composed part is itself compiled
+  first, recursively), then compose **hoists** its inner CTEs into one top-level WITH,
+  renaming them `<alias>__<cte>` to avoid collisions, and adds the definition's final
+  SELECT as a CTE named `<alias>`. Order follows dependencies.
 - The final SELECT must be a single read-only SELECT that references only the aliases (and,
-  with a lower label, raw tables — which also needs the `check_and_run` tool, ADR 0027).
+  with a lower label, raw tables — which also needs the `check_and_run` tool, ADR 0027;
+  also for a composed definition's stored final SELECT, and for the proposal checks that
+  run it).
   Without one, a single definition is returned as-is.
 - Checks: every alias resolves; join conditions between aliases use declared `join_keys`
   (else an `unknown_join` issue); joining definitions of different grain without
   aggregation raises a `fan_out_risk` warning.
+- Composed definitions: `propose_definition(composition={uses, select?, fixed?})`. Checks:
+  every part resolves, `fixed` names open variables of its part, no cycle (also through
+  nesting; refused again when applying and at run time), the select is one read-only
+  SELECT, the whole compiles and passes EXPLAIN on the warehouse; with annotations on the
+  select, the compiled query with the plain select and with the template give the same
+  results. Values: `values[alias]["<part alias>.<var>"]` (or per part); overriding a
+  `fixed` value is a `fixed_override`. Reviews of a part list the composed definitions it
+  reaches ("used by"); renames rewrite their parts.
 
 ## 18. Proposal & review flow (M3)
 
-- Every change is a proposal: `new_definition`, `revise_definition`, `new_recipe`, `new_join`,
-  `rename_definition` (ADR 0024: from/to + the references seen when proposed; no checks to
-  run; never "approve with verify"; another rename of the same definition that was
-  overtaken is refused as stale).
-  Checks (§7) run at proposal time and are stored with it; the GUI shows them with a diff and
-  an impact preview (recipes using the definition).
+- Every change is a proposal: `new_definition` (SQL or composed), `revise_definition`,
+  `new_join` (`action` add | annotate; ADR 0026), `rename_definition` (ADR 0024: from/to +
+  the references seen when proposed; no checks to run; never "approve with verify";
+  another rename of the same definition that was overtaken is refused as stale).
+  (`new_recipe` remains only on proposals stored before ADR 0026.)
+  Checks (§7) run at proposal time and are stored with it; the GUI shows them with a diff,
+  an impact preview ("used by": composed definitions using the definition) and, for a
+  composed definition, its parts, fixed/open variables and full compiled SQL. A join
+  proposal's relationship claim is checked against the warehouse (`COUNT(*)` vs
+  `COUNT(DISTINCT key)` per side) and the evidence is stored with it.
+- The GUI's Library is the review queue too (ADR 0026): definitions and the proposals
+  touching them, filtered by trust, approval, created by and verified by, with a "needs
+  my review" filter; proposal detail stays its own page.
 - Auto-apply: in **open** mode, a proposal whose checks all pass and that targets a new or
-  unverified definition is applied immediately as `llm_annotated`. Everything else waits.
+  unverified definition (or an unconfirmed join edge) is applied immediately as
+  `llm_annotated`. An edge an agent adds never auto-applies (ADR 0026). Everything else
+  waits. Join proposals are approved, never verified; a person's approval confirms the
+  edge.
 - Changes to a **verified** definition always wait for review by a person (approver or the
   definition's owner) or an admin agent (ADR 0027). Approving can also verify (the
   `verify` tool: humans whose role allows it, or agents with the admin role). Rejections
@@ -485,5 +521,7 @@ fusion into one `search` call.
 
 - Grain detection: how much can be inferred automatically vs confirmed by a person?
 - Join map mining: how to identify "known traps" (fan-out, many-to-many) automatically?
+  (Today: relationship claims are checked against the data when proposed; traps are
+  written by people and agents.)
 - Resolved: search is lexical first (ADR 0017), then hybrid with meaning (ADR 0023); MCP is stdio + streamable HTTP with bearer
   tokens (ADR 0018).

@@ -40,7 +40,6 @@ from cteforge.domain.models import (
     DefinitionVersionInfo,
     FormerId,
     JoinEdge,
-    Recipe,
     TeamMode,
     TrustLabel,
     VariableSpec,
@@ -203,6 +202,15 @@ class DefinitionCard(BaseModel):
     # IDs this definition had before (ADR 0024), oldest rename first. They stay
     # searchable; looking one up fails naming this id.
     former_ids: list[str] = Field(default_factory=list)
+    # ADR 0026. `composed`: its body is a composition. `composition` (set by
+    # describe.get_definition and proposal views): parts, fixed and open variables, the
+    # full compiled SQL. For a composed definition `variables` lists its OPEN variables,
+    # named `<alias>.<var>`, plus its final SELECT's own. `used_by`: composed definitions
+    # using this one as a part. `joins`: join-map edges touching its tables ("joins to").
+    composed: bool = False
+    composition: CompositionCard | None = None
+    used_by: list[UsedByReference] = Field(default_factory=list)
+    joins: list[JoinCard] = Field(default_factory=list)
 
 
 def card_from_definition(
@@ -231,6 +239,7 @@ def card_from_definition(
         variables=[variable_card(v, comparisons.get(v.name, ())) for v in d.variables],
         template=d.template,
         history=list(history) if history is not None else None,
+        composed=d.composition is not None,
     )
 
 
@@ -318,14 +327,15 @@ class SearchIndexReport(BaseModel):
 # ── References (ADR 0024) ────────────────────────────────────────────────────────────
 
 
-class RecipeReference(BaseModel):
-    """A recipe (its latest version) that uses a definition under `alias`; `pinned_version`
-    None = it floats on the latest usable version."""
+class UsedByReference(BaseModel):
+    """A composed definition (its latest version) that uses a definition as a part under
+    `alias` (ADR 0026); `pinned_version` None = it floats on the latest usable version, so
+    a change to the part reaches it."""
 
     model_config = _CARD
 
-    recipe_id: str
-    recipe_version: int
+    definition_id: str
+    definition_version: int
     title: str
     state: DefinitionState
     alias: str
@@ -334,7 +344,7 @@ class RecipeReference(BaseModel):
 
 class ProposalReference(BaseModel):
     """A pending proposal that names a definition: `target` (it changes the definition) or
-    `uses` (its recipe uses it)."""
+    `uses` (its composed definition uses it as a part)."""
 
     model_config = _CARD
 
@@ -356,10 +366,107 @@ class DefinitionReferences(BaseModel):
     id: str
     version: int
     state: DefinitionState
-    recipes: list[RecipeReference] = Field(default_factory=list)
+    used_by: list[UsedByReference] = Field(default_factory=list)
     proposals: list[ProposalReference] = Field(default_factory=list)
     former_ids: list[FormerId] = Field(default_factory=list)
     outside_warning: str = ""
+
+
+# ── Composed definitions and joins (ADR 0026) ─────────────────────────────────────────
+
+
+class PartCard(BaseModel):
+    """One part of a composed definition: the alias, what it references (`pinned_version`
+    None = floating on the latest usable version) and what that resolves to now."""
+
+    model_config = _CARD
+
+    alias: str
+    id: str
+    pinned_version: int | None = None
+    version: int | None = None  # The version used now (None: not found).
+    title: str = ""
+    state: DefinitionState | None = None
+    latest_version: int | None = None
+    superseded: bool = False  # Pinned, and newer versions exist.
+    usable: bool = True  # False: no usable version in the team mode (or not found).
+    composed: bool = False  # The part is itself a composed definition.
+
+
+class CompositionCard(BaseModel):
+    """What a reviewer and an agent need about a composed definition (ADR 0026)."""
+
+    model_config = _CARD
+
+    parts: list[PartCard] = Field(default_factory=list)
+    fixed: dict[str, dict[str, Any]] = Field(default_factory=dict)  # alias -> var -> value
+    open_variables: list[str] = Field(default_factory=list)  # `<alias>.<var>` (+ own names)
+    select: str = ""  # The final SELECT (its own variables as placeholders); "" = none.
+    compiled_sql: str | None = None  # The whole query with original values; None = failed.
+    dialect: Dialect | None = None
+    issues: list[Issue] = Field(default_factory=list)
+
+
+class JoinCard(JoinEdge):
+    """A join-map edge plus what it means for trust (ADR 0026): `known` counts for trust
+    labels; `confirmed`: a person approved it, or it was mined from a verified definition.
+    `pending_proposals`: ids of pending proposals on it (only for callers who may list
+    proposals)."""
+
+    known: bool = False
+    confirmed: bool = False
+    pending_proposals: list[str] = Field(default_factory=list)
+
+
+class ProposalBrief(BaseModel):
+    """A proposal as a Library row shows it."""
+
+    model_config = _CARD
+
+    id: str
+    kind: ProposalKind
+    status: str
+    author: str
+    author_kind: ActorKind
+    created_at: dt.datetime
+    summary: str = ""
+
+
+class LibraryRow(BaseModel):
+    """One Library row (ADR 0026): a definition (`version` set) or a pending/rejected/
+    withdrawn new definition that was never applied (`version` None, `proposed` set), with
+    the proposals touching it. `approval`: the status of the latest proposal touching it
+    (a definition with none counts as approved); `pending`: its pending proposals (a
+    revision or rename is a badge linking to the diff)."""
+
+    model_config = _CARD
+
+    id: str
+    title: str
+    meaning: str = ""
+    version: int | None = None
+    state: DefinitionState | None = None  # The definition's (or the proposal's checks').
+    composed: bool = False
+    owner: str | None = None
+    created_by: str | None = None
+    created_by_kind: ActorKind | None = None
+    verified_by: str | None = None
+    verified_by_kind: ActorKind | None = None
+    approval: str = "approved"
+    latest_proposal: ProposalBrief | None = None
+    pending: list[ProposalBrief] = Field(default_factory=list)
+    needs_my_review: bool = False
+
+
+class LibraryPage(BaseModel):
+    """The Library: rows after the filters, and how many proposals are pending overall."""
+
+    model_config = _CARD
+
+    rows: list[LibraryRow] = Field(default_factory=list)
+    total: int = 0  # Rows before the filters.
+    pending_count: int = 0
+    proposals_visible: bool = False  # The caller may list proposals (rows include them).
 
 
 # ── Catalog (tables) ─────────────────────────────────────────────────────────────────
@@ -519,11 +626,14 @@ class TeamSettings(BaseModel):
 
 
 class ProposalView(Proposal):
-    """A proposal plus what a reviewer needs: a unified diff against its base and the
-    impact preview (ids of recipes using the target definition)."""
+    """A proposal plus what a reviewer needs: a unified diff against its base, the impact
+    preview (`impact`: ids of composed definitions using the target definition — "used
+    by", ADR 0026) and, for a composed definition, its parts, fixed/open variables and
+    full compiled SQL (`composition`)."""
 
     diff: str = ""
     impact: list[str] = Field(default_factory=list)
+    composition: CompositionCard | None = None
 
 
 def _yaml(data: Any) -> str:
@@ -534,14 +644,14 @@ def _proposed_text(proposal: Proposal) -> str:
     payload = proposal.payload
     if "definition_yaml" in payload:
         return str(payload["definition_yaml"])
-    if "recipe" in payload:
+    if "recipe" in payload:  # legacy (ADR 0026)
         return _yaml(payload["recipe"])
     if "join" in payload:
         return _yaml(payload["join"])
     return _yaml(payload)
 
 
-def _base_text(base: Definition | Recipe | JoinEdge | None) -> str:
+def _base_text(base: Definition | JoinEdge | None) -> str:
     if base is None:
         return ""
     if isinstance(base, Definition):
@@ -549,7 +659,7 @@ def _base_text(base: Definition | Recipe | JoinEdge | None) -> str:
     return _yaml(base.model_dump(mode="json"))
 
 
-def proposal_diff(proposal: Proposal, base: Definition | Recipe | JoinEdge | None) -> str:
+def proposal_diff(proposal: Proposal, base: Definition | JoinEdge | None) -> str:
     """Unified diff of the stored form (codec YAML for definitions) of `base` → proposal.
     No base (a new object) → every line is an addition. A rename has no diff (its payload
     says from → to; ADR 0024)."""
@@ -574,13 +684,15 @@ def proposal_diff(proposal: Proposal, base: Definition | Recipe | JoinEdge | Non
 
 def proposal_view(
     proposal: Proposal,
-    base: Definition | Recipe | JoinEdge | None = None,
+    base: Definition | JoinEdge | None = None,
     impact: Iterable[str] = (),
+    composition: CompositionCard | None = None,
 ) -> ProposalView:
     return ProposalView(
         **proposal.model_dump(),
         diff=proposal_diff(proposal, base),
         impact=sorted(set(impact)),
+        composition=composition,
     )
 
 
@@ -751,3 +863,6 @@ class MeCard(BaseModel):
     token_id: str | None = None
     token_expires_at: dt.datetime | None = None
     token_mode: str | None = None
+
+
+DefinitionCard.model_rebuild()

@@ -42,7 +42,7 @@ class AuditError(CteforgeError):
 
 
 class NotFoundError(CteforgeError):
-    """A definition, recipe, join, proposal or user does not exist."""
+    """A definition, join, proposal or user does not exist."""
 
 
 class PermissionDeniedError(CteforgeError):

@@ -1,33 +1,32 @@
-"""Use-cases: propose a join-map edge or a recipe (DESIGN §3, §17, §18).
+"""Use-case: propose a change to the join map (DESIGN §3, §18; ADR 0026).
 
-Same auto-apply rule as definitions: open mode, no error issue, complete checks, and the
-target (join edge / recipe id) new or not verified. Otherwise the proposal waits for review.
-
-- Joins: the edge is normalized (alphabetically first table on the left, keys lowercased
-  and sorted) and gets the deterministic id `_library.join_edge_id`, so proposing a mined
-  edge again updates it (relationship, traps, join type). `usage_count` is never taken
-  from the caller; it is recomputed when the proposal is applied.
-- Recipes: validated without running anything (`_apply.recipe_checks`): every use
-  resolves to an existing definition, values validate and render, the final SELECT is one
-  read-only query, compose accepts it. Proposing an existing recipe id proposes its next
-  version (`base_version` = the latest, re-checked when applied). Callers give only a
-  `RecipeInput` (id, title, description, uses, values, select, dialect): `version`,
-  `state` and `schema_version` are set by cteforge, and a mapping that sets them is
-  refused with CodecError instead of being silently ignored.
+`propose_join(action=...)`:
+- `annotate` — relationship (one_to_one · one_to_many · many_to_one · many_to_many),
+  traps and notes on an EXISTING edge, named by `id` or by tables + keys (NotFoundError
+  otherwise). Only the fields given change; the join type and keys stay.
+- `add` — an edge no definition contains: tables + keys (+ join type, relationship,
+  traps, notes). An existing edge is refused (PolicyError: annotate it instead). An edge
+  an agent adds never auto-applies, in any mode, and is not known (does not count for
+  trust labels) until a person approves it (trust.approval).
+The edge is normalized (alphabetically first table on the left, keys lowercased and
+sorted; a relationship is flipped with it) and gets the deterministic id
+`_library.join_edge_id`. A relationship claim is checked against the default warehouse
+(`_apply.relationship_evidence`; the evidence is stored with the proposal). `sources` and
+`usage_count` are never taken from the caller: mining recomputes them. Otherwise the same
+auto-apply rule as definitions: open mode, no error issue, complete checks, the edge not
+confirmed by a person.
 """
 
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import ValidationError
 
 from cteforge.domain.access import Tool
 from cteforge.domain.audit import AuditKind
-from cteforge.domain.dialects import Dialect
-from cteforge.domain.errors import CodecError
-from cteforge.domain.models import DefinitionRef, DefinitionState, Ident, JoinKey, Recipe
+from cteforge.domain.errors import CodecError, NotFoundError, PolicyError
+from cteforge.domain.models import JOIN_TYPES, RELATIONSHIPS, JoinEdge, JoinKey
 from cteforge.domain.users import User
 from cteforge.services import _apply, _audit, _library
 from cteforge.services.auth import require
@@ -56,96 +55,110 @@ def _keys(keys: Sequence[KeyInput]) -> list[JoinKey]:
     return out
 
 
+JOIN_ACTIONS = ("add", "annotate")
+
+
+def _clean(items: Sequence[str] | None) -> list[str] | None:
+    return None if items is None else [t.strip() for t in items if t.strip()]
+
+
+def _existing(
+    ctx: AppContext,
+    id: str | None,
+    left_table: str | None,
+    right_table: str | None,
+    keys: Sequence[KeyInput] | None,
+) -> JoinEdge:
+    if id:
+        edge = ctx.store.get_join(id.strip().lower())
+        if edge is None:
+            raise NotFoundError(f"Join '{id}' is not in the join map; list_joins shows the ids")
+        return edge
+    if not (left_table and right_table and keys):
+        raise CodecError("annotate needs the edge's `id`, or its tables and keys")
+    canonical = _library.canonical_edge(left_table, right_table, _keys(keys))
+    edge = ctx.store.get_join(canonical.id)
+    if edge is None:
+        raise NotFoundError(
+            f"No join-map edge joins '{left_table}' and '{right_table}' on those keys; use "
+            "action='add' to propose a new edge"
+        )
+    return edge
+
+
+def _oriented(relationship: str | None, given_left: str | None, edge: JoinEdge) -> str | None:
+    """A relationship stated for `given_left` → ... as the stored edge's orientation."""
+    if relationship is None or given_left is None:
+        return relationship
+    if given_left.strip().lower() == edge.left_table:
+        return relationship
+    return _library.flip_relationship(relationship)
+
+
 def propose_join(
     ctx: AppContext,
     user: User,
     *,
-    left_table: str,
-    right_table: str,
-    keys: Sequence[KeyInput],
-    join_type: str = "inner",
+    action: str = "annotate",
+    id: str | None = None,
+    left_table: str | None = None,
+    right_table: str | None = None,
+    keys: Sequence[KeyInput] | None = None,
+    join_type: str | None = None,
     relationship: str | None = None,
-    traps: Sequence[str] = (),
+    traps: Sequence[str] | None = None,
+    notes: str | None = None,
     summary: str = "",
 ) -> ProposalOutcome:
-    """Propose a join-map edge (new, or an update of an existing edge with the same id)."""
-    with _audit.audit_failures(ctx, user, AuditKind.PROPOSE, extra={"op": "propose_join"}):
+    """Propose adding an edge to the join map, or annotating one (module docstring).
+    A relationship is stated from `left_table` to `right_table` as given (annotate by
+    `id`: in the edge's own orientation). Raises CodecError (bad input), NotFoundError
+    (annotate: no such edge), PolicyError (add: the edge exists)."""
+    extra = {"op": "propose_join", "action": action}
+    with _audit.audit_failures(ctx, user, AuditKind.PROPOSE, extra=extra):
         require(user, Tool.PROPOSE_JOIN)
-        if not left_table.strip() or not right_table.strip():
-            raise CodecError("A join needs both table names")
-        if join_type.strip().lower() not in _library.JOIN_TYPES:
-            raise CodecError(f"join_type must be one of {list(_library.JOIN_TYPES)}")
-        if relationship is not None and relationship not in _library.RELATIONSHIPS:
-            raise CodecError(f"relationship must be one of {list(_library.RELATIONSHIPS)}")
-        edge = _library.canonical_edge(
-            left_table,
-            right_table,
-            _keys(keys),
-            join_type,
-            relationship=relationship,
-            traps=[t.strip() for t in traps if t.strip()],
-            state=DefinitionState.LLM_ANNOTATED,
-        )
-        proposal = _apply.join_proposal(ctx, user, edge, summary)
+        if action not in JOIN_ACTIONS:
+            raise CodecError(f"action must be one of {list(JOIN_ACTIONS)}")
+        if join_type is not None and join_type.strip().lower() not in JOIN_TYPES:
+            raise CodecError(f"join_type must be one of {list(JOIN_TYPES)}")
+        if relationship is not None and relationship not in RELATIONSHIPS:
+            raise CodecError(f"relationship must be one of {list(RELATIONSHIPS)}")
+        if action == "annotate":
+            current = _existing(ctx, id, left_table, right_table, keys)
+            if join_type is not None and join_type.strip().lower() != current.join_type:
+                raise PolicyError("annotate changes relationship, traps and notes only")
+            changes: dict[str, object] = {}
+            if relationship is not None:
+                changes["relationship"] = _oriented(
+                    relationship, left_table if not id else None, current
+                )
+            if traps is not None:
+                changes["traps"] = _clean(traps)
+            if notes is not None:
+                changes["notes"] = notes.strip()
+            if not changes:
+                raise PolicyError("Nothing to annotate: pass relationship, traps or notes")
+            edge = current.model_copy(update=changes)
+        else:
+            if not (left_table and left_table.strip() and right_table and right_table.strip()):
+                raise CodecError("A join needs both table names")
+            if keys is None:
+                raise CodecError("A join needs at least one key pair")
+            edge = _library.canonical_edge(
+                left_table,
+                right_table,
+                _keys(keys),
+                join_type or "inner",
+                relationship=relationship,
+                traps=_clean(traps) or [],
+                notes=(notes or "").strip(),
+            )
+            if ctx.store.get_join(edge.id) is not None:
+                raise PolicyError(
+                    f"Join '{edge.id}' is already in the join map; use action='annotate' to "
+                    "change its relationship, traps or notes"
+                )
+        proposal = _apply.join_proposal(ctx, user, edge, summary, action=action)
         result = _apply.submit(ctx, user, proposal)
     _apply.record_proposal(ctx, user, AuditKind.PROPOSE, result.proposal, "propose_join")
-    return result
-
-
-# Recipe fields cteforge sets itself; a caller may not.
-RESERVED_RECIPE_FIELDS = ("version", "state", "schema_version")
-
-
-class RecipeInput(BaseModel):
-    """A recipe as proposed: definitions by reference, values, optional final SELECT."""
-
-    # The MCP/API input schema. RESERVED_RECIPE_FIELDS are deliberately absent: cteforge
-    # sets them when the recipe is applied.
-
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    id: Ident
-    title: str
-    description: str = ""
-    uses: dict[str, DefinitionRef]
-    values: dict[str, dict[str, Any]] = Field(default_factory=dict)
-    select: str | None = None
-    dialect: Dialect
-
-
-def recipe_from(raw: Recipe | RecipeInput | Mapping[str, Any]) -> Recipe:
-    if isinstance(raw, Recipe):
-        return raw
-    if isinstance(raw, Mapping):
-        reserved = [k for k in RESERVED_RECIPE_FIELDS if k in raw]
-        if reserved:
-            raise CodecError(
-                f"Invalid recipe: {reserved} cannot be set by a proposal; cteforge sets the "
-                "version and state when the recipe is applied. Remove them."
-            )
-        try:
-            raw = RecipeInput.model_validate(dict(raw))
-        except ValidationError as exc:
-            raise CodecError(f"Invalid recipe: {_apply.validation_detail(exc)}") from None
-    try:
-        return Recipe.model_validate(raw.model_dump())
-    except ValidationError as exc:
-        raise CodecError(f"Invalid recipe: {_apply.validation_detail(exc)}") from None
-
-
-def propose_recipe(
-    ctx: AppContext,
-    user: User,
-    *,
-    recipe: Recipe | RecipeInput | Mapping[str, Any],
-    summary: str = "",
-) -> ProposalOutcome:
-    """Propose a recipe (or the next version of one). Its `version` and `state` are set
-    when it is applied (a mapping that sets them, or `schema_version`, raises
-    CodecError); checks are returned as issues (errors block approval)."""
-    with _audit.audit_failures(ctx, user, AuditKind.PROPOSE, extra={"op": "propose_recipe"}):
-        require(user, Tool.PROPOSE_RECIPE)
-        proposal = _apply.recipe_proposal(ctx, user, recipe_from(recipe), summary)
-        result = _apply.submit(ctx, user, proposal)
-    _apply.record_proposal(ctx, user, AuditKind.PROPOSE, result.proposal, "propose_recipe")
     return result

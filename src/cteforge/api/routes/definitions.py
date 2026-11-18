@@ -1,5 +1,5 @@
-"""Library reads and verify: search, card, history, parse, recipes, join map, tables
-(DESIGN §3, §6, §19)."""
+"""Library reads and verify: search, the Library list, card, history, parse, join map,
+tables (DESIGN §3, §6, §19; ADR 0026)."""
 
 from __future__ import annotations
 
@@ -9,11 +9,13 @@ from fastapi import APIRouter, Query
 
 from cteforge.api.auth import Ctx, CurrentUser
 from cteforge.api.schemas import ParseRequest, VerifyRequest
-from cteforge.domain.models import DefinitionVersionInfo, JoinEdge, Recipe
-from cteforge.services import catalog, describe, parse_query, review, search
+from cteforge.domain.models import DefinitionVersionInfo
+from cteforge.services import catalog, describe, library, parse_query, review, search
 from cteforge.services.cards import (
     DefinitionCard,
     DefinitionReferences,
+    JoinCard,
+    LibraryPage,
     ParseReport,
     SearchDocument,
     SearchHit,
@@ -75,18 +77,15 @@ def parse(ctx: Ctx, user: CurrentUser, body: ParseRequest) -> ParseReport:
     return parse_query.parse_query(ctx, user, body.sql, body.dialect, body.profile)
 
 
-@router.get("/recipes", response_model=list[Recipe])
-def list_recipes(
-    ctx: Ctx, user: CurrentUser, q: str = "", include_drafts: bool = False
-) -> list[Recipe]:
-    return catalog.list_recipes(ctx, user, query=q, include_drafts=include_drafts)
-
-
-@router.get("/joins", response_model=list[JoinEdge])
+@router.get("/joins", response_model=list[JoinCard])
 def list_joins(
-    ctx: Ctx, user: CurrentUser, table: str | None = None, include_drafts: bool = False
-) -> list[JoinEdge]:
-    return catalog.list_joins(ctx, user, table=table, include_drafts=include_drafts)
+    ctx: Ctx,
+    user: CurrentUser,
+    table: str | None = None,
+    known_only: bool = False,
+    definition: str | None = None,
+) -> list[JoinCard]:
+    return catalog.list_joins(ctx, user, table=table, known_only=known_only, definition=definition)
 
 
 @router.get("/tables", response_model=list[TableCard])
@@ -97,3 +96,27 @@ def describe_tables(
     profile: str | None = None,
 ) -> list[TableCard]:
     return catalog.describe_tables(ctx, user, name, profile=profile)
+
+
+@router.get("/library", response_model=LibraryPage)
+def list_library(
+    ctx: Ctx,
+    user: CurrentUser,
+    q: str = "",
+    trust: Annotated[list[str] | None, Query()] = None,
+    approval: Annotated[list[str] | None, Query()] = None,
+    created_by: Annotated[list[str] | None, Query()] = None,
+    verified_by: Annotated[list[str] | None, Query()] = None,
+    needs_my_review: bool = False,
+) -> LibraryPage:
+    """The Library (ADR 0026): definitions + the proposals touching them, filtered."""
+    return library.list_library(
+        ctx,
+        user,
+        q=q,
+        trust=trust,
+        approval=approval,
+        created_by=created_by,
+        verified_by=verified_by,
+        needs_my_review=needs_my_review,
+    )

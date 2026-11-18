@@ -4,36 +4,46 @@ Pure data models of cteforge. Everything else depends on this; it depends on not
 cteforge. Project root: ../../../CLAUDE.md
 
 ## What belongs here (authoritative)
-- `models.py` — Definition, Annotation, VariableSpec, VariableSlot (one place a
-  variable fills; M1 files migrate on read), DefinitionVersionInfo, Recipe (+
-  `uses_definition`, `with_definition_renamed`), DefinitionRef, FormerId (a renamed
-  definition's earlier id → its current id; ADR 0024), JoinEdge, JoinKey, DefinitionState,
-  TrustLabel (+ TRUST_ORDER), TeamMode.
+- `models.py` — Definition (+ `composition`, `composed`, `uses_definition`,
+  `with_definition_renamed`; ADR 0026: a body is SQL or a Composition, whose final SELECT
+  is the template — "" = one part as is), Composition (`uses` alias → DefinitionRef,
+  `fixed` alias → var → value), Annotation, VariableSpec, VariableSlot (one place a
+  variable fills; M1 files migrate on read), DefinitionVersionInfo, DefinitionRef,
+  FormerId (a renamed definition's earlier id → its current id; ADR 0024), JoinEdge
+  (relationship, traps, notes, `sources`, `added_by(_kind)`, `confirmed_by`, `evidence`;
+  `is_known()`: mined, added by a person or confirmed by a person; a legacy `state` is
+  dropped on read), JoinKey, RelationshipEvidence + SideCount, JOIN_TYPES, RELATIONSHIPS,
+  DefinitionState, TrustLabel (+ TRUST_ORDER), TeamMode.
 - `variables.py` — VariableType enum and the strict input model + validation per type.
 - `dialects.py` — Dialect enum.
-- `codec.py` — definition file format: dict/YAML text ⇄ Definition, with schema_version.
+- `codec.py` — definition file format: dict/YAML text ⇄ Definition, with schema_version
+  (2; version-1 files load); `definition_from_recipe` / `is_recipe_data`: a removed recipe
+  (ADR 0026) as the composed definition that replaces it (store migration, library files).
 - `errors.py` — CteforgeError and subclasses (incl. EmbeddingError: the model can't load/run).
 - `issues.py` — Issue, IssueCode, Severity: structured problems/warnings (ADR 0015).
-  IssueCode is append-only; add new codes at the end of their group with Edit.
+  IssueCode is append-only; add new codes at the end of their group with Edit
+  (`recipe_invalid` stays for stored history).
 - `users.py` — User (`role` = a role NAME; `active`; the acting user's resolved `tools` /
   `review_all`, None = its built-in role's; the calling token's `token_id`,
   `token_expires_at`, `token_mode`, None without one), UserRole (the built-in role names), ActorKind
   (ADR 0018, 0027). No tokens or hashes here.
 - `access.py` — ADR 0027: the `Tool` catalog (one name per operation; MCP tools use the
   same names), `ToolGroup` + `TOOL_GROUPS` (use/build/review/admin), `ALL_TOOLS`,
-  `ADMIN_ONLY_TOOLS`, `tool_group`, `sorted_tools` (catalog order), `ToolMode`
+  `ADMIN_ONLY_TOOLS`, `REMOVED_TOOLS` (names ADR 0026 removed; stripped from stored roles
+  and tokens), `tool_group`, `sorted_tools` (catalog order), `ToolMode`
   (follow_role | only), `Role` (name Ident ≤ 32, description, allowed, defaults ⊆
   allowed, review_all, builtin), `TokenInfo` (token metadata: id, user_name, name, prefix,
   created/last-used/expiry/revoked times, tool_mode, include, exclude, parent_token_id;
   `usable_at`; never
   the token or its hash), `BUILTIN_ROLES` (viewer, contributor, approver, admin) and
   `ADMIN_ROLE`. How roles and tokens combine is policy: trust/approval.py.
-- `proposals.py` — Proposal, ProposalKind (incl. `rename_definition`, ADR 0024),
-  ProposalStatus, `DEFINITION_KINDS`, `proposal_with_definition_renamed` (every stored copy
-  of a definition id in a proposal → the new id; a rename's from/to kept) (DESIGN §18).
+- `proposals.py` — Proposal, ProposalKind (incl. `rename_definition`, ADR 0024; `new_recipe`
+  only on proposals stored before ADR 0026), ProposalStatus, `DEFINITION_KINDS`,
+  `proposal_with_definition_renamed` (every stored copy of a definition id in a proposal →
+  the new id, composed definitions' parts included; a rename's from/to kept) (DESIGN §18).
 - `audit.py` — AuditEvent, AuditKind, AuditOutcome (ADR 0008).
 - `search.py` — meaning search (ADR 0023): `search_document(definition, joins=(),
-  former_ids=())` → the
+  former_ids=())` (a composed definition lists the parts it is built from) → the
   generated Markdown search document (pure, deterministic; no version/state/SQL);
   `document_sha256`; `SearchVector` (definition_id, version, model, doc_sha256, vector).
 - `connections.py` — WarehouseProfile: connection options + env-var NAMES of secrets,

@@ -32,9 +32,9 @@ If something does not clearly fit one of the above, it does not belong here.
 
 ## Tools (each maps to one service call; responses are the services' card models as JSON)
 search · get_definition · compile_and_run · check_and_run · parse_query ·
-propose_definition · revise_definition · propose_join · propose_recipe · list_recipes ·
-list_joins · describe_tables · list_proposals · review_proposal · list_users ·
-manage_user · manage_role (17; ADR 0027). Each is shown only to callers holding the tool
+propose_definition · revise_definition · propose_join · list_joins · describe_tables ·
+list_proposals · review_proposal · list_users · manage_user · manage_role (15; ADR 0026,
+0027: `propose_recipe` / `list_recipes` are gone). Each is shown only to callers holding the tool
 of the same name (domain/access.py); `review_proposal` also to callers holding `verify`.
 Annotations: reads `readOnlyHint: true`; proposals `readOnlyHint: false`,
 `destructiveHint: false`; review_proposal / manage_user / manage_role
@@ -60,8 +60,13 @@ connection's: the profile passed, else the team's default connection; services
 `revise_definition` takes an optional `new_id`: with nothing else to change it proposes a
 rename (ADR 0024; `services.propose.rename_definition`). A former id in any tool fails with
 NotFoundError "… was renamed to '<new>' …"; INSTRUCTIONS tells agents to switch to it.
-propose_recipe's `recipe` argument is `services.propose_other.RecipeInput` (no `version`,
-`state` or `schema_version`: cteforge sets them).
+`propose_definition` / `revise_definition` take `sql` OR `composition`
+(`services.propose.CompositionInput` {uses, select?, fixed?}; ADR 0026); annotations are
+optional. `compile_and_run` runs composed definitions by id (values `<part alias>.<var>`
+or per part); its description and INSTRUCTIONS tell agents to try a combination with
+`compile_and_run` first, then propose it as a composition. `propose_join(action: annotate
+(default) | add, id? | left_table + right_table + keys, join_type?, relationship?, traps?,
+notes?)`; `list_joins(table?, known_only?)` → JoinCard list.
 Approve/verify only through `review_proposal`, under the services' rules (four-eyes with
 no agent exemption; verify and changes to verified work need a human or the admin role).
 Errors are returned as tool errors carrying the

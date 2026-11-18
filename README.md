@@ -43,12 +43,14 @@ uv run cteforge run --use rr=realization_rate \
 uv run cteforge serve                     # GUI + API + MCP on http://127.0.0.1:8765
 ```
 
-Open <http://127.0.0.1:8765> and sign in with the admin token. The GUI has the Library,
-a run form and an Edit tab per definition (revise its description, or its SQL and variables
-in the import builder), Explore (saved recipes, combining definitions with a final SELECT
-and saving it as a recipe, the join map, table schemas, exploratory SQL), Import (paste SQL,
-mark the literals that are variables, check, propose), the Review queue, the Audit log and
-Settings (users, roles, my tokens, team mode).
+Open <http://127.0.0.1:8765> and sign in with the admin token. The GUI has five pages:
+**Library** (every definition and the proposals touching it on one page — filter by trust,
+approval, created by and verified by, or "needs my review"; each definition has a page with
+a run form, "joins to", "used by", its history, an Edit tab, and for a composed definition
+its parts and full compiled SQL; proposals open with their diff and checks), **Join map**
+(edges mined from the definitions with relationship, traps, notes and where they come
+from; propose annotations or new edges), **Import** (paste SQL, mark the literals that are
+variables, check, propose), **Audit** and **Settings** (users, roles, my tokens, team mode).
 
 ### Connect Claude Code (or any MCP client)
 
@@ -78,8 +80,9 @@ Then ask: *"What was the realization rate in APAC in Q3 2025?"* The agent calls 
 "2025-10-01"}, "regions": ["APAC"]}` and reports the trust label with the numbers.
 
 MCP tools: `search`, `get_definition`, `compile_and_run`, `check_and_run` (exploratory SQL,
-labeled), `parse_query`, `propose_definition`, `revise_definition`, `propose_join`,
-`propose_recipe`, and for discovery `list_recipes`, `list_joins` and `describe_tables`; when
+labeled), `parse_query`, `propose_definition` (trusted SQL, or a composition of existing
+definitions), `revise_definition`, `propose_join` (annotate an edge or add one), and for
+discovery `list_joins` and `describe_tables`; when
 the token allows them, `list_proposals` / `review_proposal` (approve, reject, verify — never
 one's own work) and the admin tools `list_users`, `manage_user`, `manage_role`. Each client
 sees only the tools its token allows (ADR 0027). stdio acts as `CTEFORGE_TOKEN`'s user and
@@ -106,7 +109,11 @@ nothing sent elsewhere); vectors are stored in cteforge's own database.
 ## Concepts
 
 - **Definition** — one trusted query plus its meaning, keywords, "use when / don't use when",
-  grain, outputs, tables, join keys, owner and version history.
+  grain, outputs, tables, join keys, owner and version history. Its body is trusted SQL, or
+  a **composition** of other definitions (ADR 0026): parts by reference + a final SELECT +
+  values it always sets. Parts float on their latest usable version (or are pinned), so
+  fixing a definition fixes everything built on it; agents try a combination with
+  `compile_and_run`, then propose it.
 - **Variables** — typed holes in the SQL. Each literal is left alone, made **fixed** (named
   and visible to agents; overriding it warns and lowers trust) or **changeable**. Nothing is
   changeable by default (ADR 0015). One variable can fill several places (the same period in
@@ -126,7 +133,8 @@ nothing sent elsewhere); vectors are stored in cteforge's own database.
 - **Trust labels** on every result, best to worst: `verified` · `built_from_verified_parts` ·
   `llm_annotated` · `new_logic_on_known_joins` · `exploratory`. Overrides of fixed
   variables, values outside `allowed`, and cross-dialect renders each lower it one step.
-- **Proposals and review** — every change (new or revised definition, recipe, join) is a
+- **Proposals and review** — every change (new or revised definition, join annotation or new
+  edge, rename) is a
   proposal, checked on the warehouse: same query back (AST and results), types, EXPLAIN.
   In **open** mode a passing proposal for a new or unverified definition applies at once as
   `llm_annotated`; changes to a **verified** definition always wait for a person (or an
@@ -144,8 +152,10 @@ agent holding the admin role, ADR 0027). **Strict**
   (follow the role, or only these). MCP lists only the tools a token may use; the API and
   CLI enforce the same tools. Agents never see tokens; admin agents may manage non-admin
   users and roles.
-- **Join map and recipes** — joins are mined from trusted SQL (also through CTEs) and used to
-  label new SQL; recipes save definitions + values + a final SELECT by reference.
+- **Join map** — joins are mined from every definition's SQL (also through CTEs) and used to
+  label new SQL. People and agents add what mining can't see (relationship — checked
+  against the data —, traps, notes) through proposals; an edge an agent adds counts as known
+  only after a person approves it.
 - **Audit** — cteforge logs its own calls (actor, definitions + versions, values, label, row
   count, SQL hash — never SQL text or rows) and tags every query
   `/* cteforge: realization_rate v3 compile_id=… */` so it joins with the warehouse's logs.

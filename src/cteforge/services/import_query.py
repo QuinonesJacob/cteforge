@@ -123,8 +123,16 @@ def _compare_results(
     target = warehouse.dialect
     source = definition.source_dialect
     original_sql = sql if target is source else transpile(sql, source, target)
+    return compare_queries(original_sql, render(definition, {}, target).sql, warehouse)
+
+
+def compare_queries(
+    original_sql: str, rendered_sql: str, warehouse: Warehouse
+) -> tuple[bool | None, list[Issue]]:
+    """EXPLAIN `rendered_sql`, run both (in the warehouse's dialect) and compare the
+    results; (results identical?, issues). Runtime failures keep only the error class
+    (`_run_failure`). Also used for composed definitions (services/_compose.py)."""
     try:
-        rendered_sql = render(definition, {}, target).sql
         warehouse.explain(rendered_sql)
     except WarehouseError as exc:
         return False, [_issue(IssueCode.COMPILE_FAILED, Severity.ERROR, str(exc))]

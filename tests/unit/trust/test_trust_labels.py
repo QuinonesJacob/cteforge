@@ -269,3 +269,39 @@ def test_strict_downgrade_block_keeps_label_and_names_cause():
     assert result.usable is False
     assert [b.code for b in result.blocking] == [IssueCode.STRICT_MODE_BLOCKED]
     assert "fixed variable was overridden" in result.blocking[0].message
+
+
+# ── ADR 0026: composed definitions ───────────────────────────────────────────────────
+
+COMPOSED_CASES = [
+    # (id, composed own states, part states, extra kwargs, expected label)
+    ("unreviewed_over_verified", [L], [V], {}, BFV),
+    ("verified_over_verified", [V], [V], {}, VER),
+    ("verified_over_llm_part", [V], [V, L], {}, LLM),  # verifying the whole ≠ the parts
+    ("unreviewed_over_llm_part", [L], [L], {}, LLM),
+    ("nested_unreviewed_inside_verified", [V, L], [V], {}, BFV),
+    ("unreviewed_unknown_join", [L], [V], {"joins_known": False}, EXP),
+    ("verified_known_joins_flag_ignored_without_select", [V], [V], {}, VER),
+    ("unreviewed_reads_raw_tables", [L], [V], {"raw_sql": True}, NEW),
+    ("override_on_unreviewed", [L], [V], {"issues": [OVERRIDE]}, LLM),
+    ("draft_composed", [D], [V], {}, EXP),
+]
+
+
+@pytest.mark.parametrize(
+    ("composed", "parts", "extra", "expected"),
+    [c[1:] for c in COMPOSED_CASES],
+    ids=[c[0] for c in COMPOSED_CASES],
+)
+def test_composed_definition_labels(composed, parts, extra, expected) -> None:
+    result = assess(TrustInputs(definition_states=parts, composed_states=composed, **extra))
+    assert result.label is expected, result.reasons
+
+
+def test_composed_strict_mode_and_drafts() -> None:
+    strict = TeamMode.STRICT
+    built = assess(TrustInputs(definition_states=[V], composed_states=[L], mode=strict))
+    assert built.usable and built.label is BFV
+    assert any("composed definition" in r for r in built.reasons)
+    draft = assess(TrustInputs(definition_states=[V], composed_states=[D]))
+    assert not draft.usable and draft.blocking[0].code is IssueCode.DRAFT_NOT_USABLE

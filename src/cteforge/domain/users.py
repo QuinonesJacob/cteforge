@@ -22,7 +22,7 @@ class UserRole(StrEnum):
     """The built-in role names (ADR 0018). Custom roles have other names (ADR 0027)."""
 
     VIEWER = "viewer"  # search, describe, render, run
-    CONTRIBUTOR = "contributor"  # + propose definitions/recipes/joins
+    CONTRIBUTOR = "contributor"  # + propose definitions and joins
     APPROVER = "approver"  # + approve/reject proposals, verify definitions
     ADMIN = "admin"  # + users, roles, tokens and settings
 

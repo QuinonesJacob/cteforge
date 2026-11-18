@@ -87,7 +87,7 @@ export function RenameIdPanel({ def, onRenamed }: Props) {
     <section className="card" aria-label="Rename ID">
       <h2>Rename ID</h2>
       <p className="muted small">
-        Agents and recipes call this definition by <code>{def.id}</code>. If agents don't find it under that name, a
+        Agents and composed definitions call this definition by <code>{def.id}</code>. If agents don't find it under that name, a
         clearer ID helps. Renaming keeps every version, its state and its history.
       </p>
       <h3 className="small">Used inside cteforge{refs.data ? ` (${count})` : ""}</h3>

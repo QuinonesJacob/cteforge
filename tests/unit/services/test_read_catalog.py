@@ -1,4 +1,4 @@
-"""catalog: list_recipes, list_joins, describe_tables (discovery for agents and the GUI)."""
+"""catalog: list_joins, describe_tables (discovery for agents and the GUI)."""
 
 from __future__ import annotations
 
@@ -12,18 +12,15 @@ from cteforge.domain.connections import WarehouseProfile
 from cteforge.domain.dialects import Dialect
 from cteforge.domain.errors import PolicyError
 from cteforge.domain.models import (
-    DefinitionRef,
     DefinitionState,
     JoinEdge,
     JoinKey,
-    Recipe,
-    TeamMode,
 )
 from cteforge.domain.users import ActorKind, User, UserRole
 from cteforge.files.definitions import load_definition
 from cteforge.services import catalog
 from cteforge.services.cards import card_from_definition
-from cteforge.services.context import AppConfig, AppContext, open_context, set_team_mode
+from cteforge.services.context import AppConfig, AppContext, open_context
 
 EXAMPLES = Path(__file__).resolve().parents[3] / "examples"
 AGENT = User(name="claude-agent", role=UserRole.VIEWER, kind=ActorKind.AGENT)
@@ -48,52 +45,58 @@ def ctx(tmp_path: Path, wh_file: Path):
         yield context
 
 
-def _recipe(id: str, state: DefinitionState, title: str = "APAC Q3 2025 realization") -> Recipe:
-    return Recipe(
-        id=id,
-        title=title,
-        uses={"rr": DefinitionRef(id="realization_rate")},
-        values={"rr": {"regions": ["APAC"]}},
-        dialect=Dialect.DUCKDB,
-        state=state,
-    )
-
-
-def _edge(state: DefinitionState = DefinitionState.LLM_ANNOTATED) -> JoinEdge:
+def _edge(**fields: object) -> JoinEdge:
     return JoinEdge(
         id="accounts__deals__account_id=account_id",
         left_table="accounts",
         right_table="deals",
         keys=[JoinKey(left="account_id", right="account_id")],
         traps=["one account has many deals"],
-        state=state,
+        **fields,
     )
 
 
-def test_list_recipes_filters_by_words_and_hides_drafts(ctx: AppContext) -> None:
-    ctx.store.add_recipe_version(_recipe("apac_q3_rr", DefinitionState.LLM_ANNOTATED), author="a")
-    ctx.store.add_recipe_version(_recipe("wip", DefinitionState.DRAFT, "Draft thing"), author="a")
-    assert [r.id for r in catalog.list_recipes(ctx, AGENT)] == ["apac_q3_rr"]
-    assert [r.id for r in catalog.list_recipes(ctx, AGENT, query="APAC realization")] == [
-        "apac_q3_rr"
-    ]
-    assert catalog.list_recipes(ctx, AGENT, query="forecast") == []
-    every = catalog.list_recipes(ctx, AGENT, include_drafts=True)
-    assert {r.id for r in every} == {"apac_q3_rr", "wip"}
-    set_team_mode(ctx, TeamMode.STRICT)
-    assert catalog.list_recipes(ctx, AGENT) == []  # only verified recipes are usable
-    event = ctx.audit.list_events(limit=1)[0]
-    assert event.kind is AuditKind.GET_DEFINITION and event.extra["op"] == "list_recipes"
-
-
-def test_list_joins_by_table_and_state(ctx: AppContext) -> None:
-    ctx.store.upsert_join(_edge())
-    assert [e.id for e in catalog.list_joins(ctx, AGENT)] == [_edge().id]
+def test_list_joins_by_table_and_known(ctx: AppContext) -> None:
+    ctx.store.upsert_join(_edge(added_by="claude-agent", added_by_kind="agent"))
+    (card,) = catalog.list_joins(ctx, AGENT)
+    assert card.id == _edge().id and card.traps == ["one account has many deals"]
+    assert not card.known and not card.confirmed  # an agent's edge, nobody approved it
     assert [e.id for e in catalog.list_joins(ctx, AGENT, table="main.deals")] == [_edge().id]
     assert catalog.list_joins(ctx, AGENT, table="invoices") == []
-    ctx.store.upsert_join(_edge(DefinitionState.DRAFT))
-    assert catalog.list_joins(ctx, AGENT) == []
-    assert len(catalog.list_joins(ctx, AGENT, include_drafts=True)) == 1
+    assert catalog.list_joins(ctx, AGENT, known_only=True) == []
+    ctx.store.upsert_join(_edge(sources=["realization_rate"], usage_count=1))
+    (mined,) = catalog.list_joins(ctx, AGENT, known_only=True)
+    # Mined from a verified definition: known and confirmed.
+    assert mined.known and mined.confirmed and mined.sources == ["realization_rate"]
+    assert [e.id for e in catalog.list_joins(ctx, AGENT, definition="realization_rate")] == [
+        _edge().id
+    ]
+    assert catalog.list_joins(ctx, AGENT, definition="other") == []
+    event = ctx.audit.list_events(limit=1)[0]
+    assert event.kind is AuditKind.GET_DEFINITION and event.extra["op"] == "list_joins"
+
+
+def test_list_joins_pending_proposals_only_for_proposal_readers(ctx: AppContext) -> None:
+    from cteforge.domain.access import Tool
+    from cteforge.services.propose_other import propose_join
+
+    ctx.store.upsert_join(_edge(sources=["realization_rate"], usage_count=1))
+    set_mode_strict(ctx)
+    contributor = User(name="carl", role=UserRole.CONTRIBUTOR, kind=ActorKind.HUMAN)
+    outcome = propose_join(ctx, contributor, action="annotate", id=_edge().id, notes="see wiki")
+    assert outcome.proposal.status == "pending"
+    (card,) = catalog.list_joins(ctx, AGENT)
+    assert card.pending_proposals == [outcome.proposal.id]
+    narrow = AGENT.model_copy(update={"tools": frozenset({Tool.LIST_JOINS})})
+    (hidden,) = catalog.list_joins(ctx, narrow)
+    assert hidden.pending_proposals == []
+
+
+def set_mode_strict(ctx: AppContext) -> None:
+    from cteforge.domain.models import TeamMode
+    from cteforge.services.context import set_team_mode
+
+    set_team_mode(ctx, TeamMode.STRICT)
 
 
 def test_describe_tables_lists_the_library_tables_with_columns(ctx: AppContext) -> None:

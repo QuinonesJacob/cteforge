@@ -29,12 +29,10 @@ export type ToolName =
   | "check_and_run"
   | "describe_tables"
   | "list_joins"
-  | "list_recipes"
   | "parse_query"
   | "propose_definition"
   | "revise_definition"
   | "propose_join"
-  | "propose_recipe"
   | "list_proposals"
   | "review_proposal"
   | "verify"
@@ -277,6 +275,109 @@ export interface DefinitionCard {
   annotations?: Annotation[] | null;
   /** IDs it had before a rename (ADR 0024), oldest first. */
   former_ids?: string[];
+  /** ADR 0026: built from other definitions (its body is a composition). */
+  composed?: boolean;
+  /** Parts, fixed/open variables and the full compiled SQL (composed definitions only). For a
+   * composed definition `variables` are its open variables, named "<alias>.<var>". */
+  composition?: CompositionCard | null;
+  /** Composed definitions using this one as a part. */
+  used_by?: UsedByReference[];
+  /** Join-map edges touching its tables ("joins to …"). */
+  joins?: JoinCard[];
+}
+
+// ── Composed definitions (ADR 0026; services/cards.py) ─────────────────────────
+export interface PartCard {
+  alias: string;
+  id: string;
+  /** null = floats on the latest usable version. */
+  pinned_version?: number | null;
+  /** The version used now (null: not found). */
+  version?: number | null;
+  title: string;
+  state?: DefinitionState | null;
+  latest_version?: number | null;
+  /** Pinned, and newer versions exist. */
+  superseded: boolean;
+  /** False: no usable version in the team mode (or not found). */
+  usable: boolean;
+  composed: boolean;
+}
+
+export interface CompositionCard {
+  parts: PartCard[];
+  /** alias → variable → value the definition always sets. */
+  fixed: Record<string, Record<string, unknown>>;
+  /** "<alias>.<var>" (and the final SELECT's own variable names). */
+  open_variables: string[];
+  /** The final SELECT over the aliases ("" = one part used as is). */
+  select: string;
+  /** The whole query with original values; null when it does not compile. */
+  compiled_sql?: string | null;
+  dialect?: Dialect | null;
+  issues: Issue[];
+}
+
+/** A composed definition (its latest version) that uses a definition as a part. */
+export interface UsedByReference {
+  definition_id: string;
+  definition_version: number;
+  title: string;
+  state: DefinitionState;
+  alias: string;
+  /** null = floats on the latest usable version. */
+  pinned_version?: number | null;
+}
+
+// ── Library (GET /library; ADR 0026) ───────────────────────────────────────────
+export interface ProposalBrief {
+  id: string;
+  kind: ProposalKind;
+  status: ProposalStatus;
+  author: string;
+  author_kind: ActorKind;
+  created_at: string;
+  summary: string;
+}
+
+export interface LibraryRow {
+  id: string;
+  title: string;
+  meaning: string;
+  /** null: a new-definition proposal that never reached the library. */
+  version?: number | null;
+  state?: DefinitionState | null;
+  composed: boolean;
+  owner?: string | null;
+  created_by?: string | null;
+  created_by_kind?: ActorKind | null;
+  verified_by?: string | null;
+  verified_by_kind?: ActorKind | null;
+  /** Status of the newest proposal touching it ("approved" when none). */
+  approval: ProposalStatus;
+  latest_proposal?: ProposalBrief | null;
+  /** Its pending proposals (a revision or rename is a badge linking to the diff). */
+  pending: ProposalBrief[];
+  needs_my_review: boolean;
+}
+
+export interface LibraryPage {
+  rows: LibraryRow[];
+  /** Rows before the filters. */
+  total: number;
+  pending_count: number;
+  /** The caller may list proposals: rows include them. */
+  proposals_visible: boolean;
+}
+
+/** GET /library query (repeatable list params; omitted approval = pending + approved). */
+export interface LibraryFilter {
+  q?: string;
+  trust?: DefinitionState[];
+  approval?: ProposalStatus[];
+  created_by?: ActorKind[];
+  verified_by?: ActorKind[];
+  needs_my_review?: boolean;
 }
 
 /** How a search hit matched (ADR 0023): its words, the meaning of the query, or both. */
@@ -428,8 +529,7 @@ export interface DefinitionRef {
 }
 
 export interface RunRequest {
-  uses?: Record<string, DefinitionRef>;
-  recipe_id?: string;
+  uses: Record<string, DefinitionRef>;
   values: Record<string, Record<string, unknown>>;
   select?: string;
   dialect?: Dialect;
@@ -440,42 +540,33 @@ export interface RunRequest {
   question?: string;
 }
 
-export interface CheckRequest {
-  sql: string;
-  profile?: string;
-  run: boolean;
-  limit: number;
-  question?: string;
-}
-
-// ── Catalog (domain/models.py Recipe / JoinEdge, services/cards.py TableCard) ───
-export interface Recipe {
-  id: string;
-  version: number;
-  title: string;
-  description: string;
-  uses: Record<string, DefinitionRef>;
-  values: Record<string, Record<string, unknown>>;
-  select?: string | null;
-  dialect: Dialect;
-  state: DefinitionState;
-}
-
-/** POST /proposals/recipes `recipe` (services/propose_other.py RecipeInput): cteforge sets
- * version, state and schema_version. */
-export interface RecipeInput {
-  id: string;
-  title: string;
-  description: string;
-  uses: Record<string, DefinitionRef>;
-  values: Record<string, Record<string, unknown>>;
-  select?: string;
-  dialect: Dialect;
-}
-
+// ── Join map (domain/models.py JoinEdge, services/cards.py JoinCard; ADR 0026) ─
 export interface JoinKey {
   left: string;
   right: string;
+}
+
+export type Relationship = "one_to_one" | "one_to_many" | "many_to_one" | "many_to_many";
+export const RELATIONSHIPS: Relationship[] = ["one_to_one", "one_to_many", "many_to_one", "many_to_many"];
+export const JOIN_TYPES = ["inner", "left", "right", "full"] as const;
+
+export interface SideCount {
+  table: string;
+  keys: string[];
+  rows: number;
+  distinct_keys: number;
+}
+
+/** COUNT(*) vs COUNT(DISTINCT key) on each side, for a relationship claim. */
+export interface RelationshipEvidence {
+  claimed: string;
+  observed: string;
+  left: SideCount;
+  right: SideCount;
+  /** Every side the claim calls "one" is unique in the data. */
+  consistent: boolean;
+  profile?: string | null;
+  checked_at?: string | null;
 }
 
 export interface JoinEdge {
@@ -487,24 +578,42 @@ export interface JoinEdge {
   relationship?: string | null;
   usage_count: number;
   traps: string[];
-  state: DefinitionState;
+  notes: string;
+  /** Definition ids it was mined from. */
+  sources: string[];
+  added_by?: string | null;
+  added_by_kind?: ActorKind | null;
+  /** A person who approved a proposal on it. */
+  confirmed_by?: string | null;
+  evidence?: RelationshipEvidence | null;
 }
 
-export interface ColumnCard {
-  name: string;
-  type: string;
+/** GET /joins: an edge + what it means for trust. */
+export interface JoinCard extends JoinEdge {
+  /** Counts for trust labels: mined from a definition, or added/approved by a person. */
+  known: boolean;
+  /** A person approved it, or it was mined from a verified definition. */
+  confirmed: boolean;
+  /** Pending proposals on it (only for callers who may list proposals). */
+  pending_proposals: string[];
 }
 
-export interface TableCard {
-  name: string;
-  found: boolean;
-  columns: ColumnCard[];
-  used_by: string[];
-  joins: string[];
-  units: Record<string, string>;
+/** POST /proposals/joins: add a new edge, or annotate an existing one. */
+export interface ProposeJoinRequest {
+  action: "add" | "annotate";
+  id?: string;
+  left_table?: string;
+  right_table?: string;
+  keys?: JoinKey[];
+  join_type?: string;
+  relationship?: string | null;
+  traps?: string[];
+  notes?: string;
+  summary: string;
 }
 
 // ── Proposals (domain/proposals.py, services/review.py) ────────────────────────
+/** `new_recipe` is legacy (ADR 0026 removed recipes): only old, withdrawn proposals carry it. */
 export type ProposalKind = "new_definition" | "revise_definition" | "new_recipe" | "new_join" | "rename_definition";
 export type ProposalStatus = "pending" | "approved" | "rejected" | "withdrawn";
 
@@ -559,16 +668,6 @@ export interface RenameDefinitionRequest {
 }
 
 // ── References (GET /definitions/{id}/references; ADR 0024) ───────────────────
-export interface RecipeReference {
-  recipe_id: string;
-  recipe_version: number;
-  title: string;
-  state: DefinitionState;
-  alias: string;
-  /** null = floats on the latest usable version. */
-  pinned_version?: number | null;
-}
-
 export interface ProposalReference {
   proposal_id: string;
   kind: ProposalKind;
@@ -592,17 +691,15 @@ export interface DefinitionReferences {
   id: string;
   version: number;
   state: DefinitionState;
-  recipes: RecipeReference[];
+  /** Composed definitions using it (ADR 0026). */
+  used_by: UsedByReference[];
   proposals: ProposalReference[];
   former_ids: FormerId[];
   outside_warning: string;
 }
 
-/** Impact preview: recipes using the target. Accepts a list or an object form. */
-export type ProposalImpact =
-  | string[]
-  | { recipes?: string[]; count?: number; [key: string]: unknown }
-  | null;
+/** Impact preview: ids of composed definitions using the target ("used by"). */
+export type ProposalImpact = string[] | null;
 
 export interface ProposalView {
   id: string;
@@ -624,8 +721,10 @@ export interface ProposalView {
   resulting_version?: number | null;
   /** Unified diff of the stored YAML, base → proposed ("" or /dev/null base when new). */
   diff?: string | null;
-  /** Ids of recipes using the target definition. */
+  /** Ids of composed definitions using the target definition ("used by"). */
   impact?: ProposalImpact;
+  /** A proposed composed definition: parts, fixed/open variables, compiled SQL. */
+  composition?: CompositionCard | null;
 }
 
 export interface ProposalOutcome {

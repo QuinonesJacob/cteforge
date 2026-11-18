@@ -17,7 +17,8 @@ If something does not clearly fit one of the above, it does not belong here.
 ```python
 # labels.py
 class TrustInputs(BaseModel):        # frozen
-    definition_states: list[DefinitionState]   # one per definition used; [] for raw SQL
+    definition_states: list[DefinitionState]   # one per SQL definition used; [] for raw SQL
+    composed_states: list[DefinitionState] = [] # ADR 0026: own state of each composed definition used
     raw_sql: bool = False                      # check_and_run
     has_select: bool = False                   # an agent-written final SELECT
     joins_known: bool = True                   # every join in agent-written SQL is known
@@ -57,8 +58,13 @@ def can_revoke_token(actor, owner) -> bool          # own; else can_manage_user
 def can_set_token_tools(actor, owner) -> bool       # own; else can_manage_user
 def can_auto_apply(mode: TeamMode, target: Definition | None, checks: list[Issue]) -> bool
     # DESIGN §18: open mode, no error issues, no checks_incomplete, target new or not verified
+def join_may_auto_apply(action: str, author_kind: ActorKind) -> bool   # ADR 0026: never an agent's "add"
+def confirms_join(decider_kind: ActorKind, *, auto: bool) -> bool      # only a person's approval
 ```
 Label rules (DESIGN §8): start at `verified`; `has_select` caps at `built_from_verified_parts`;
+a composed definition whose own state is not verified does the same (and its unknown joins
+→ `exploratory` like a select's); a verified one adds nothing (its parts' states still
+count);
 any `llm_annotated` definition caps at `llm_annotated`; raw SQL → `new_logic_on_known_joins`
 if `joins_known` else `exploratory`; `unknown_join` issue or `joins_known=False` with a
 select → `exploratory`; each of `fixed_override`, `value_not_allowed`, `transpiled` lowers

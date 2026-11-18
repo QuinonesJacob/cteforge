@@ -1,7 +1,8 @@
 import { api, expect, screenshot, signIn, test, tokens } from "./helpers";
 
-// ADR 0024. Runs after 08: the recipe booked_by_region uses booked_vs_collected (llm_annotated),
-// and the team is in open mode, so the rename applies at once.
+// ADR 0024, 0026. The demo's composed definition realization_with_booked uses
+// booked_vs_collected (llm_annotated) as part "bc", and the team is in open mode, so the
+// rename applies at once.
 test.describe.configure({ mode: "serial" });
 
 const OLD = "booked_vs_collected";
@@ -11,13 +12,13 @@ interface ErrorBody {
   error: { type: string; message: string };
 }
 
-test("rename a definition used by a recipe: references, typed confirmation, applied", async ({ page }) => {
+test("rename a definition used by a composed definition: references, typed confirmation, applied", async ({ page }) => {
   await signIn(page, tokens.admin, `/definitions/${OLD}?tab=edit`);
   const panel = page.getByRole("region", { name: "Rename ID" });
   await expect(panel.getByRole("heading", { name: "Rename ID" })).toBeVisible();
   // Everything inside cteforge that uses the ID, grouped by kind, and the outside warning.
-  await expect(panel.getByText(/^\d+ recipes?$/)).toBeVisible();
-  await expect(panel.getByRole("link", { name: "booked_by_region" })).toBeVisible();
+  await expect(panel.getByText(/^\d+ composed definitions?$/)).toBeVisible();
+  await expect(panel.getByRole("link", { name: "realization_with_booked" })).toBeVisible();
   await expect(panel.getByRole("note")).toContainText("References outside cteforge will break");
 
   const rename = panel.getByRole("button", { name: /^Rename/ });
@@ -37,25 +38,25 @@ test("rename a definition used by a recipe: references, typed confirmation, appl
   await screenshot(page, "09-renamed-definition");
 
   // The old ID fails with an error naming the new one (what an agent with stale
-  // instructions sees), and the recipe still runs under the new ID.
+  // instructions sees), and the composed definition now uses (and runs with) the new ID.
   const old = await api<ErrorBody>("GET", `/definitions/${OLD}`, tokens.agent);
   expect(old.status).toBe(404);
   expect(old.json.error.message).toContain(`was renamed to '${NEW}'`);
   const run = await api<{ ran: boolean; definitions: string[] }>("POST", "/run", tokens.agent, {
-    recipe_id: "booked_by_region",
+    uses: { combo: { id: "realization_with_booked" } },
     values: {},
     run: true,
     limit: 5,
   });
   expect(run.status).toBe(200);
   expect(run.json.ran).toBe(true);
-  expect(run.json.definitions[0]).toMatch(new RegExp(`^${NEW}@`));
+  expect(run.json.definitions.some((d) => d.startsWith(`${NEW}@`))).toBe(true);
   // Searching the old name still finds it.
   const hits = await api<{ id: string }[]>("GET", `/definitions?q=${OLD}`, tokens.agent);
   expect(hits.json.map((h) => h.id)).toContain(NEW);
 });
 
-test("a rename proposal shows old → new and the references on the Review page", async ({ page }) => {
+test("a rename proposal shows old → new and the references on its proposal page", async ({ page }) => {
   // An agent proposes the rename back while the team is strict, so it waits for a person.
   await api("PUT", "/settings", tokens.admin, { mode: "strict" });
   try {
@@ -70,7 +71,7 @@ test("a rename proposal shows old → new and the references on the Review page"
     await signIn(page, tokens.approver, `/review/${res.json.proposal.id}`);
     const card = page.getByRole("region", { name: "Proposed rename" });
     await expect(card).toContainText(`${NEW} → booked_collected`);
-    await expect(card.getByRole("link", { name: "booked_by_region" })).toBeVisible();
+    await expect(card.getByRole("link", { name: "realization_with_booked" })).toBeVisible();
     const decide = page.getByRole("region", { name: "Decide" });
     await expect(decide.getByRole("checkbox", { name: /Also verify/ })).toHaveCount(0);
     await screenshot(page, "09-rename-proposal");

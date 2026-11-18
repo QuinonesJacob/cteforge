@@ -25,5 +25,6 @@ Status: accepted · 2026-11-16
 - The Review page shows recipe and join proposals as a recipe summary / join table.
 
 ## Amendment (2026-11-17): see ADR 0026
-Accepted, not built: Library and Review merge; the Explore page is removed (Join map
-becomes its own nav item).
+Built 2026-11-18: Library and Review are one page (`GET /library`; `/review` redirects to
+the Library's "needs my review"; `/review/:id` stays); the Explore page is removed (Join
+map is its own nav item: Library · Join map · Import · Audit · Settings).

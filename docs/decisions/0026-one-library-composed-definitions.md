@@ -1,6 +1,8 @@
 # 0026 — One library: review in the Library, composed definitions replace recipes, joins from definitions
 
-Status: accepted · 2026-11-17 · not yet implemented · amends ADR 0019 (GUI pages), DESIGN §3, §6, §17, §18
+Status: accepted · 2026-11-17 · implemented 2026-11-18 (see "as built" below) · amends ADR
+0019 (GUI pages), ADR 0024 (references), ADR 0027 (tool catalog), DESIGN §3, §6, §8, §15, §17,
+§18
 
 ## Context
 - The GUI splits the library across Library, Review and Explore (Recipes, Compose, Join
@@ -96,3 +98,96 @@ tools are added by ADR 0027 and are visible only to tokens allowed to use them.
 - A store migration (recipes → composed definitions) and a codec change (definition body:
   sql | composition) with a `schema_version` bump.
 - Join-map trust can no longer be raised by an agent alone.
+
+## Addendum (2026-11-18): as built
+Choices made while building it (the decision above is unchanged):
+
+**Model and codec.** `Definition.composition` (`Composition{uses: alias → DefinitionRef,
+fixed: alias → var → value}`) marks a composed definition; its final SELECT is the
+definition's `template` (so its own literals are annotated exactly like SQL definitions),
+and an empty template means exactly one part used as is (what a recipe without a SELECT
+was). The parts' open variables are not copied into `variables`: they are computed from
+the parts as they are now (`<alias>.<var>`, nested `<alias>.<sub>.<var>`), so a floating
+part's new variables appear without a new version. Definition `schema_version` is 2;
+version-1 files load unchanged. A variable may not be named like a part alias.
+`codec.definition_from_recipe` turns old recipe data (files and stored rows) into a
+composed definition (values → `fixed`, description → meaning).
+
+**Values.** `compile_and_run` takes a composed definition's values as
+`values[alias]["<part alias>.<var>"]` or `values[alias]["<part alias>"] = {var: value}`.
+Giving a value for a variable the composition fixes is an override: `fixed_override`
+warning, one step down (like overriding a fixed variable). A composed definition's
+`values_used` and audit values use the dotted names.
+
+**Trust (trust/labels.py `composed_states`).** A composed definition nobody verified caps
+the label at `built_from_verified_parts` and its final SELECT's joins are judged like an
+agent's (unknown → exploratory; raw tables → new logic). A VERIFIED composed definition's
+final SELECT and choice of parts are trusted as reviewed (its own alias joins are not
+re-judged); its parts' states still cap the label. A floating part with no usable version
+in the team mode → `part_not_usable` (error at run time: the run is refused; a warning in
+proposal checks: approvable, never verifiable). A pinned part with newer versions →
+`part_superseded` (info). Cycles (also through nesting) → `composition_cycle`, refused at
+proposal time, again when applying (two pending proposals could close one) and at run
+time; nesting deeper than 10 levels is refused.
+
+**Checks of a composition** (`services/_compose.checked_composition`): the select must be
+one read-only SELECT (PolicyError `not_read_only`, first); parts resolve (`not_found`);
+`fixed` names open variables of its part (`composition_invalid`); no cycle; the whole
+compiles (render + compose; compose's issues kept) and passes EXPLAIN on the profile's
+warehouse. ADR 0027's raw-table gate holds throughout: a final SELECT that reads raw tables
+(or table functions) is exploratory SQL and needs `check_and_run` — when a composed
+definition using one is run (verified or not, nested too), when it is proposed or
+re-checked (the checks run it; refused before the warehouse), and in revalidation
+(without the tool it is reported as not checked). With annotations on the final select, the compiled query with the plain select
+and with the template are run and compared. The final SELECT reads its parts, not
+warehouse tables, so a variable's type is not checked against a column type
+(`type_unknown` at INFO severity; the results comparison covers the original values). The
+definition's `tables` are its parts' tables (+ raw tables of the select); `outputs` the
+select's.
+
+**Joins.** `JoinEdge` lost `state`; it gained `notes`, `sources` (definition ids it was
+mined from; recomputed with `usage_count` after every apply, composed definitions mined
+from their compiled SQL), `added_by` / `added_by_kind`, `confirmed_by` (a PERSON who
+approved a proposal on it; auto-apply and admin agents never confirm) and `evidence` (the
+last relationship check). Known (counts for trust) = mined, added by a person, or
+confirmed by a person. `list_joins` returns `JoinCard` (edge + `known`, `confirmed` — a
+person approved it or a source definition is verified — and `pending_proposals` for
+callers holding list_proposals) and filters `table`, `known_only`, `definition`. A
+confirmed edge is treated like a verified definition: changes to it wait for a person or
+an admin agent. Join proposals are approved, never verified. The relationship check runs
+`compose.relationship.relationship_query` on each side (rows with every key set vs
+distinct key tuples; identifiers via sqlglot, no values); a side claimed "one" with
+duplicate keys is a `relationship_contradicted` ERROR (data may be stricter than a claim,
+never looser); a failed count is `checks_incomplete` with the error class only. The
+default `action` is `annotate`; `annotate` never changes the join type (only a library
+import does, from a file).
+
+**Store migration (schema 3)** in `Store.init_schema`, one transaction: each recipe's
+latest version → a composed definition v1 (same id when free and not a former id, else
+`<id>_recipe`, `_recipe_2`, …), llm_annotated, or verified with `verified_by` = the
+approver of the proposal that produced that verified recipe version (no such record →
+llm_annotated), authored by that proposal's author (else `cteforge`); pending `new_recipe`
+proposals → withdrawn by `cteforge` with a comment; `list_recipes` / `propose_recipe`
+stripped from every role's allowed/defaults and every token's include/exclude; join edges
+lose `state`, and `added_by` / `confirmed_by` come from their approved join proposals. The
+recipe tables are kept (read only by the migration). The store cannot write the audit
+log (another adapter), so it leaves a note in `settings`; `services/_upgrade.py` writes
+it as one `admin` event (`op=migrate_adr_0026`, actor `cteforge`) when a context opens,
+fail closed, then clears it, and re-mines the join map once per database. ProposalKind
+`new_recipe` and IssueCode `recipe_invalid` stay as values so stored history loads;
+nothing creates them.
+
+**Library page and API.** `GET /api/v1/library` (`services/library.list_library`, tool
+`search`; proposal rows, badges and approval statuses only for callers who also hold
+`list_proposals`; `needs_my_review` needs `review_proposal` and uses the four-eyes rule).
+A definition in the library always matches the "approved" filter (its current version
+was approved) as well as its latest proposal's status, so a rejected revision never hides
+it; rejected/withdrawn new-definition proposals are hidden by default. "Created by" is
+the author of version 1 (kind from the users table) or of the proposal.
+
+**Other.** `DefinitionCard` gained `composed`, `composition` (parts with what they
+resolve to now, fixed and open variables, the full compiled SQL), `used_by` and `joins`
+("joins to": edges touching its tables). `DefinitionReferences.recipes` became `used_by`.
+`check_and_run`'s `matches_definition` hint skips composed definitions. The demo
+(`cteforge demo`) adds one composed definition proposed by the agent. MCP has 15 tools
+(ADR 0027's review and admin tools included).
