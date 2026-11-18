@@ -84,7 +84,7 @@ Each has its own CLAUDE.md. Read it before adding files there.
   product (GUI + API on :8765, MCP at /mcp); `uv run cteforge mcp` — MCP over stdio
 - `uv run cteforge --help` — CLI
 - CI: `.github/workflows/ci.yml` — lint, tests, GUI + browser e2e, and the live connector
-  tests against Postgres / ClickHouse service containers (`live-databases` job)
+  tests against Postgres / ClickHouse / MySQL service containers (`live-databases` job)
 
 ## Out of scope
 - A full semantic layer or BI dashboards. Describe the holes, not the world (ADR 0002).

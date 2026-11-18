@@ -29,7 +29,7 @@ jobs:
       - uses: astral-sh/setup-uv@v6
         with:
           enable-cache: true
-      - run: uv sync --locked --extra postgres --extra clickhouse
+      - run: uv sync --locked --extra postgres --extra clickhouse --extra mysql
       - run: uv run python examples/seed_warehouse.py
       - run: uv run ruff check .
       - run: uv run ruff format --check .
@@ -73,7 +73,7 @@ jobs:
           retention-days: 7
 
   live-databases:
-    name: Connectors against real Postgres and ClickHouse
+    name: Connectors against real Postgres, ClickHouse and MySQL
     runs-on: ubuntu-latest
     timeout-minutes: 20
     services:
@@ -96,6 +96,14 @@ jobs:
           --health-cmd "wget -qO- http://127.0.0.1:8123/ping || exit 1"
           --health-interval 5s --health-timeout 5s --health-retries 30
           --ulimit nofile=262144:262144
+      mysql:
+        image: mysql:8.4
+        env:
+          MYSQL_ROOT_PASSWORD: ci-admin-password
+        ports: ["3306:3306"]
+        options: >-
+          --health-cmd "mysqladmin ping -h 127.0.0.1 -uroot -pci-admin-password"
+          --health-interval 5s --health-timeout 5s --health-retries 30
     env:
       CTEFORGE_TEST_POSTGRES_URL: postgresql://127.0.0.1:5432
       CTEFORGE_TEST_POSTGRES_ADMIN_USER: postgres
@@ -105,24 +113,32 @@ jobs:
       CTEFORGE_TEST_CLICKHOUSE_ADMIN_USER: admin
       CTEFORGE_TEST_CLICKHOUSE_ADMIN_PASSWORD: ci-admin-password
       CTEFORGE_TEST_CLICKHOUSE_PASSWORD: ci-readonly-password
+      CTEFORGE_TEST_MYSQL_URL: mysql://127.0.0.1:3306
+      CTEFORGE_TEST_MYSQL_ADMIN_USER: root
+      CTEFORGE_TEST_MYSQL_ADMIN_PASSWORD: ci-admin-password
+      CTEFORGE_TEST_MYSQL_PASSWORD: ci-readonly-password
+      CTEFORGE_TEST_MYSQL_VERIFY: "0"  # the image's self-signed certificate: encrypted, not verified
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
         with:
           enable-cache: true
-      - run: uv sync --locked --extra postgres --extra clickhouse
+      - run: uv sync --locked --extra postgres --extra clickhouse --extra mysql
       - run: uv run python examples/seed_warehouse.py
       - name: Prepare Postgres (database, synthetic data, read-only role)
         run: uv run python tests/fixtures/postgres/live_setup.py
       - name: Prepare ClickHouse (database, synthetic traces, read-only user + profile)
         run: uv run python tests/fixtures/clickhouse/live_setup.py
+      - name: Prepare MySQL (database, synthetic data, read-only user, write probe user)
+        run: uv run python tests/fixtures/mysql/live_setup.py
       - name: Live connector tests (none may be skipped)
         shell: bash
         run: |
           set -o pipefail
           uv run pytest -v -rs -p no:cacheprovider \
             tests/integration/test_postgres_live.py \
-            tests/integration/test_clickhouse_live.py | tee live.txt
+            tests/integration/test_clickhouse_live.py \
+            tests/integration/test_mysql_live.py | tee live.txt
           if grep -qE "[0-9]+ skipped" live.txt; then
             echo "::error::live database tests were skipped"; exit 1
           fi
