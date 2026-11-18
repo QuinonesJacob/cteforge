@@ -547,6 +547,9 @@ def test_final_select_over_raw_tables_needs_check_and_run(ctx: AppContext) -> No
         "SELECT a.name, (SELECT COUNT(*) FROM rr) AS n FROM accounts AS a",
         "SELECT rr.region, a.name FROM rr JOIN accounts AS a ON a.region = rr.region",
         "SELECT * FROM read_csv('x.csv')",  # table functions are raw reads too
+        # security review 2026-11-18: a nested CTE spelled unlike the reference may resolve
+        # to the real table on the warehouse, so it is a raw read (fail closed)
+        'SELECT * FROM (WITH "Accounts" AS (SELECT 1 AS x) SELECT * FROM accounts) AS s, rr',
     ):
         with pytest.raises(PermissionDeniedError, match="check_and_run"):
             compile_and_run(ctx, narrow, uses=uses, select=select)

@@ -205,3 +205,21 @@ deactivation, tokens); granting the admin role; editing the admin role.
   (joining `query_to_xml*` / `dblink`), ClickHouse `joinGet` / `joinGetOrNull`.
 - Known, accepted: narrowing a parent token does not narrow tokens it minted earlier (only
   revoking cascades); a human token holding `manage_user` is effectively root (by design).
+
+## Addendum (2026-11-18): security review before going public
+Three ways a final SELECT read a warehouse table without the raw-table gate seeing it, so a
+token with `compile_and_run` but not `check_and_run` could read any table the warehouse
+role can read (strict mode did not stop the first two). All are now raw reads:
+- **Names that only looked like a CTE.** References were classified as CTEs by a
+  case-insensitive name match, and ClickHouse scalar aliases (`WITH 1 AS users`) counted as
+  CTEs; the warehouse resolved `users` to the real table (ClickHouse is case-sensitive,
+  Postgres/Redshift fold unquoted names, Snowflake uppercases them). Now scalar aliases never
+  hide a table; nested CTEs hide a reference only when spelled exactly like it; top-level
+  CTEs and their references are rewritten to the same unquoted name (compose.checks
+  `table_refs` / `_nested_shadow`, assemble `_rename`).
+- **Snowflake `TABLE('<name>')`** (= `IDENTIFIER(...)`) in FROM/JOIN had no table
+  reference. Any FROM/JOIN source that is not a named table, a function or a subquery is now
+  a raw read `table()` (fail closed).
+- **ClickHouse `dictGet*` / `dictHas` / `dictIsIn`** read a dictionary named by a string.
+  They are raw reads in a final SELECT (not refused like `joinGet`: trusted SQL uses them;
+  the warehouse role also needs ClickHouse's `dictGet` privilege).

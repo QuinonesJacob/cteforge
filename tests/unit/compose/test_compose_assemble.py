@@ -478,3 +478,117 @@ def test_clickhouse_join_get_reads_a_table_by_name_and_is_rejected() -> None:
     for fn in ("joinGet", "joinGetOrNull"):
         with pytest.raises(RenderError, match="(?i)joinget"):
             compose([rev], f"SELECT {fn}('db.users', 'name', a) AS n FROM rev", Dialect.CLICKHOUSE)
+
+
+# ── Security review 2026-11-18: names that look like CTEs but read real tables ──────
+
+
+@pytest.mark.parametrize(
+    ("dialect", "select"),
+    [
+        # ClickHouse scalar WITH alias: names a value, never hides the table `users`
+        (
+            Dialect.CLICKHOUSE,
+            "WITH 1 AS users SELECT * FROM users WHERE (SELECT max(n) FROM o) >= 0",
+        ),
+        (Dialect.CLICKHOUSE, "WITH (SELECT 1) AS users SELECT * FROM users CROSS JOIN o"),
+        # nested CTE spelled differently from the reference (case / quoting)
+        (
+            Dialect.CLICKHOUSE,
+            "SELECT * FROM (WITH Users AS (SELECT 1 AS x) SELECT * FROM users) AS s CROSS JOIN o",
+        ),
+        (
+            Dialect.POSTGRES,
+            'SELECT * FROM (WITH "Users" AS (SELECT 1 AS x) SELECT * FROM users) AS s CROSS JOIN o',
+        ),
+        (
+            Dialect.REDSHIFT,
+            'SELECT * FROM (WITH users AS (SELECT 1 AS x) SELECT * FROM "Users") AS s CROSS JOIN o',
+        ),
+        (
+            Dialect.SNOWFLAKE,
+            'SELECT * FROM (WITH "users" AS (SELECT 1 AS x) SELECT * FROM users) AS s CROSS JOIN o',
+        ),
+        (
+            Dialect.MYSQL,
+            "SELECT * FROM (WITH Users AS (SELECT 1 AS x) SELECT * FROM users) AS s CROSS JOIN o",
+        ),
+    ],
+)
+def test_names_that_only_look_like_a_cte_are_raw_reads(dialect: Dialect, select: str) -> None:
+    o = part("o", "SELECT 1 AS n", dialect=dialect)
+    result = compose([o], select, dialect)
+    assert [t.lower() for t in result.raw_tables] == ["users"]
+
+
+def test_nested_cte_spelled_exactly_like_the_reference_still_shadows() -> None:
+    o = part("o", "SELECT 1 AS n", dialect=Dialect.POSTGRES)
+    select = (
+        'SELECT * FROM (WITH "Users" AS (SELECT 1 AS x) SELECT * FROM "Users") AS s CROSS JOIN o'
+    )
+    assert compose([o], select, Dialect.POSTGRES).raw_tables == []
+
+
+@pytest.mark.parametrize(
+    "select",
+    [
+        'WITH "users" AS (SELECT 1 AS x) SELECT * FROM users CROSS JOIN o',
+        'WITH users AS (SELECT 1 AS x) SELECT * FROM "users" CROSS JOIN o',
+        'WITH "Users" AS (SELECT 1 AS x) SELECT * FROM users CROSS JOIN o',
+    ],
+)
+def test_top_level_cte_and_its_references_are_written_alike(select: str) -> None:
+    """Snowflake: `WITH "users" ... FROM users` would read the real table USERS. Composition
+    writes the CTE and every reference to it with the same unquoted name."""
+    o = part("o", "SELECT 1 AS n", dialect=Dialect.SNOWFLAKE)
+    result = compose([o], select, Dialect.SNOWFLAKE)
+    assert result.raw_tables == []
+    tree = parse(result.sql, Dialect.SNOWFLAKE)
+    users_cte = next(
+        c for c in tree.args["with_"].expressions if c.alias_or_name.lower() == "users"
+    )
+    assert not users_cte.args["alias"].this.quoted
+    refs = [t for t in tree.find_all(exp.Table) if t.name.lower() == "users"]
+    assert refs and all(not t.this.quoted and t.name == users_cte.alias_or_name for t in refs)
+
+
+@pytest.mark.parametrize(
+    "select",
+    [
+        "SELECT * FROM TABLE('analytics.public.users') WHERE (SELECT max(n) FROM o) >= 0",
+        "SELECT * FROM o JOIN TABLE('users') u ON 1 = 1",
+        "SELECT * FROM o, TABLE($t) x",
+        "SELECT * FROM o, TABLE($$users$$) x",
+        "SELECT * FROM o, TABLE(?) x",
+    ],
+)
+def test_snowflake_table_literal_is_a_raw_read(select: str) -> None:
+    """Snowflake TABLE('<name>') reads the named table (= IDENTIFIER(...))."""
+    o = part("o", "SELECT 1 AS n", dialect=Dialect.SNOWFLAKE)
+    assert compose([o], select, Dialect.SNOWFLAKE).raw_tables == ["table()"]
+
+
+@pytest.mark.parametrize(
+    "fn",
+    [
+        "dictGet('db.users_dict', 'pw', toUInt64(n))",
+        "dictGetString('db.users_dict', 'pw', toUInt64(n))",
+        "dictGetUInt64('db.d', 'x', toUInt64(n))",
+        "dictGetOrDefault('db.d', 'x', toUInt64(n), 'none')",
+        "dictGetOrNull('db.d', 'x', toUInt64(n))",
+        "dictGetAll('db.d', 'x', toUInt64(n))",
+        "dictGetHierarchy('db.d', toUInt64(n))",
+        "dictHas('db.d', toUInt64(n))",
+        "dictIsIn('db.d', toUInt64(n), toUInt64(1))",
+    ],
+)
+def test_clickhouse_dictionary_reads_are_raw_reads(fn: str) -> None:
+    o = part("o", "SELECT 1 AS n", dialect=Dialect.CLICKHOUSE)
+    result = compose([o], f"SELECT n, {fn} AS v FROM o", Dialect.CLICKHOUSE)
+    assert len(result.raw_tables) == 1 and result.raw_tables[0].startswith("dict")
+
+
+def test_clickhouse_dictionary_read_inside_a_part_is_allowed() -> None:
+    """Trusted SQL may use dictGet; only the final SELECT's own reads need check_and_run."""
+    o = part("o", "SELECT dictGet('db.d', 'x', toUInt64(1)) AS n", dialect=Dialect.CLICKHOUSE)
+    assert compose([o], "SELECT n FROM o", Dialect.CLICKHOUSE).raw_tables == []

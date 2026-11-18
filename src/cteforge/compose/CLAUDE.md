@@ -59,7 +59,16 @@ Exact rules (details in the module docstrings of assemble.py / checks.py):
   query(), Snowflake SYSTEM$..., MySQL LOAD_FILE / SLEEP / BENCHMARK / GET_LOCK / ...;
   not exhaustive — warehouses still need read-only roles), more than one statement.
 - Table functions in FROM/JOIN anywhere in the final SELECT are raw reads (`raw_tables`,
-  JoinUse side `name()`), except row generators (UNNEST, GENERATE_SERIES, range, ...).
+  JoinUse side `name()`), except row generators (UNNEST, GENERATE_SERIES, range, ...). Any
+  other FROM/JOIN source that is not a named table, a function or a subquery is a raw read
+  `table()` (fail closed; e.g. Snowflake `TABLE('db.s.users')`, which reads a table named by
+  a string). ClickHouse dictionary reads (`dictGet*`, `dictHas`, `dictIsIn`) anywhere in the
+  final SELECT are raw reads too (not refused: trusted SQL uses them).
+- Only query CTEs hide a table: ClickHouse scalar `WITH <expr> AS name` aliases never do.
+  Top-level CTEs match references case-insensitively, and `_rename` writes the CTE and every
+  reference to it with the same UNQUOTED name, so the warehouse resolves them alike. Nested
+  CTEs are not renamed, so they hide a reference only when spelled exactly like it (case and
+  quoting); any other spelling is a raw table (fail closed).
 - `unknown_alias` (error) only for a qualified column `x.col` whose `x` is no visible source
   (sources of its scope; subqueries/derived tables also see enclosing queries). Unknown FROM
   names are raw tables. `x` equal to a part output column is treated as struct access.

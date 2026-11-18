@@ -33,8 +33,10 @@ from cteforge.compose.checks import (
     analyze_joins,
     check_qualifiers,
     cte_names,
+    dictionary_reads,
     ensure_query,
     external_table_functions,
+    query_ctes,
     table_refs,
     top_with,
 )
@@ -126,6 +128,7 @@ def compose(parts: list[Part], select: str | None, dialect: Dialect) -> Composed
     raw_tables = sorted(
         {r.key if "." in r.key else r.node.name for r in final_refs if _is_raw(r, defs)}
         | set(external_table_functions(final))
+        | set(dictionary_reads(final))
     )
 
     final.set("with_", exp.With(expressions=ctes))
@@ -200,17 +203,19 @@ def _allocate(base: str, taken: set[str]) -> str:
 
 
 def _rename(tree: exp.Expression, refs: list[TableRef], names: dict[str, str]) -> None:
-    """Rename the tree's top-level CTEs and every reference to them."""
+    """Rename the tree's top-level query CTEs and every reference to them, all to the same
+    UNQUOTED name. `table_refs` matches top-level CTEs case-insensitively; writing both sides
+    alike is what makes the warehouse agree (Snowflake `WITH "users" ... FROM users` would
+    otherwise read the real table USERS)."""
     for ref in refs:
-        if ref.kind is RefKind.CTE and names.get(ref.key, ref.key) != ref.node.name:
-            _retarget(ref.node, names[ref.key])
-    with_ = top_with(tree)
-    if with_ is None:
-        return
-    for cte in with_.expressions:
+        if ref.kind is RefKind.CTE:
+            new = names.get(ref.key, ref.key)
+            if new != ref.node.name or ref.node.this.quoted:
+                _retarget(ref.node, new)
+    for cte in query_ctes(top_with(tree)):
         new = names[cte.alias_or_name.lower()]
-        if new != cte.alias_or_name:
-            alias = cte.args["alias"]
+        alias = cte.args["alias"]
+        if new != cte.alias_or_name or alias.this.quoted:
             alias.set("this", exp.to_identifier(new))
 
 

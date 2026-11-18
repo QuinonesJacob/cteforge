@@ -250,10 +250,17 @@ def top_with(tree: exp.Expression) -> exp.With | None:
     return with_ if isinstance(with_, exp.With) else None
 
 
+def query_ctes(with_: exp.With | None) -> list[exp.CTE]:
+    """The WITH's CTEs that define a query. ClickHouse `WITH <expr> AS name` scalar aliases
+    are not among them: they name a value and never hide a table of the same name in FROM."""
+    if with_ is None:
+        return []
+    return [c for c in with_.expressions if not c.args.get("scalar")]
+
+
 def cte_names(tree: exp.Expression) -> list[str]:
-    """Lowercased names of the tree's top-level CTEs, in order."""
-    with_ = top_with(tree)
-    return [cte.alias_or_name.lower() for cte in with_.expressions] if with_ else []
+    """Lowercased names of the tree's top-level query CTEs, in order."""
+    return [cte.alias_or_name.lower() for cte in query_ctes(top_with(tree))]
 
 
 def qualified_name(table: exp.Table) -> str:
@@ -265,9 +272,16 @@ def is_unqualified(table: exp.Table) -> bool:
 
 
 def table_refs(tree: exp.Expression) -> list[TableRef]:
-    """Every named table reference in `tree`, classified by what it resolves to."""
+    """Every named table reference in `tree`, classified by what it resolves to.
+
+    Top-level CTEs match case-insensitively: composition renames every top-level CTE and
+    every reference classified as one to the same unquoted name (`assemble._rename`), so the
+    warehouse resolves them alike. Nested CTEs are never renamed, so a reference counts as
+    one only when it is spelled exactly like it (same case, same quoting); any other spelling
+    may resolve to a real table on the warehouse and is classified TABLE (fail closed).
+    """
     top = top_with(tree)
-    top_ctes = top.expressions if top else []
+    top_ctes = query_ctes(top)
     top_names = [c.alias_or_name.lower() for c in top_ctes]
     refs: list[TableRef] = []
     for table in tree.find_all(exp.Table):
@@ -277,7 +291,7 @@ def table_refs(tree: exp.Expression) -> list[TableRef]:
             refs.append(TableRef(table, RefKind.TABLE, qualified_name(table)))
             continue
         name = table.name.lower()
-        if _nested_shadow(table, name, tree):
+        if _nested_shadow(table, tree):
             refs.append(TableRef(table, RefKind.NESTED, name))
             continue
         visible = top_names
@@ -289,25 +303,37 @@ def table_refs(tree: exp.Expression) -> list[TableRef]:
     return refs
 
 
-def _nested_shadow(node: exp.Expression, name: str, root: exp.Expression) -> bool:
-    """True when a WITH nested below `root` defines `name` and it is visible at `node`.
+def _nested_shadow(table: exp.Table, root: exp.Expression) -> bool:
+    """True when a WITH nested below `root` defines a query CTE spelled exactly like
+    `table` (same name, case and quoting) that is visible at `table`.
 
+    Exact spelling resolves the same on every warehouse; `WITH "Users" ... FROM users` or
+    ClickHouse's case-sensitive `WITH Users ... FROM users` read the real table `users`.
     Same visibility as the top level: a nested CTE is visible to its query and to LATER CTEs
     of the same WITH, not to its own body or earlier ones (those see the outer name).
     """
-    parent = node.parent
+    ident = table.this
+    spelling = (ident.name, bool(ident.quoted))
+    parent = table.parent
     while parent is not None and parent is not root:
         with_ = top_with(parent)
         if with_ is not None:
-            ctes = with_.expressions
-            names = [c.alias_or_name.lower() for c in ctes]
-            owner = _owning_top_cte(node, with_)
-            if owner is not None:
-                names = names[: ctes.index(owner)]
-            if name in names:
+            ctes = query_ctes(with_)
+            owner = _owning_top_cte(table, with_)
+            if owner is not None and owner in ctes:
+                ctes = ctes[: ctes.index(owner)]
+            if spelling in {_spelling(c) for c in ctes}:
                 return True
         parent = parent.parent
     return False
+
+
+def _spelling(cte: exp.CTE) -> tuple[str, bool]:
+    alias = cte.args.get("alias")
+    ident = alias.this if isinstance(alias, exp.TableAlias) else None
+    if isinstance(ident, exp.Identifier):
+        return ident.name, bool(ident.quoted)
+    return cte.alias_or_name, False
 
 
 def _owning_top_cte(node: exp.Expression, top: exp.With | None) -> exp.CTE | None:
@@ -355,7 +381,7 @@ def external_table_functions(tree: exp.Expression) -> list[str]:
     for func in tree.find_all(exp.Func):
         parent = func.parent
         is_source = isinstance(parent, (exp.Table, exp.TableFromRows, exp.Lateral)) and (
-            parent.this is func
+            parent.this is func or func in (parent.args.get("rows_from") or [])
         )
         if not is_source:
             continue
@@ -363,7 +389,35 @@ def external_table_functions(tree: exp.Expression) -> list[str]:
         if name in _ROW_GENERATORS or name.startswith(_ROW_GENERATORS_PREFIXES):
             continue
         names.append(f"{name}()")
+    # Fail closed on any other FROM/JOIN source that is not a named table, a function or a
+    # subquery: e.g. Snowflake `TABLE('db.schema.users')` / `TABLE($var)`, which read the
+    # table named by a string (= IDENTIFIER(...)) and carry no table reference.
+    for source in tree.find_all(exp.Table, exp.TableFromRows, exp.Lateral):
+        inner = source.this
+        if isinstance(inner, (exp.Identifier, exp.Func, exp.Query, exp.Subquery)):
+            continue
+        if inner is None and source.args.get("rows_from"):
+            continue  # Postgres ROWS FROM (f(), g()): its functions are listed above
+        names.append("table()")
     return names
+
+
+# ClickHouse functions that read a dictionary named by a string (dictGet, dictGetUInt64,
+# dictGetOrDefault, dictGetAll, dictGetHierarchy, dictHas, dictIsIn, ...). Unlike joinGet
+# they are common in trusted SQL, so they are not refused: in a final SELECT they count as
+# raw reads (`raw_tables`), which need check_and_run (ADR 0027).
+_DICTIONARY_READ_PREFIXES = ("dictget", "dicthas", "dictisin")
+
+
+def dictionary_reads(tree: exp.Expression) -> list[str]:
+    """`name()` for every call in `tree` that reads a dictionary named by a string."""
+    return sorted(
+        {
+            f"{function_name(func)}()"
+            for func in tree.find_all(exp.Func)
+            if function_name(func).startswith(_DICTIONARY_READ_PREFIXES)
+        }
+    )
 
 
 # ── Qualifier check (unknown_alias) ─────────────────────────────────────────────────
