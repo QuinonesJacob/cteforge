@@ -75,7 +75,9 @@ SCHEMA = [
         (n * 7) % 200 + 1,
         TIMESTAMP '2026-01-01 00:00:00' + INTERVAL ((n * 7919) % (90 * 86400)) SECOND,
         ELT(n % 3 + 1, 'web', 'app', 'store'),
-        ELT(n % 4 + 1, 'new', 'paid', 'shipped', 'refunded'),
+        -- n DIV 4, not n % 4: the customer's country already follows n % 4 (7n mod 200),
+        -- so n % 4 here would give every country a single status.
+        ELT((n DIV 4) % 4 + 1, 'new', 'paid', 'shipped', 'refunded'),
         n % 50 = 0,
         ((n * 37) % 50000) / 100 + 5,
         CONCAT('order ', n)
