@@ -416,6 +416,9 @@ class JoinCard(JoinEdge):
     known: bool = False
     confirmed: bool = False
     pending_proposals: list[str] = Field(default_factory=list)
+    # ADR 0029: the latest stored state and title of each source definition (`sources`).
+    source_states: dict[str, DefinitionState] = Field(default_factory=dict)
+    source_titles: dict[str, str] = Field(default_factory=dict)
 
 
 class ProposalBrief(BaseModel):
@@ -430,6 +433,17 @@ class ProposalBrief(BaseModel):
     author_kind: ActorKind
     created_at: dt.datetime
     summary: str = ""
+    # Changed lines of its diff (ADR 0029); only on pending proposals the page returns.
+    lines_added: int | None = None
+    lines_removed: int | None = None
+    needs_my_review: bool = False  # The caller may decide it (permission + four-eyes).
+
+
+class WaitingProposal(ProposalBrief):
+    """A pending proposal the caller may decide ("Waiting on you", ADR 0029)."""
+
+    target_id: str
+    title: str  # The Library row's title.
 
 
 class LibraryRow(BaseModel):
@@ -467,6 +481,9 @@ class LibraryPage(BaseModel):
     total: int = 0  # Rows before the filters.
     pending_count: int = 0
     proposals_visible: bool = False  # The caller may list proposals (rows include them).
+    # Every pending proposal the caller may decide, oldest first, whatever the filters
+    # (ADR 0029; empty without list_proposals + review_proposal).
+    waiting: list[WaitingProposal] = Field(default_factory=list)
 
 
 # ── Catalog (tables) ─────────────────────────────────────────────────────────────────
@@ -625,15 +642,38 @@ class TeamSettings(BaseModel):
 # ── Proposals ────────────────────────────────────────────────────────────────────────
 
 
+class MetadataChange(BaseModel):
+    """One described field a definition proposal changes (ADR 0029): before → after (None
+    when the field was not set, or for a new definition)."""
+
+    model_config = _CARD
+
+    field: str
+    before: Any = None
+    after: Any = None
+
+
 class ProposalView(Proposal):
     """A proposal plus what a reviewer needs: a unified diff against its base, the impact
     preview (`impact`: ids of composed definitions using the target definition — "used
     by", ADR 0026) and, for a composed definition, its parts, fixed/open variables and
-    full compiled SQL (`composition`)."""
+    full compiled SQL (`composition`).
+
+    ADR 0029: `sql_diff` is the unified diff of the trusted query alone — the source SQL
+    as written (template rendered with its original values, formatted alike on both sides);
+    for a composed definition its parts list and final SELECT — and `metadata_changes` the
+    described fields that change (title, meaning, keywords, usage notes, grain, variables,
+    owner, …; never version / state / verifier). Both None for renames and joins. `diff`
+    (the stored YAML) stays for the CLI and MCP."""
 
     diff: str = ""
+    sql_diff: str | None = None
+    metadata_changes: list[MetadataChange] | None = None
     impact: list[str] = Field(default_factory=list)
     composition: CompositionCard | None = None
+    # ADR 0029: the proposed definition's title (new / revise), else the stored target's
+    # (rename); None for joins.
+    title: str | None = None
 
 
 def _yaml(data: Any) -> str:
@@ -659,10 +699,44 @@ def _base_text(base: Definition | JoinEdge | None) -> str:
     return _yaml(base.model_dump(mode="json"))
 
 
-def proposal_diff(proposal: Proposal, base: Definition | JoinEdge | None) -> str:
+def diff_line_counts(diff: str) -> tuple[int, int]:
+    """(added, removed) lines of a unified diff, file headers excluded. Only the headers
+    before the first hunk are skipped: a removed SQL comment ("-- part …") reads "--- …"."""
+    added = removed = 0
+    in_hunks = False
+    for line in diff.splitlines():
+        if line.startswith("@@"):
+            in_hunks = True
+            continue
+        if not in_hunks:
+            continue
+        if line.startswith("+"):
+            added += 1
+        elif line.startswith("-"):
+            removed += 1
+    return added, removed
+
+
+def unified_diff(old: str, new: str, old_name: str, new_name: str, *, full: bool = False) -> str:
+    """A unified diff of two texts; `full`: every unchanged line as context (one hunk)."""
+    old_lines, new_lines = old.splitlines(keepends=True), new.splitlines(keepends=True)
+    lines = difflib.unified_diff(
+        old_lines,
+        new_lines,
+        fromfile=old_name,
+        tofile=new_name,
+        n=max(len(old_lines), len(new_lines)) if full else 3,
+    )
+    return "".join(line if line.endswith("\n") else line + "\n" for line in lines)
+
+
+def proposal_diff(
+    proposal: Proposal, base: Definition | JoinEdge | None, *, full: bool = False
+) -> str:
     """Unified diff of the stored form (codec YAML for definitions) of `base` → proposal.
     No base (a new object) → every line is an addition. A rename has no diff (its payload
-    says from → to; ADR 0024)."""
+    says from → to; ADR 0024). `full` (ADR 0029, the GUI's "Full" view): every unchanged
+    line as context, so the diff is one hunk holding the whole file; else 3 lines."""
     if proposal.kind is ProposalKind.RENAME_DEFINITION:
         return ""
     old = _base_text(base)
@@ -673,13 +747,7 @@ def proposal_diff(proposal: Proposal, base: Definition | JoinEdge | None) -> str
         old_name = proposal.target_id
     else:
         old_name = f"{proposal.target_id}@v{base.version}"
-    lines = difflib.unified_diff(
-        old.splitlines(keepends=True),
-        new.splitlines(keepends=True),
-        fromfile=old_name,
-        tofile=f"{proposal.target_id} (proposed)",
-    )
-    return "".join(line if line.endswith("\n") else line + "\n" for line in lines)
+    return unified_diff(old, new, old_name, f"{proposal.target_id} (proposed)", full=full)
 
 
 def proposal_view(
@@ -687,10 +755,18 @@ def proposal_view(
     base: Definition | JoinEdge | None = None,
     impact: Iterable[str] = (),
     composition: CompositionCard | None = None,
+    *,
+    full_diff: bool = False,
+    title: str | None = None,
+    sql_diff: str | None = None,
+    metadata_changes: list[MetadataChange] | None = None,
 ) -> ProposalView:
     return ProposalView(
         **proposal.model_dump(),
-        diff=proposal_diff(proposal, base),
+        title=title,
+        diff=proposal_diff(proposal, base, full=full_diff),
+        sql_diff=sql_diff,
+        metadata_changes=metadata_changes,
         impact=sorted(set(impact)),
         composition=composition,
     )
@@ -710,14 +786,28 @@ class ProposalOutcome(BaseModel):
 # ── Audit ────────────────────────────────────────────────────────────────────────────
 
 
+class AuditActor(BaseModel):
+    """Who an audit actor is (ADR 0029): from the users table; `email` only for callers
+    holding list_users."""
+
+    model_config = _CARD
+
+    display_name: str | None = None
+    email: str | None = None
+    kind: ActorKind | None = None
+
+
 class AuditPage(BaseModel):
-    """One page of audit events, newest first. `has_more` when the page is full."""
+    """One page of audit events, newest first. `has_more` when the page is full.
+    `actors`: the users behind the page's events (ADR 0029; actors no longer in the users
+    table, such as `cteforge`, are absent)."""
 
     model_config = _CARD
 
     events: list[AuditEvent] = Field(default_factory=list)
     limit: int
     has_more: bool = False
+    actors: dict[str, AuditActor] = Field(default_factory=dict)
 
 
 def audit_page(events: Sequence[AuditEvent], limit: int) -> AuditPage:
@@ -842,6 +932,8 @@ class UserView(BaseModel):
     active: bool = True
     created_at: dt.datetime | None = None
     tokens: list[TokenCard] = Field(default_factory=list)
+    display_name: str | None = None  # ADR 0029
+    email: str | None = None
 
 
 class MeCard(BaseModel):
@@ -863,6 +955,8 @@ class MeCard(BaseModel):
     token_id: str | None = None
     token_expires_at: dt.datetime | None = None
     token_mode: str | None = None
+    display_name: str | None = None  # ADR 0029
+    email: str | None = None
 
 
 DefinitionCard.model_rebuild()

@@ -66,6 +66,20 @@ describe("ProposalActions", () => {
     expect(done).toHaveBeenCalled();
   });
 
+  it("offers approvers \"keep it verified\" on a verified target: approve with verify (ADR 0029)", async () => {
+    const api = mockApi({
+      "POST /proposals/p1/approve": () => ({ body: { proposal: { ...proposal, status: "approved" }, issues: [], auto_applied: false } }),
+      "GET /proposals/count": () => ({ body: { count: 0 } }),
+    });
+    renderActions({ user: { name: "ben", role: "approver", kind: "human" }, target: { owner: null, state: "verified" } });
+    expect(screen.getByRole("heading", { name: "Your decision" })).toBeInTheDocument();
+    expect(screen.getByText(/keeps it verified only if you check the box/)).toBeInTheDocument();
+    await userEvent.click(screen.getByLabelText(/Keep it verified after this change/));
+    await userEvent.type(screen.getByLabelText(/Note to ana/), "Thanks");
+    await userEvent.click(screen.getByRole("button", { name: "Approve and keep verified" }));
+    expect(api.calls.find((c) => c.path === "/proposals/p1/approve")?.body).toEqual({ verify: true, comment: "Thanks" });
+  });
+
   it("offers no decision to a contributor who does not own the target", () => {
     renderActions({ target: { owner: "ana" } });
     expect(screen.queryByRole("button", { name: "Approve" })).not.toBeInTheDocument();

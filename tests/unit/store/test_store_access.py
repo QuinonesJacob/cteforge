@@ -255,6 +255,13 @@ def test_v1_tokens_migrate_to_default_tokens(tmp_path: Path) -> None:
         ).scalar_one()
         columns = {c["name"] for c in inspect(conn).get_columns("users")}
     assert version == str(t.STORE_SCHEMA_VERSION) and "active" in columns
+    assert {"display_name", "email"} <= columns  # ADR 0029, added by ALTER
+    assert store.get_user("root").display_name is None
+    updated = store.set_user_profile("root", "Root", "root@example.com")
+    assert (updated.display_name, updated.email) == ("Root", "root@example.com")
+    assert store.user_by_token_hash(hashlib.sha256(b"root-secret").hexdigest(), T0)[0].email == (
+        "root@example.com"
+    )
     with store._read() as conn:  # noqa: SLF001
         legacy = set(conn.execute(select(t.users.c.token_sha256)).scalars())
     assert hashlib.sha256(b"bot-secret").hexdigest() not in legacy  # scrubbed

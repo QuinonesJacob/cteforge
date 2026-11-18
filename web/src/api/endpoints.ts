@@ -6,6 +6,7 @@ import type {
   LibraryFilter,
   LibraryPage,
   ProposeJoinRequest,
+  ProfileUpdate,
   ReviseDefinitionRequest,
   AuditPage,
   CreatedUser,
@@ -20,8 +21,6 @@ import type {
   ProposeDefinitionRequest,
   DefinitionReferences,
   RenameDefinitionRequest,
-  RunOutcome,
-  RunRequest,
   Settings,
   SettingsUpdate,
   User,
@@ -43,6 +42,8 @@ const enc = encodeURIComponent;
 // ── Identity ──
 export const getMe = (opts: Opts & { anonymous?: boolean; token?: string } = {}) =>
   request<User>("GET", "/me", opts);
+/** Your own display name / email (ADR 0029). */
+export const updateMyProfile = (body: ProfileUpdate) => request<User>("PUT", "/me/profile", { body });
 export const listProfiles = (opts: Opts = {}) => request<Profile[]>("GET", "/profiles", opts);
 
 // ── Library (ADR 0026): definitions + the proposals touching them, filtered server-side ──
@@ -56,6 +57,7 @@ export const listLibrary = (filter: LibraryFilter, opts: Opts = {}) =>
       created_by: filter.created_by,
       verified_by: filter.verified_by,
       needs_my_review: filter.needs_my_review || undefined,
+      sort: filter.sort && filter.sort !== "relevance" ? filter.sort : undefined,
     },
   });
 
@@ -94,17 +96,15 @@ export const listJoins = (filter: { table?: string; known_only?: boolean; defini
     query: { table: filter.table, known_only: filter.known_only || undefined, definition: filter.definition },
   });
 
-// ── Run ──
-export const runQuery = (body: RunRequest) => request<RunOutcome>("POST", "/run", { body });
-
 // ── Proposals ──
 export const listProposals = (status: ProposalStatus, opts: Opts = {}) =>
   request<ProposalView[]>("GET", "/proposals", { ...opts, query: { status } });
 /** Cheap count for the nav badge: no diffs built, no audit event (GET /proposals does both). */
 export const countProposals = (status: ProposalStatus, opts: Opts = {}) =>
   request<{ count: number }>("GET", "/proposals/count", { ...opts, query: { status } });
+/** With the full-context diff (ADR 0029: the page toggles "changes only" / "full" itself). */
 export const getProposal = (id: string, opts: Opts = {}) =>
-  request<ProposalView>("GET", `/proposals/${enc(id)}`, opts);
+  request<ProposalView>("GET", `/proposals/${enc(id)}`, { ...opts, query: { full_diff: true } });
 export const approveProposal = (id: string, body: { verify: boolean; comment: string }) =>
   request<ProposalOutcome>("POST", `/proposals/${enc(id)}/approve`, { body });
 export const rejectProposal = (id: string, comment: string) =>
@@ -121,9 +121,9 @@ export interface AuditFilter {
 }
 /** Accepts the AuditPage wrapper (services/cards.py) or a bare list. */
 export function toAuditPage(body: unknown, limit: number): AuditPage {
-  if (Array.isArray(body)) return { events: body as AuditEvent[], limit, has_more: body.length >= limit && limit > 0 };
+  if (Array.isArray(body)) return { events: body as AuditEvent[], limit, has_more: body.length >= limit && limit > 0, actors: {} };
   const b = (body ?? {}) as Partial<AuditPage>;
-  return { events: b.events ?? [], limit: b.limit ?? limit, has_more: Boolean(b.has_more) };
+  return { events: b.events ?? [], limit: b.limit ?? limit, has_more: Boolean(b.has_more), actors: b.actors ?? {} };
 }
 export const listAudit = async (filter: AuditFilter, opts: Opts = {}) =>
   toAuditPage(await request<unknown>("GET", "/audit", { ...opts, query: { ...filter } }), filter.limit ?? 100);
@@ -147,8 +147,8 @@ export function toCreatedUser(body: unknown, name = ""): CreatedUser {
 
 export const createUser = async (body: { name: string; role: UserRole; kind: ActorKind }) =>
   toCreatedUser(await request<unknown>("POST", "/users", { body }));
-/** Change a user's role and/or active flag (only the fields given). */
-export const updateUser = (name: string, body: { role?: UserRole; active?: boolean }) =>
+/** Change a user's role, active flag, display name or email (only the fields given). */
+export const updateUser = (name: string, body: { role?: UserRole; active?: boolean } & ProfileUpdate) =>
   request<UserView>("PATCH", `/users/${enc(name)}`, { body });
 
 export const listRoles = (opts: Opts = {}) => request<RoleCard[]>("GET", "/roles", opts);

@@ -72,7 +72,7 @@ def test_bootstrap_only_while_no_users(ctx: AppContext) -> None:
         admin.bootstrap_admin(ctx, "second")
     event = ctx.audit.list_events(kind=AuditKind.ADMIN)[0]
     assert event.actor == "root" and event.extra["op"] == "bootstrap_admin"
-    assert event.extra["prefix"] == token[:12]
+    assert event.extra["subject_prefix"] == token[:12]
     _no_token_in_audit(ctx, token)
 
 
@@ -460,3 +460,79 @@ def test_default_connection_admin_only_validated_and_audited() -> None:
         cleared = admin.set_default_connection(c, admin_user, None)
         assert cleared.default_connection is None and cleared.issues == []
         assert c.store.get_setting(DEFAULT_CONNECTION_SETTING) is None
+
+
+# ── Profiles (ADR 0029) ──────────────────────────────────────────────────────────────
+
+
+def test_everyone_sets_their_own_profile_validated_and_audited(ctx: AppContext, root: User) -> None:
+    _, token = admin.create_user(ctx, root, "vic", "viewer", "human")
+    vic = authenticate(ctx, token)
+    view = admin.update_profile(ctx, vic, display_name="  Vic Tor ", email="vic@example.com")
+    assert (view.display_name, view.email) == ("Vic Tor", "vic@example.com")
+    me = admin.me(ctx, vic)
+    assert (me.display_name, me.email) == ("Vic Tor", "vic@example.com")
+    assert authenticate(ctx, token).display_name == "Vic Tor"  # stored, read at sign-in
+    # KEEP leaves a field; "" / None clear it.
+    assert admin.update_profile(ctx, vic, display_name="").display_name is None
+    assert admin.update_profile(ctx, vic, display_name=None).email == "vic@example.com"
+    assert admin.update_profile(ctx, vic, email=None).email is None
+    for bad in ("no-at-sign", "a@b", "@example.com", "a b@example.com", "a@@example.com"):
+        with pytest.raises(PolicyError, match="email"):
+            admin.update_profile(ctx, vic, email=bad)
+    with pytest.raises(PolicyError, match="email"):
+        admin.update_profile(ctx, vic, email="a@" + "x" * 250 + ".com")
+    with pytest.raises(PolicyError, match="80"):
+        admin.update_profile(ctx, vic, display_name="x" * 81)
+    with pytest.raises(PolicyError, match="control"):
+        admin.update_profile(ctx, vic, display_name="tab\there")
+    ok = [
+        e
+        for e in ctx.audit.list_events(kind=AuditKind.ADMIN)
+        if e.extra.get("op") == "update_profile" and e.outcome is AuditOutcome.OK
+    ]
+    assert ok[-1].actor == "vic" and ok[-1].extra["changed"] == {
+        "display_name": "Vic Tor",
+        "email": "vic@example.com",
+    }
+    assert ok[-1].extra["token_prefix"] == token[:12]  # the calling token, never its value
+    _no_token_in_audit(ctx, token)
+    # Another user's profile needs manage_user.
+    with pytest.raises(PermissionDeniedError):
+        admin.update_profile(ctx, vic, "root", display_name="Hacked")
+    assert ctx.store.get_user("root").display_name is None
+
+
+def test_admins_set_profiles_agent_admins_never_an_admin_users(ctx: AppContext, root: User) -> None:
+    admin.create_user(ctx, root, "hugo", "viewer", "human")
+    assert admin.update_profile(ctx, root, "hugo", email="h@example.org").email == "h@example.org"
+    view = admin.update_user(ctx, root, "hugo", display_name="Hugo", email="")
+    assert (view.display_name, view.email) == ("Hugo", None)
+    assert [u.display_name for u in admin.list_users(ctx, root) if u.name == "hugo"] == ["Hugo"]
+    with pytest.raises(PolicyError):
+        admin.update_user(ctx, root, "hugo")  # nothing to change
+    with pytest.raises(NotFoundError):
+        admin.update_profile(ctx, root, "nobody", display_name="x")
+    _, token = admin.create_user(ctx, root, "agentadm", "admin", "agent")
+    bot = authenticate(ctx, token)
+    assert admin.update_profile(ctx, bot, "hugo", display_name="H.").display_name == "H."
+    with pytest.raises(PermissionDeniedError):
+        admin.update_profile(ctx, bot, "root", display_name="x")
+    with pytest.raises(PermissionDeniedError):
+        admin.update_user(ctx, bot, "root", email="x@example.com")
+    # Its own profile is self-service.
+    assert admin.update_profile(ctx, bot, display_name="Admin bot").display_name == "Admin bot"
+
+
+def test_audit_page_names_actors_email_only_for_user_listers(ctx: AppContext, root: User) -> None:
+    from cteforge.services.audit_log import list_audit
+
+    admin.update_profile(ctx, root, display_name="Root Admin", email="root@example.com")
+    page = list_audit(ctx, root)
+    assert page.actors["root"].display_name == "Root Admin"
+    assert page.actors["root"].email == "root@example.com"
+    assert page.actors["root"].kind is ActorKind.HUMAN
+    approver = User(name="ann", role=UserRole.APPROVER)  # view_audit, not list_users
+    ctx.store.add_user(approver)
+    seen = list_audit(ctx, approver)
+    assert seen.actors["root"].display_name == "Root Admin" and seen.actors["root"].email is None

@@ -147,6 +147,7 @@ def test_limit(ctx: AppContext) -> None:
     assert len(search(ctx, AGENT, "churn", limit=0)) == 1  # clamped to at least one
 
 
+@pytest.mark.usefixtures("mcp_surface")  # reads are logged through MCP (ADR 0029)
 def test_search_is_audited(library: AppContext) -> None:
     hits = search(library, AGENT, "cash realization", question="How much cash did we collect?")
     event = library.audit.list_events(limit=1)[0]

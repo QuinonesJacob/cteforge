@@ -28,3 +28,8 @@ Status: accepted · 2026-11-16
 Built 2026-11-18: Library and Review are one page (`GET /library`; `/review` redirects to
 the Library's "needs my review"; `/review/:id` stays); the Explore page is removed (Join
 map is its own nav item: Library · Join map · Import · Audit · Settings).
+
+## Amendment (2026-11-17): see ADR 0029
+Built 2026-11-18: redesign; the GUI no longer runs queries (no Run tab; `POST /run` and
+`POST /check` stay for agents, scheduled jobs and the CLI). Nav: Library · Join map ·
+Import · Log, then Settings sections.

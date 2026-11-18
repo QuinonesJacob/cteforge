@@ -111,6 +111,29 @@ def user_activate(name: str) -> None:
     typer.echo(f"'{name}' is active")
 
 
+@user_app.command("profile")
+def user_profile(
+    name: str,
+    display_name: Annotated[
+        str | None, typer.Option("--display-name", help='Display name ("" clears it)')
+    ] = None,
+    email: Annotated[str | None, typer.Option("--email", help='Email ("" clears it)')] = None,
+) -> None:
+    """Set a user's display name and/or email (ADR 0029)."""
+    if display_name is None and email is None:
+        usage("give --display-name and/or --email")
+    with session() as (ctx, acting):
+        view = admin.update_profile(
+            ctx,
+            acting,
+            name,
+            display_name=admin.KEEP if display_name is None else display_name,
+            email=admin.KEEP if email is None else email,
+        )
+    shown_name = view.display_name or "(none)"
+    typer.echo(f"'{view.name}': display name {shown_name}, email {view.email or '(none)'}")
+
+
 @settings_app.command("show")
 def settings_show(as_json: JsonOpt = False) -> None:
     """Show the team settings."""

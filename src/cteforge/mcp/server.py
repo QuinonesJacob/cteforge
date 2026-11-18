@@ -58,6 +58,7 @@ from cteforge.services import (
     search_index,
 )
 from cteforge.services import run as run_service
+from cteforge.services._audit import surface as audit_surface
 from cteforge.services.cards import (
     DefinitionCard,
     JoinCard,
@@ -174,7 +175,8 @@ class CteforgeMCP(FastMCP):
         def run() -> T:
             token = _REQUEST.set(request)
             try:
-                return work(resolve())
+                with audit_surface("mcp"):
+                    return work(resolve())
             finally:
                 _REQUEST.reset(token)
 
@@ -238,7 +240,9 @@ async def _call[T](
     def work() -> T:
         token = _REQUEST.set(request)
         try:
-            return use_case(resolve_user())
+            # ADR 0029: every MCP tool call is logged, reads included (_audit.surface).
+            with audit_surface("mcp"):
+                return use_case(resolve_user())
         finally:
             _REQUEST.reset(token)
 

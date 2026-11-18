@@ -1,6 +1,6 @@
 import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { MemoryRouter } from "react-router-dom";
+import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { AuthProvider } from "../state/AuthContext";
 import { ToastProvider } from "../state/ToastContext";
@@ -82,12 +82,15 @@ function adminRoutes() {
   };
 }
 
-function renderPage() {
+function renderPage(path = "/settings") {
   render(
-    <MemoryRouter>
+    <MemoryRouter initialEntries={[path]}>
       <ToastProvider>
         <AuthProvider>
-          <SettingsPage />
+          <Routes>
+            <Route path="/settings" element={<SettingsPage />} />
+            <Route path="/settings/:section" element={<SettingsPage />} />
+          </Routes>
         </AuthProvider>
       </ToastProvider>
     </MemoryRouter>,
@@ -101,10 +104,11 @@ describe("SettingsPage", () => {
       "GET /tools": () => ({ body: [] }),
       "GET /me/tokens": () => ({ body: [token({ name: "default" })] }),
     });
-    renderPage();
-    expect(await screen.findByRole("heading", { name: "My tokens" })).toBeInTheDocument();
+    renderPage("/settings/users"); // not offered: lands on My tokens
+    expect(await screen.findByRole("heading", { level: 1, name: "My tokens" })).toBeInTheDocument();
     expect(await screen.findByRole("region", { name: "My token list" })).toBeInTheDocument();
     expect(screen.queryByLabelText("Default connection")).not.toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Your profile" })).toBeInTheDocument();
     expect(screen.queryByRole("heading", { name: "Users" })).not.toBeInTheDocument();
     expect(screen.queryByRole("heading", { name: "Roles" })).not.toBeInTheDocument();
     expect(api.calls.some((c) => ["/users", "/settings", "/profiles", "/roles"].includes(c.path))).toBe(false);
@@ -172,12 +176,13 @@ describe("SettingsPage", () => {
       ...adminRoutes(),
       "GET /users": () => ({ body: users }),
       "PATCH /users/vic": (body) => ({ body: { ...users[1], ...(body as object) } }),
+      "PATCH /users/root": (body) => ({ body: { ...users[0], ...(body as object) } }),
       "POST /users/vic/tokens": () => ({
         status: 201,
         body: { token: "cfg_pat_FORVICsecret", info: token({ id: "tn", user_name: "vic" }) },
       }),
     });
-    renderPage();
+    renderPage("/settings/users");
     const role = await screen.findByLabelText("Role for vic");
     expect(screen.getByLabelText("Role for root")).toBeDisabled(); // not your own
     await user.selectOptions(role, "contributor");
@@ -191,6 +196,52 @@ describe("SettingsPage", () => {
     expect(api.calls.find((c) => c.path === "/users/vic/tokens")!.body).toMatchObject({ name: "laptop" });
     await user.click(screen.getByLabelText("vic is active"));
     await waitFor(() => expect(api.calls.filter((c) => c.method === "PATCH").at(-1)!.body).toEqual({ active: false }));
+    // ADR 0029: an admin sets a user's display name and email.
+    await user.click(byButton("Profile of root"));
+    await user.type(screen.getByLabelText(/Display name/), "Root Admin");
+    await user.type(screen.getByLabelText(/Email/), "root@example.com");
+    await user.click(byButton("Save profile"));
+    await waitFor(() =>
+      expect(api.calls.find((c) => c.method === "PATCH" && c.path === "/users/root")!.body).toEqual({
+        display_name: "Root Admin",
+        email: "root@example.com",
+      }),
+    );
+  });
+
+  it("shows a user's display name and email, and the owner on their tokens", async () => {
+    const user = userEvent.setup();
+    mockApi({
+      ...adminRoutes(),
+      "GET /users": () => ({
+        body: [{ name: "vic", role: "viewer", kind: "human", active: true, display_name: "Vic Tor", email: "vic@example.com", tokens: [token()] }],
+      }),
+    });
+    renderPage("/settings/users");
+    expect(await screen.findByText("Vic Tor")).toBeInTheDocument();
+    expect(screen.getByText("vic@example.com")).toBeInTheDocument();
+    await user.click(byButton("1 active ▾ tokens of vic"));
+    const tokens = screen.getByRole("region", { name: "Tokens of vic" });
+    expect(within(tokens).getByText(/Owner:/)).toHaveTextContent("Owner: Vic Tor (vic) · vic@example.com");
+  });
+
+  it("lets anyone set their own display name and email (PUT /me/profile)", async () => {
+    const user = userEvent.setup();
+    let me: Record<string, unknown> = { ...VIC };
+    const api = mockApi({
+      "GET /me": () => ({ body: me }),
+      "GET /tools": () => ({ body: [] }),
+      "GET /me/tokens": () => ({ body: [] }),
+      "PUT /me/profile": (body) => {
+        me = { ...me, ...(body as object) };
+        return { body: me };
+      },
+    });
+    renderPage("/settings/tokens");
+    await user.type(await screen.findByLabelText(/Display name/), "Vic Tor");
+    await user.click(screen.getByRole("button", { name: "Save profile" }));
+    await waitFor(() => expect(api.calls.find((c) => c.method === "PUT")!.body).toEqual({ display_name: "Vic Tor" }));
+    await waitFor(() => expect(screen.getByLabelText(/Display name/)).toHaveValue("Vic Tor"));
   });
 
   it("configures roles: admin's Allowed is locked, admin-only tools only for admin", { timeout: 20000 }, async () => {
@@ -200,7 +251,7 @@ describe("SettingsPage", () => {
       "GET /users": () => ({ body: [] }),
       "POST /roles": (body) => ({ status: 201, body: { ...(body as object), builtin: false, users: 0 } }),
     });
-    renderPage();
+    renderPage("/settings/roles");
     await user.click(await waitFor(() => byButton("Edit role admin"), SLOW));
     const adminForm = formNamed("Role admin");
     const allowedSearch = within(adminForm).getAllByLabelText("search")[0];
@@ -252,9 +303,9 @@ describe("SettingsPage", () => {
         ],
       }),
     });
-    renderPage();
-    expect(await screen.findByRole("heading", { name: "Team mode" })).toBeInTheDocument();
-    expect(screen.getByRole("heading", { name: "Users" })).toBeInTheDocument();
+    renderPage(); // an admin lands on the first section, Connections
+    expect(await screen.findByRole("heading", { name: "Default connection" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { level: 1, name: "Connections" })).toBeInTheDocument();
     const select = await screen.findByLabelText("Default connection");
     await waitFor(() => expect(select).toBeEnabled());
     expect(select).toHaveValue("");
@@ -292,7 +343,7 @@ describe("SettingsPage", () => {
       "GET /users": () => ({ body: [] }),
       "GET /profiles": () => ({ body: [{ name: "wh", dialect: "duckdb", default: true }] }),
     });
-    renderPage();
+    renderPage("/settings/connections");
     expect(await screen.findByText(/'gone' is no longer configured/)).toBeInTheDocument();
     expect(await screen.findByLabelText("Default connection")).toHaveValue("");
   });

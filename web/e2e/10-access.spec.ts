@@ -19,7 +19,7 @@ test.beforeEach(({ page }) => {
 });
 
 test("admin creates a custom role in Settings → Roles", async ({ page }) => {
-  await signIn(page, tokens.admin, "/settings");
+  await signIn(page, tokens.admin, "/settings/roles");
   const roles = section(page, "Roles");
   await expect(roles.getByRole("heading", { name: /^admin/ })).toBeVisible();
   // The admin role's Allowed list is locked: every tool, not editable.
@@ -49,8 +49,8 @@ test("admin creates a custom role in Settings → Roles", async ({ page }) => {
 });
 
 test("a person generates a token in My tokens, signs in with it, and revokes it", async ({ page }) => {
-  await signIn(page, tokens.approver, "/settings");
-  const mine = section(page, "My tokens");
+  await signIn(page, tokens.approver, "/settings/tokens");
+  const mine = section(page, "Personal access tokens");
   await mine.getByRole("button", { name: "Generate token" }).click();
   await mine.getByLabel("Token name").fill("e2e laptop");
   await mine.getByLabel("Only these tools").check();
@@ -77,12 +77,15 @@ test("a person generates a token in My tokens, signs in with it, and revokes it"
 
   // Sign in with it: the nav follows its tools (no Import without the build tools).
   await page.evaluate(() => sessionStorage.clear());
-  await signIn(page, token, "/settings");
+  await signIn(page, token, "/settings/tokens");
   await expect(page.getByRole("link", { name: "Import", exact: true })).toHaveCount(0);
+  // view_audit: the Log is offered; no admin sections.
+  await expect(page.getByRole("link", { name: "Log", exact: true })).toBeVisible();
+  await expect(page.getByRole("navigation", { name: "Settings" }).getByRole("link")).toHaveText(["My tokens"]);
   // ADR 0026: no list_joins → no Join map; list_proposals → the Library carries the badge.
   await expect(page.getByRole("link", { name: "Join map", exact: true })).toHaveCount(0);
   await expect(page.getByRole("link", { name: /^Library/ })).toBeVisible();
-  const row = section(page, "My tokens").getByRole("row", { name: /e2e laptop/ });
+  const row = section(page, "Personal access tokens").getByRole("row", { name: /e2e laptop/ });
   await expect(row.getByText("this session")).toBeVisible();
   await screenshot(page, "10-my-tokens");
   // Revoking the token in use signs this tab out on its next call.
@@ -92,7 +95,7 @@ test("a person generates a token in My tokens, signs in with it, and revokes it"
 });
 
 test("admin creates an agent, generates its token in Settings → Users, and revokes it", async ({ page }) => {
-  await signIn(page, tokens.admin, "/settings");
+  await signIn(page, tokens.admin, "/settings/users");
   const users = section(page, "Users");
   await users.locator("#cu-name").fill("support-bot");
   await users.locator("#cu-role").selectOption("support_bot");
@@ -122,4 +125,49 @@ test("admin creates an agent, generates its token in Settings → Users, and rev
   expect((await api("GET", "/me", first)).status).toBe(200);
   // Agents never get a token from the API (and the admin role edit stays human-only).
   expect((await api("POST", "/me/tokens", first, { name: "x", tool_mode: "follow_role", include: [], exclude: [] })).status).toBe(403);
+});
+
+test("display name and email (ADR 0029): set by yourself, or by an admin; shown in the menu, users, tokens and the Log", async ({
+  page,
+}) => {
+  // ben sets his own profile in My tokens.
+  await signIn(page, tokens.approver, "/settings/tokens");
+  const profile = section(page, "Your profile");
+  await profile.getByLabel(/Display name/).fill("Ben Approver");
+  await profile.getByLabel(/Email/).fill("not-an-email");
+  await profile.getByRole("button", { name: "Save profile" }).click();
+  await expect(page.getByRole("alert").or(page.getByRole("status")).filter({ hasText: /email/i }).first()).toBeVisible();
+  await profile.getByLabel(/Email/).fill("ben@example.com");
+  await profile.getByRole("button", { name: "Save profile" }).click();
+  await expect(page.getByText("Profile saved")).toBeVisible();
+  await page.getByRole("button", { name: "Your account: Ben Approver" }).click();
+  const menu = page.getByRole("group", { name: "Account" });
+  await expect(menu).toContainText("Ben Approver");
+  await expect(menu).toContainText("ben@example.com");
+  await expect(menu).toContainText("approver");
+  await screenshot(page, "10-user-menu-profile");
+  const me = await api<{ display_name: string; email: string }>("GET", "/me", tokens.approver);
+  expect(me.json).toMatchObject({ display_name: "Ben Approver", email: "ben@example.com" });
+  await page.keyboard.press("Escape");
+  await expect(section(page, "Personal access tokens").getByText(/Owner: Ben Approver \(ben\)/)).toBeVisible();
+
+  // The admin sees it in Users & roles and sets the agent's display name.
+  await page.evaluate(() => sessionStorage.clear());
+  await signIn(page, tokens.admin, "/settings/users");
+  const users = section(page, "Users").getByRole("region", { name: "Users" });
+  await expect(users.getByRole("row", { name: /Ben Approver/ })).toContainText("ben@example.com");
+  await users.getByRole("row", { name: /claude-agent/ }).getByRole("button", { name: "Profile of claude-agent" }).click();
+  await page.getByLabel(/Display name/).fill("Claude (demo agent)");
+  await page.getByRole("button", { name: "Save profile" }).click();
+  await expect(page.getByText("Profile of claude-agent saved")).toBeVisible();
+  await expect(users.getByRole("row", { name: /Claude \(demo agent\)/ })).toBeVisible();
+  await screenshot(page, "10-users-profile");
+
+  // The Log shows the display name, with the email on hover for callers who can see users.
+  await page.goto("/log");
+  await page.getByLabel("Actor").fill("ben");
+  await page.getByRole("button", { name: "Apply" }).click();
+  const actor = page.getByRole("region", { name: "Log events" }).locator("tbody tr").first().locator(".actor");
+  await expect(actor).toContainText("Ben Approver");
+  await expect(actor).toHaveAttribute("title", "ben@example.com");
 });

@@ -8,7 +8,8 @@ Project root: ../../../CLAUDE.md
   pointer + indexed columns), `definition_versions` (codec YAML text per version + author,
   created_at, change_note, logic_changed, state, verified_by/at), `recipes`/`recipe_versions`
   (legacy JSON: read only by the schema-3 migration), `join_edges` (JSON + indexed tables), `proposals` (JSON + indexed status/target),
-  `users` (name, role = a role name, kind, `active`, legacy token_sha256 unique — a
+  `users` (name, role = a role name, kind, `active`, optional `display_name` / `email`
+  (ADR 0029), legacy token_sha256 unique — a
   random never-matched value for new users and after migration; ADR 0027), `roles` (name PK, description,
   allowed/defaults JSON tool lists, review_all, builtin, updated_at), `tokens` (id PK,
   user_name FK, name, prefix, token_sha256 unique, created_at/by, last_used_at,
@@ -23,7 +24,8 @@ Project root: ../../../CLAUDE.md
 - `store.py` — the `Store` class (public API below). Nothing else is imported by services.
 
 Schema version (`tables.STORE_SCHEMA_VERSION`) is 3. `init_schema` runs `create_all`, adds
-`users.active` and `tokens.parent_token_id` (+ its index) to older tables (explicit,
+`users.active`, `users.display_name`, `users.email` (ADR 0029; no version bump) and
+`tokens.parent_token_id` (+ its index) to older tables (explicit,
 idempotent `ALTER TABLE`, static DDL), on a
 version-1 database migrates each user's `token_sha256` to a `default` token (follow_role)
 for users with no token rows; on a version-1 or -2 database runs the ADR 0026 migration
@@ -92,6 +94,7 @@ class Store:
     def list_users(self) -> list[User]                                    # by name
     def set_user_role(self, name: str, role: str) -> User                 # a role name
     def set_user_active(self, name: str, active: bool) -> User
+    def set_user_profile(self, name: str, display_name: str | None, email: str | None) -> User  # validated by domain
     # roles (ADR 0027); unknown stored tool names are dropped on read
     def list_roles(self) -> list[Role]                                    # built-ins first, then by name
     def get_role(self, name: str) -> Role | None

@@ -1,7 +1,7 @@
 """Use-case: the Library — definitions and the proposals touching them, one list (ADR 0026).
 
-`list_library(ctx, user, *, q, trust, approval, created_by, verified_by, needs_my_review)`
-→ LibraryPage. Needs Tool.SEARCH (it lists the library, like an empty search, but every
+`list_library(ctx, user, *, q, trust, approval, created_by, verified_by, needs_my_review,
+sort)` → LibraryPage. Needs Tool.SEARCH (it lists the library, like an empty search, but every
 state: drafts included, since people review them). Proposal information — pending new
 definitions as rows, pending revision/rename badges, each row's approval status, "needs my
 review" — is added only for callers who also hold list_proposals; without it rows are the
@@ -26,6 +26,17 @@ Filters (each a set; empty = no filter on that group):
 - `needs_my_review`: rows with a pending proposal the caller may approve
   (trust.approval.can_approve with the four-eyes rule); needs review_proposal.
 - `q`: every word must appear in the id, title, meaning or keywords (case-insensitive).
+Order (`sort`, ADR 0029):
+- `relevance` (default): with `q`, by score (each word found in the id or title counts 2,
+  in the meaning or keywords 1), then trust (verified > llm_annotated > draft > none),
+  then title and id; without `q`: trust, then title.
+- `oldest`: rows by their oldest pending proposal the caller may decide, then by their
+  oldest pending proposal at all; rows with none last (then as `relevance`).
+"Waiting on you" (`LibraryPage.waiting`, ADR 0029): every pending proposal the caller may
+decide (needs list_proposals and review_proposal), whatever the filters, oldest first.
+Each pending brief says whether the caller may decide it (`needs_my_review`); pending
+briefs on returned rows and in `waiting` carry their diff's changed-line counts
+(`lines_added` / `lines_removed`; computed only for those).
 """
 
 from __future__ import annotations
@@ -35,21 +46,27 @@ from collections.abc import Iterable
 from cteforge.domain.access import Tool
 from cteforge.domain.audit import AuditKind
 from cteforge.domain.codec import definition_from_yaml
-from cteforge.domain.errors import CteforgeError, PermissionDeniedError
-from cteforge.domain.models import Definition
+from cteforge.domain.errors import CteforgeError, PermissionDeniedError, PolicyError
+from cteforge.domain.models import Definition, DefinitionState
 from cteforge.domain.proposals import DEFINITION_KINDS, Proposal, ProposalKind, ProposalStatus
 from cteforge.domain.users import User
-from cteforge.services import _audit
+from cteforge.services import _apply, _audit
 from cteforge.services.auth import permitted, require
-from cteforge.services.cards import LibraryPage, LibraryRow, ProposalBrief
+from cteforge.services.cards import LibraryPage, LibraryRow, ProposalBrief, WaitingProposal
 from cteforge.services.context import AppContext
 from cteforge.trust.approval import allowed, can_approve
 
 APPROVALS = ("pending", "approved", "rejected", "withdrawn")
 DEFAULT_APPROVAL = frozenset({"pending", "approved"})
+SORTS = ("relevance", "oldest")
+_TRUST_RANK = {
+    DefinitionState.VERIFIED: 0,
+    DefinitionState.LLM_ANNOTATED: 1,
+    DefinitionState.DRAFT: 2,
+}
 
 
-def _brief(p: Proposal) -> ProposalBrief:
+def _brief(p: Proposal, may_decide: bool = False) -> ProposalBrief:
     return ProposalBrief(
         id=p.id,
         kind=p.kind,
@@ -58,6 +75,7 @@ def _brief(p: Proposal) -> ProposalBrief:
         author_kind=p.author_kind,
         created_at=p.created_at,
         summary=p.summary,
+        needs_my_review=may_decide,
     )
 
 
@@ -70,6 +88,17 @@ def _matches(q: list[str], row: LibraryRow, keywords: Iterable[str]) -> bool:
     return all(w in text for w in q)
 
 
+def _score(q: list[str], row: LibraryRow, keywords: Iterable[str]) -> int:
+    """Relevance: each query word in the id or title counts 2, in the meaning or keywords 1."""
+    name = f"{row.id} {row.title}".lower()
+    rest = " ".join([row.meaning, *keywords]).lower()
+    return sum(2 if w in name else 1 if w in rest else 0 for w in q)
+
+
+def _trust_rank(row: LibraryRow) -> int:
+    return _TRUST_RANK.get(row.state, 3) if row.state is not None else 3
+
+
 def list_library(
     ctx: AppContext,
     user: User,
@@ -80,10 +109,13 @@ def list_library(
     created_by: Iterable[str] | None = None,
     verified_by: Iterable[str] | None = None,
     needs_my_review: bool = False,
+    sort: str = "relevance",
 ) -> LibraryPage:
     """The Library page (module docstring)."""
     with _audit.audit_failures(ctx, user, AuditKind.SEARCH, extra={"op": "list_library"}):
         require(user, Tool.SEARCH)
+        if sort not in SORTS:
+            raise PolicyError(f"Unknown sort '{sort}': use one of {', '.join(SORTS)}")
         if needs_my_review and not allowed(user, Tool.REVIEW_PROPOSAL):
             # Membership only: owners review what they own without review_all.
             raise PermissionDeniedError(
@@ -120,7 +152,7 @@ def list_library(
                     verified_by_kind=kinds.get(d.verified_by) if d.verified_by else None,
                     approval=touching[0].status.value if touching else "approved",
                     latest_proposal=_brief(touching[0]) if touching else None,
-                    pending=[_brief(p) for p in pending],
+                    pending=[_brief(p, _may_decide(user, p, d)) for p in pending],
                     needs_my_review=any(_may_decide(user, p, d) for p in pending),
                 ),
                 list(d.keywords),
@@ -134,6 +166,7 @@ def list_library(
         if p.target_id in seen:
             continue
         seen.add(p.target_id)
+        decide = p.status is ProposalStatus.PENDING and _may_decide(user, p, None)
         try:
             proposed = definition_from_yaml(str(p.payload.get("definition_yaml", "")))
         except CteforgeError:
@@ -151,9 +184,8 @@ def list_library(
                     created_by_kind=p.author_kind,
                     approval=p.status.value,
                     latest_proposal=_brief(p),
-                    pending=[_brief(p)] if p.status is ProposalStatus.PENDING else [],
-                    needs_my_review=p.status is ProposalStatus.PENDING
-                    and _may_decide(user, p, None),
+                    pending=[_brief(p, decide)] if p.status is ProposalStatus.PENDING else [],
+                    needs_my_review=decide,
                 ),
                 list(proposed.keywords),
             )
@@ -182,22 +214,74 @@ def list_library(
             return False
         return _matches(words, row, keywords)
 
-    kept = [row for row, keywords in rows if keep(row, keywords)]
-    kept.sort(key=lambda r: (r.version is not None, r.title.lower(), r.id))
+    kept = [(row, _score(words, row, kw)) for row, kw in rows if keep(row, kw)]
+    kept.sort(key=lambda rs: _order(rs[0], rs[1], sort))
+    reviewer = with_proposals and allowed(user, Tool.REVIEW_PROPOSAL)
+    waiting = (
+        sorted(
+            (
+                WaitingProposal(**b.model_dump(), target_id=row.id, title=row.title)
+                for row, _ in rows
+                for b in row.pending
+                if b.needs_my_review
+            ),
+            key=lambda w: (w.created_at, w.id),
+        )
+        if reviewer
+        else []
+    )
+    counts: dict[str, tuple[int, int] | None] = {}
+    pending_by_id = {p.id: p for p in proposals if p.status is ProposalStatus.PENDING}
+
+    def counted(brief: ProposalBrief) -> dict[str, int | None]:
+        # ADR 0029: lines of the QUERY diff ((0, 0): metadata only; None: rename / join).
+        if brief.id not in counts:
+            counts[brief.id] = _apply.line_counts(ctx, pending_by_id[brief.id])
+        lines = counts[brief.id]
+        return {
+            "lines_added": lines[0] if lines else None,
+            "lines_removed": lines[1] if lines else None,
+        }
+
     page = LibraryPage(
-        rows=kept,
+        rows=[
+            row.model_copy(
+                update={"pending": [b.model_copy(update=counted(b)) for b in row.pending]}
+            )
+            for row, _ in kept
+        ],
         total=len(rows),
         pending_count=sum(p.status is ProposalStatus.PENDING for p in proposals),
         proposals_visible=with_proposals,
+        waiting=[w.model_copy(update=counted(w)) for w in waiting],
     )
     _audit.record(
         ctx,
         user,
         AuditKind.SEARCH,
         fail_closed=False,
-        extra={"op": "list_library", "count": len(kept), "needs_my_review": needs_my_review},
+        extra={
+            "op": "list_library",
+            "count": len(kept),
+            "needs_my_review": needs_my_review,
+            "sort": sort,
+        },
     )
     return page
+
+
+def _order(row: LibraryRow, score: int, sort: str) -> tuple[object, ...]:
+    """Sort key (module docstring: `relevance` / `oldest`)."""
+    relevance = (-score, _trust_rank(row), row.title.lower(), row.id)
+    if sort != "oldest":
+        return relevance
+    mine = [b.created_at for b in row.pending if b.needs_my_review]
+    any_pending = [b.created_at for b in row.pending]
+    if mine:
+        return (0, min(mine).isoformat(), *relevance)
+    if any_pending:
+        return (1, min(any_pending).isoformat(), *relevance)
+    return (2, "", *relevance)
 
 
 def _may_decide(user: User, proposal: Proposal, target: Definition | None) -> bool:

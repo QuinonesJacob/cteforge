@@ -5,6 +5,10 @@ Who may read it: users holding the view_audit tool (built-in approver and admin;
 contributors — agents included — cannot browse it. Events come newest first; `limit` is
 clamped to 1..1000 and `has_more` says whether older matching events exist.
 
+`AuditPage.actors` (ADR 0029) names each actor of the returned events from the users
+table: display name and kind for every viewer, the email only for callers who also hold
+list_users (who may see users anyway).
+
 The listing itself is recorded as an `admin` event with `extra.op = "list_audit"`
 (best-effort, `fail_closed=False`, after the read so a page never contains its own
 listing).
@@ -19,8 +23,8 @@ from cteforge.domain.audit import AuditKind
 from cteforge.domain.errors import PolicyError
 from cteforge.domain.users import User
 from cteforge.services import _audit
-from cteforge.services.auth import require
-from cteforge.services.cards import AuditPage
+from cteforge.services.auth import permitted, require
+from cteforge.services.cards import AuditActor, AuditPage
 from cteforge.services.context import AppContext
 
 MAX_LIMIT = 1000
@@ -61,7 +65,17 @@ def list_audit(
         definition_id=definition_id,
         since=since,
     )
-    page = AuditPage(events=events[:limit], limit=limit, has_more=len(events) > limit)
+    shown = events[:limit]
+    names = {e.actor for e in shown}
+    with_email = permitted(user, Tool.LIST_USERS)
+    actors = {
+        u.name: AuditActor(
+            display_name=u.display_name, email=u.email if with_email else None, kind=u.kind
+        )
+        for u in ctx.store.list_users()
+        if u.name in names
+    }
+    page = AuditPage(events=shown, limit=limit, has_more=len(events) > limit, actors=actors)
     _audit.record(
         ctx,
         user,

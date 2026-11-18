@@ -22,7 +22,7 @@ from cteforge.domain.issues import IssueCode, Severity
 from cteforge.domain.models import Definition, DefinitionState
 from cteforge.domain.users import ActorKind, User, UserRole
 from cteforge.files.definitions import load_definition
-from cteforge.services import _library
+from cteforge.services import _audit, _library
 from cteforge.services.audit_log import list_audit
 from cteforge.services.context import (
     AppConfig,
@@ -72,6 +72,34 @@ def last_event(ctx: AppContext):
 # ── describe ─────────────────────────────────────────────────────────────────────────
 
 
+def test_reads_are_logged_through_mcp_only_unless_refused_or_failed(ctx: AppContext) -> None:
+    """ADR 0029 / ADR 0008 addendum: a person's successful read through the API (the GUI)
+    or the CLI is not logged; the same read through MCP is; a refused or failed read is
+    logged from any surface."""
+    ctx.store.add_definition_version(example("realization_rate"), author="analyst")
+    get_definition(ctx, APPROVER, "realization_rate")  # default surface: the HTTP API
+    with _audit.surface("cli"):
+        get_definition(ctx, APPROVER, "realization_rate")
+    assert ctx.audit.list_events() == []
+    with _audit.surface("mcp"):
+        get_definition(ctx, AGENT, "realization_rate")
+    (event,) = ctx.audit.list_events()
+    assert (event.actor, event.kind, event.outcome) == (
+        "claude-agent",
+        AuditKind.GET_DEFINITION,
+        AuditOutcome.OK,
+    )
+    narrow = APPROVER.model_copy(update={"tools": frozenset()})
+    with pytest.raises(PermissionDeniedError):
+        get_definition(ctx, narrow, "realization_rate")
+    with pytest.raises(NotFoundError):
+        get_definition(ctx, APPROVER, "no_such_definition")
+    refused, missing = ctx.audit.list_events(limit=2)[::-1]
+    assert (refused.actor, refused.outcome) == ("ana", AuditOutcome.REJECTED)
+    assert (missing.actor, missing.outcome) == ("ana", AuditOutcome.ERROR)
+
+
+@pytest.mark.usefixtures("mcp_surface")  # reads are logged through MCP (ADR 0029)
 def test_get_definition_card_with_history(ctx: AppContext) -> None:
     ctx.store.add_definition_version(example("realization_rate"), author="analyst")
     ctx.store.add_definition_version(
@@ -136,6 +164,7 @@ def test_definition_history(ctx: AppContext) -> None:
 # ── parse_query ──────────────────────────────────────────────────────────────────────
 
 
+@pytest.mark.usefixtures("mcp_surface")  # reads are logged through MCP (ADR 0029)
 def test_parse_with_warehouse_types(ctx: AppContext) -> None:
     report = parse_query(ctx, BUILDER, SQL, Dialect.DUCKDB)
     assert report.schema_found and report.issues == []
@@ -177,6 +206,7 @@ def test_parse_unknown_table_and_no_profile(ctx: AppContext, tmp_path: Path) -> 
         assert len(report.literals) == 7  # 2 dates, 2 statuses, 2 regions, paid
 
 
+@pytest.mark.usefixtures("mcp_surface")  # reads are logged through MCP (ADR 0029)
 def test_parse_omitted_dialect_follows_the_connection(ctx: AppContext, tmp_path: Path) -> None:
     """Explicit dialect → the profile's dialect (given, else the default connection) →
     PolicyError (ADR 0021)."""
@@ -252,6 +282,7 @@ def test_list_audit_is_for_approvers_and_admins(ctx: AppContext) -> None:
     assert event.actor == "carl"
 
 
+@pytest.mark.usefixtures("mcp_surface")  # reads are logged through MCP (ADR 0029)
 def test_list_audit_filters_and_pages(ctx: AppContext) -> None:
     ctx.store.add_definition_version(example("realization_rate"), author="a")
     start = dt.datetime.now(dt.UTC) - dt.timedelta(seconds=1)

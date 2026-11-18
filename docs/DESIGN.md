@@ -226,8 +226,35 @@ with cteforge as its own authorization server.
   edit roles other than admin, approve / reject and verify (four-eyes, no exemption).
   Human-only: seeing or minting tokens, anything touching an admin user, granting the admin
   role, editing the admin role. The last active admin cannot be demoted or deactivated.
+- **Users** have a name (login), a kind (human | agent), a role, an active flag and, since
+  ADR 0029, an optional **display name** and **email** (≤ 80 / ≤ 254 characters; the
+  email's format is checked lightly). A user sets their own (`PUT /me/profile`); an admin
+  with `manage_user` sets anyone's (`PATCH /users/{name}`, `cteforge user profile`; agent
+  admins never an admin user's). They are shown in the GUI's user menu, Users & roles,
+  token lists and as the Log's actor (the email only to callers holding `list_users`),
+  never in search results or on definition cards. Changes are audited.
 - Full version history per definition with diffs; **impact preview** ("used by 14 composed
   definitions").
+- **GUI** (ADR 0019, 0026, 0029): a sidebar — **Library · Join map · Import · Log**, then
+  **Settings** (Connections, Team mode, Users & roles, Roles, My tokens; admin sections
+  only with their tools) — and a header with the default connection and the user menu
+  (name, email, role, personal access tokens, the token's tools, theme, sign out). Warm
+  neutral background, dark green primary, trust icons (verified ✓, LLM-annotated ◐,
+  draft ◌), monospace for ids and SQL, light and dark. The **Library** searches and filters
+  (Trust, Approval, Created by, Verified by), sorts by relevance then trust, and shows
+  "Waiting on you": the proposals the person may decide, oldest first, with +/− changed
+  lines. A **definition** page shows its usage notes, the variables agents can fill with
+  their original values, the trusted SQL (or a composed definition's parts and compiled
+  SQL), and its grain, outputs, joins, users, keywords and owner; changes go through
+  "Propose a change". A **proposal** page shows the proposer's note, the **query** diff
+  (the trusted SQL as written, or a composed definition's parts and final SELECT; unified
+  or side by side, changes only or full) and the described fields that change (before →
+  after), used by, the decision and its real activity. The
+  **Join map** is a list: many side / one side, keys, join-type variants per source
+  definition and where each joins (CTE, main query, subquery), the sources' trust, known
+  / confirmed, and per row the sources, evidence, traps and notes, annotated through
+  proposals. The **Log** is the audit log (§11). **The GUI does not run queries**: agents
+  run through MCP and scheduled jobs through `POST /run` / `POST /check` or the CLI.
 - Git is an optional export/import, not the source of truth. See ADR 0003.
 - Users and settings: team settings (strict/open mode, **default connection**;
   `manage_settings`) and users/roles/tokens (`list_users`, `manage_user`, `manage_role`)
@@ -274,6 +301,16 @@ on the self-hosted server. See ADR 0004.
 cteforge logs **its own** tool calls: question, definitions + versions, variable values, trust
 label, result metadata (row count, duration, accepted/rejected). It does **not** duplicate the
 warehouse's query history and does **not** store result rows by default.
+
+What is logged (ADR 0008 addendum, ADR 0029): every MCP tool call (reads included, so
+people see what agents looked up), every run (`compile_and_run`, `check_and_run`) and every
+change from any surface, and every refused or failed call. A person's successful read
+through the GUI / HTTP API or the CLI is not logged.
+
+Each event records the caller's token by id and 12-character prefix (never the token or
+its hash) and, for runs, the connection used. The GUI shows the audit log as the **Log**
+(ADR 0029): real call names (kind + operation), actor, definitions, trust, outcome, rows,
+duration, compile ID; a row opens the values, question, token prefix and connection.
 
 Every compiled query carries a tag that lands in the warehouse's own logs:
 `/* cteforge: realization_rate v3 compile_id=8f2a */` — so the two logs can be joined.
@@ -419,7 +456,7 @@ Revising a definition keeps its source dialect.
 | M2 | Compose definitions (§17); trust labels (§8) | done |
 | M3 | Store (SQLite/Postgres), proposals (§18), versions, permissions (incl. four-eyes), audit | done (Postgres untested in CI; SQLite tested) |
 | M4 | MCP server (§6) | done (stdio + streamable HTTP at `/mcp`; e2e-tested) |
-| M5 | HTTP API + GUI (Library with review in it, definition pages, import flow, revise, rename, Join map, Audit, Settings; ADR 0026 replaced Explore and the Review page) | done; GUI↔API contract e2e-tested |
+| M5 | HTTP API + GUI (Library with review in it, definition pages, import flow, revise, rename, Join map, Log, Settings; ADR 0026 replaced Explore and the Review page; ADR 0029 redesign, no GUI Run) | done; GUI↔API contract e2e-tested |
 | M6 | Snowflake/BigQuery/Postgres/Databricks connectors, EXPLAIN/dry-run, statement timeouts, drift check | built; verified against real engines in CI (`.github/workflows/ci.yml`): DuckDB, Postgres 16, ClickHouse 25.8 and MySQL 8.4 (service containers); ClickHouse 26.10 also locally. Redshift, Snowflake, BigQuery and Databricks (incl. their timeouts and read-only setup) are unit-tested against fake drivers only and unverified against real warehouses |
 
 ## 17. Composition (M2; composed definitions: ADR 0026)
@@ -461,7 +498,10 @@ gives values per alias, and optionally a final SELECT over those aliases.
   `COUNT(DISTINCT key)` per side) and the evidence is stored with it.
 - The GUI's Library is the review queue too (ADR 0026): definitions and the proposals
   touching them, filtered by trust, approval, created by and verified by, with a "needs
-  my review" filter; proposal detail stays its own page.
+  my review" filter; proposal detail stays its own page. "Waiting on you" lists what the
+  person may decide, oldest first, with the +/− lines of their query ("metadata only" when
+  the query does not change; ADR 0029); its link opens the
+  needs-my-review filter sorted oldest first (`GET /library?needs_my_review=true&sort=oldest`).
 - Auto-apply: in **open** mode, a proposal whose checks all pass and that targets a new or
   unverified definition (or an unconfirmed join edge) is applied immediately as
   `llm_annotated`. An edge an agent adds never auto-applies (ADR 0026). Everything else

@@ -12,20 +12,27 @@ React 18 + TypeScript (strict) + Vite GUI (ADR 0019). Talks only to the HTTP API
   field names identical), `client.ts` (fetch wrapper, `ApiError`), `token.ts` (sessionStorage),
   `endpoints.ts` (one function per route).
 - `src/lib/` — pure, framework-free logic (no React, no fetch, no DOM) so it is unit-testable:
-  variable form values ↔ JSON, import variable-building rules (type suggestion, ADR 0015
-  description rule), revise helpers (`revise.ts`: card → drafts/metadata, changed keys
-  only), run requests (`variableForm.ts`), Library filters ⇄ URL ⇄ `GET /library` query
-  (`library.ts`, ADR 0026), join-map annotate/add requests (`joins.ts`), diff line classification,
-  trust/state badge mapping, display-only SQL tokenizer, formatting helpers, permission
-  checks (`roles.ts`, on the token's tools), the tool catalog and token/role form rules
-  (`tools.ts`, ADR 0027), rename-form rules (`rename.ts`, ADR 0024).
+  import variable-building rules (type suggestion, ADR 0015 description rule, the grain
+  list; `importBuilder.ts`), revise helpers (`revise.ts`: card → drafts/metadata, changed
+  keys only), Library filters ⇄ URL ⇄ `GET /library` query, filter chips, the review-queue
+  link (`library.ts`, ADR 0026, 0029), join-map annotate requests and list-view columns —
+  many/one side, join-type variants, trust mix, location labels, search, sort (`joins.ts`),
+  diff parsing and views — changes only / full, unified / side by side (`diff.ts`), Log
+  rows — call name, outcome, summary, values, token prefix (`audit.ts`), profile form
+  (`profile.ts`), described-field changes and query-change labels (`metadata.ts`), trust/state badge and trust-icon mapping (`trust.ts`), display-only SQL
+  tokenizer and Import's value marking (`sqlTokens.ts`), formatting helpers (ages,
+  initials, bullets; `format.ts`), permission checks and Settings sections (`roles.ts`, on
+  the token's tools), the tool catalog and token/role form rules (`tools.ts`, ADR 0027),
+  rename-form rules (`rename.ts`, ADR 0024).
 - `src/state/` — React context providers and hooks (auth, toasts, theme, async loading).
 - `src/pages/` — one file per route: SignIn, Library (`/`: definitions + the proposals
-  touching them, ADR 0026), Definition (Overview, Run, History, Edit), Import (also revise
-  mode: `/import?revise=<id>`), Join map (`/joins`), Proposal (`/review/:id`), Audit,
-  Settings, NotFound. `/review` redirects to `/?review=mine`, `/explore` to `/`.
-- `src/components/` — shared UI pieces, one component per file (SQL viewer, variable form,
-  issue list, trust badge, diff viewer, literal table, …).
+  touching them, ADR 0026), Definition (Overview, History, Edit — no Run, ADR 0029), Import
+  (also revise mode: `/import?revise=<id>`), Join map (`/joins`, list view), Proposal
+  (`/review/:id`), Log (`/log`; the audit log), Settings (`/settings/:section`), NotFound.
+  `/review` redirects to `/?review=mine`, `/explore` to `/`, `/audit` to `/log`.
+- `src/components/` — shared UI pieces, one component per file: the shell (`AppLayout`,
+  `SideNav`, `AppHeader`, `UserMenu`, `ThemeToggle`), `Icon` (inline SVG, ADR 0029),
+  `TrustIcon`, SQL viewer, diff viewer, issue list, literal table, …
 - `src/styles/` — plain CSS: `tokens.css` (light/dark custom properties), `base.css`,
   `components.css`, `pages.css`.
 - `src/test/` — vitest setup and test helpers (`fetchMock.ts`). Tests sit next to the code
@@ -45,9 +52,12 @@ If something does not clearly fit one of the above, it does not belong here.
 - Token kept in sessionStorage; never logged. Dev server proxies /api and /mcp to localhost:8765.
 - Every API error is an `ApiError` mirroring `{"error": {type, message, issues}}`; show its
   issues with `IssueList`, its message in a toast.
-- Values sent to /run follow the variable input formats exactly (DESIGN §4):
-  date_range → `{start, end}` ISO; date → ISO; text_list → array; number → JSON number;
-  boolean → true/false; grain → day|week|month|quarter|year. Built only by `lib/variableForm.ts`.
+- The GUI does not run queries (ADR 0029): no calls to `POST /run` or `POST /check`. Agents
+  run through MCP; scheduled jobs use the API or CLI.
+- Look (ADR 0029): colours, radii and type only through the tokens in `tokens.css`
+  (warm neutral background, dark green primary; code panels dark in both themes). Fonts:
+  `Inter` / `JetBrains Mono` when installed, else system fonts — never downloaded or
+  bundled.
 - Theme: tokens on `:root`; dark via `prefers-color-scheme` unless `html[data-theme]` is set by
   the toggle. Accessible: every control labelled, visible focus ring, keyboard reachable.
   Layout works down to 375px.
@@ -70,34 +80,67 @@ If something does not clearly fit one of the above, it does not belong here.
   withdrawn hidden —, `created`, `verified`, `review=mine`); approval filters only with
   list_proposals, "Needs my review" only with review_proposal. The pending count badge sits
   on the Library nav item. The Playwright setup runs the server with
-  `CTEFORGE_SEARCH_EMBEDDINGS=off`.
+  `CTEFORGE_SEARCH_EMBEDDINGS=off`. ADR 0029: `sort=oldest` (URL `sort=oldest`) orders rows
+  by their oldest proposal the caller may decide; `LibraryPage.waiting` (WaitingProposal:
+  brief + `target_id`, `title`) feeds "Waiting on you", oldest first, whatever the filters;
+  its link is `/?review=mine&sort=oldest` (`REVIEW_QUEUE_HREF`). Pending briefs carry
+  `lines_added` / `lines_removed` / `needs_my_review`. Filters sit in a popover; active ones
+  are removable chips (`filterPills`) with "Clear all".
 - Composed definitions (ADR 0026): `DefinitionCard.composed`, `composition`
   (`CompositionCard`: parts alias → id, `pinned_version` or latest, `superseded`, `usable`;
   `fixed`; `open_variables`; `select`; `compiled_sql`), `used_by` (UsedByReference) and
   `joins` ("joins to": JoinCard). `CompositionView` shows them on the Definition overview and
   on a proposal (`ProposalView.composition`). A composed definition's `variables` are its
-  open ones named `<alias>.<var>`; the Run tab sends them as `values[<id>]["<alias>.<var>"]`
-  (alias = its id). Composed definitions are not created or re-composed in the GUI (agents
+  open ones named `<alias>.<var>`. Composed definitions are not created or re-composed in the GUI (agents
   do that through MCP); the Edit tab offers metadata only, and Import's revise mode refuses
   them. `ProposalView.impact` = ids of composed definitions using the target ("Used by").
-- Join map (ADR 0026): `GET /joins?table=&known_only=` → JoinCard (edge + `known`,
-  `confirmed`, `pending_proposals`; `sources`, `trusted_sources` — the sources a person
-  stands behind, the only ones that make a mined edge known —, `relationship`, `traps`,
-  `notes`, `evidence`). `POST /proposals/joins {action: "annotate", id, relationship?, traps?,
-  notes?, summary}` (only changed fields) or `{action: "add", left_table, right_table,
-  keys, join_type, relationship?, traps?, notes?, summary}`; forms only with propose_join.
-  Pending additions are proposals, not edges: the page lists them from
+- Join map (ADR 0026, 0029 list view): `GET /joins?definition=` → JoinCard (the GUI offers no
+  "known only" filter: the Known / Confirmed flags say it per row; `known_only` stays an API
+  parameter): edge + `known`, `confirmed`, `pending_proposals`; `sources`, `trusted_sources` — the
+  sources a person stands behind, the only ones that make a mined edge known —,
+  `relationship`, `traps`, `notes`, `evidence`; ADR 0029: `source_joins` — JoinSource
+  `{definition, join_type, location: main|cte|subquery, scope}` —, `source_states`,
+  `source_titles`). Columns: many side / one side from the relationship (else left / right),
+  keys, join-type variants per source definition, used by, a trust bar of the sources'
+  states, flags (variants, known, confirmed, change pending). A row opens its sources (join
+  type + location), evidence, traps, notes and, with propose_join, the annotate form:
+  `POST /proposals/joins {action: "annotate", id, relationship?, traps?, notes?, summary}`
+  (only changed fields). The GUI adds no joins (agents may `propose_join` add via MCP).
+  Pending additions are proposals, not edges: faded "Proposed" rows from
   `GET /proposals?status=pending` (callers with list_proposals). Join proposals show
   `payload.action` and `payload.evidence`; they are approved, never verified.
-- `DefinitionCard.history` may be null; `GET /audit` returns `AuditPage {events, limit, has_more}`;
+- `DefinitionCard.history` may be null; `GET /audit` returns `AuditPage {events, limit,
+  has_more, actors}` (ADR 0029: `actors` = display name / kind of each actor on the page,
+  email only for list_users holders; events of token callers carry `extra.token_prefix`;
+  the Log shows kind + `extra.op` as the call name and loads more by raising `limit`);
   approve returns `ProposalOutcome`, reject/withdraw return `ProposalView` (the GUI reloads after
   any decision). `POST /users` → 201 `{user, token | null}` is normalized in `endpoints.ts`
   (`toCreatedUser`; token null when the caller is an agent).
-- `/run` body: `uses: {<id>: {id, version}}`, `values: {<id>: {...}}`, `run`, `limit`.
-- `/run` also takes `profile` and `question` (no `recipe_id`: recipes were removed by ADR
-  0026). The GUI no longer calls the search route (`GET /definitions?q=`); the Library uses
-  `GET /library`. `RunOutcome.used` lists each definition version with its
-  state and verifier + date; the run result shows it.
+- The GUI calls neither `/run` nor `/check` (ADR 0029) nor the search route
+  (`GET /definitions?q=`); the Library uses `GET /library`.
+- Definition page (ADR 0029): no banner; the state line (verified by / when, or not
+  verified), "Propose a change" (→ Edit tab). Overview: Use when / Don't use when as
+  bullets, "Variables agents can fill" (Name · Type · Original value · Allowed; fixed ones
+  tagged), the trusted SQL in a collapsed `<details>` (or a composed definition's parts and
+  compiled SQL), a side card (grain, outputs, joins → `/joins?definition=<id>`, used by,
+  keywords, owner).
+- Proposal page (ADR 0029): `GET /proposals/{id}?full_diff=true`; `ProposalView.title` is the
+  page title, `summary` the proposer's note. It shows the QUERY change, never the stored
+  YAML: `sql_diff` (the source SQL as written, both sides formatted alike; a composed
+  definition's parts list and final SELECT; "" = the query does not change → "metadata
+  only"; null for renames / joins) in the diff viewer, which toggles unified / side by side
+  and changes only / full (`lib/diff.ts`), and `metadata_changes` (MetadataChange `{field,
+  before, after}`; lists as added / removed, `lib/metadata.ts`) in "Description changes".
+  `ProposalView.diff` (YAML) is for the CLI / MCP only. Pending briefs' `lines_added` /
+  `lines_removed` count the query diff (0/0 → "metadata only" in Waiting on you; null for
+  renames and joins); "Your decision" (approve; "Keep it verified after
+  this change" / "Also verify" = approve with verify; reject with a note; withdraw for the
+  author); Activity: proposed, auto-applied, decided only.
+- Users (ADR 0029): `/me` and `UserView` carry `display_name`, `email`; `PUT /me/profile
+  {display_name?, email?}` (Settings → My tokens → Your profile) and `PATCH /users/{name}`
+  with the same fields (Users & roles → Profile, manage_user); only changed fields are
+  sent, "" clears (`lib/profile.ts`); the server validates. Shown in the user menu, Users &
+  roles, token lists (owner) and the Log's actor; never on definitions or in search.
 - Revise: `GET /definitions/{id}?include_source=true` adds `source_sql` (template rendered
   with its original values) and `annotations` (literal IDs addressing that SQL). The Edit
   tab sends `POST /proposals/definitions/{id}/revise {base_version, metadata: <changed keys
@@ -117,9 +160,12 @@ If something does not clearly fit one of the above, it does not belong here.
   effective `tools`, `review_all`, and its role's `role_allowed` / `role_defaults`;
   `lib/roles.ts` decides what to offer from them (`can(user, tool)`; a user object without
   `tools` falls back to the built-in role's, `lib/tools.ts` `BUILTIN_ROLE_TOOLS`, mirroring
-  domain/access.py; agents never verify outside the admin role). Nav (ADR 0026): Library ·
-  Join map (list_joins) · Import (parse_query + propose_definition) · Audit (view_audit) ·
-  Settings (everyone); the Library's pending badge needs list_proposals. Edit tab / revise
+  domain/access.py; agents never verify outside the admin role). Sidebar (ADR 0029):
+  Library · Join map (list_joins) · Import (parse_query + propose_definition) · Log
+  (view_audit), then Settings: Connections and Team mode (manage_settings), Users & roles
+  and Roles (list_users), My tokens (everyone) — `lib/roles.ts` `settingsSections`; the
+  Library's pending badge needs list_proposals. Header: the default connection (GET
+  /profiles `default`) and the user menu. Edit tab / revise
   mode: revise_definition (+ parse_query); join forms: propose_join. Approve/reject: review_proposal with review_all, or the
   target definition's owner holding review_proposal; changes to verified work: a person or
   an admin agent. Verify: the verify tool. Never a role-name check except the admin-role
@@ -174,8 +220,10 @@ If something does not clearly fit one of the above, it does not belong here.
   verify to holders of the verify tool (agents: admin role only).
 - The pending badge shares one poller per tab (`state/usePendingCount.ts`) on
   `GET /proposals/count` (no diffs, not audited); still poll rarely and only while visible.
-  GET /proposals builds diffs and writes an audit event per call: only the Join map page
-  (pending additions) calls it.
+  GET /proposals builds diffs: only the Join map page (pending additions) calls it.
+- Audit (ADR 0008 addendum, ADR 0029): the GUI's successful reads are not logged (the API
+  surface); runs, changes and refused calls are. The Log therefore shows agent (MCP)
+  calls, runs and changes.
 - Verify is offered only on the latest version of an `llm_annotated` definition; approval is
   disabled while checks have errors; "also verify" is disabled on `checks_incomplete`.
 - Four-eyes (ADR 0018 addendum, ADR 0027: no exemption for agents; `lib/roles.ts` `isOwnWork`, `versionAuthors` mirror
@@ -195,19 +243,26 @@ If something does not clearly fit one of the above, it does not belong here.
   the printed admin/agent tokens), starts `cteforge serve --port <free>` with the demo's
   env.sh values and `CTEFORGE_AUTH=on`, waits for `GET /api/v1/me` → 401, and creates the
   human approver `ben`; teardown stops the server (SIGINT) and deletes the temp dir
-  (`E2E_KEEP_TMP=1` keeps it, with `serve.log`). Specs: sign-in, library search, run form
-  (+ validation), import → auto-apply → run, admin sets the default connection → Import starts on it, strict mode + Library "needs my review" + four-eyes, audit
-  filters, theme toggle and 375px layout, Edit-tab and SQL revisions, the demo's composed
-  definition (parts, variables, compiled SQL, used by, run), rename ID (references →
-  typed confirmation → applied → old ID's "renamed to" error; the composed definition
-  using it still runs; a pending rename on its proposal page), Library filters (pending
-  approval, needs my review, created by, rejected hidden by default, `/review` redirect),
-  join map (a person annotates a mined edge — relationship evidence; an agent's added edge
-  waits, a person approves it → known + confirmed; a read-only token sees no forms), access (ADR 0027: admin creates a custom role in Settings →
-  Roles; a person generates a narrow token in My tokens — shown once, copy — signs in with
-  it, sees the nav follow its tools, revokes it and is signed out; admin creates an agent
-  with the custom role, generates a token for it in Settings → Users, revokes it → 401).
-  Screenshots of each page land in
+  (`E2E_KEEP_TMP=1` keeps it, with `serve.log`). Specs: sign-in, sidebar and user menu,
+  library search, filters (popover, chips, needs my review, created by, rejected hidden by
+  default, `/review` redirect) and "Waiting on you" (oldest first, +/− lines, the queue
+  sorted oldest first), the definition overview (no Run tab; variables with original
+  values; trusted SQL; facts; "Propose a change"), import → auto-apply → overview, admin
+  sets the default connection → Import starts on it, strict mode + Library "needs my
+  review" + a description-only change ("the query does not change", field changes) + a
+  query change (the SQL diff unified / side by side, changes only / full) + four-eyes,
+  the Log (agent runs through the API; call names, trust, outcome; a row's token prefix
+  and connection; filters), theme (user menu) and 375px layout, Edit-tab and SQL
+  revisions, the demo's composed definition (parts, variables, compiled SQL, used by),
+  rename ID (references → typed confirmation → applied → old ID's "renamed to" error; the
+  composed definition using it still runs over the API; a pending rename on its proposal
+  page), access (ADR 0027: custom role, narrow token shown once, sign in with it, revoke;
+  an agent's token from Users & roles; ADR 0029: display name and email set by yourself and
+  by an admin, shown in the menu, users, token owner and the Log), join map (list columns,
+  variants, sources and locations; a person annotates a mined edge — evidence; an agent's
+  added edge waits as a "Proposed" row, a person approves it → known + confirmed; a
+  read-only token sees no forms), and `12-screenshots` (every page, light and dark, at
+  1440px: `e2e/screenshots/12-<page>-<light|dark>.png`). Screenshots land in
   `e2e/screenshots/`. One spec: `npx playwright test 04`; debug: `--headed` or
   `npx playwright show-trace test-results/<test>/trace.zip` (kept on failure).
 

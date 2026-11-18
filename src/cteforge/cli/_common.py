@@ -16,6 +16,7 @@ from cteforge.domain.errors import CteforgeError
 from cteforge.domain.issues import Issue, Severity
 from cteforge.domain.proposals import ProposalKind
 from cteforge.domain.users import User
+from cteforge.services._audit import surface as audit_surface
 from cteforge.services.auth import local_user
 from cteforge.services.cards import ProposalOutcome, ProposalView, RunOutcome
 from cteforge.services.context import AppConfig, AppContext, open_context
@@ -65,11 +66,12 @@ def errors() -> Iterator[None]:
 
 @contextmanager
 def context(config: AppConfig | None = None) -> Iterator[AppContext]:
-    """Open the app context from the environment (CTEFORGE_*); errors exit 1."""
+    """Open the app context from the environment (CTEFORGE_*); errors exit 1. Calls made
+    inside are from the CLI surface (ADR 0029: successful reads are not logged)."""
     with errors():
         ctx = open_context(config or AppConfig.from_env())
     try:
-        with errors():
+        with errors(), audit_surface("cli"):
             yield ctx
     finally:
         ctx.close()

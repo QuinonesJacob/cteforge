@@ -60,7 +60,7 @@ export function MyTokensCard({ user, catalog }: { user: User; catalog: ToolInfo[
   return (
     <section className="card" aria-labelledby="my-tokens-title">
       <div className="section-head">
-        <h2 id="my-tokens-title">My tokens</h2>
+        <h2 id="my-tokens-title">Personal access tokens</h2>
         {mayMint && !creating && (
           <button type="button" className="btn btn-sm btn-primary" onClick={() => setCreating(true)}>
             Generate token
@@ -104,6 +104,7 @@ export function MyTokensCard({ user, catalog }: { user: User; catalog: ToolInfo[
           tokens={tokens.data ?? []}
           busy={busy}
           currentPrefix={current}
+          owner={user}
           onRevoke={(t) => void revoke(t)}
         />
       )}

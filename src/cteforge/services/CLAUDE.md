@@ -42,7 +42,7 @@ Support modules (shared by use-cases; not use-cases themselves):
   while the store has no users and `create=True` (CLI, auth-off HTTP), never for stdio MCP),
   `stdio_user` (CTEFORGE_TOKEN's user and tools, else CTEFORGE_USER with role defaults),
   `resolve_user` (HTTP). An authenticated User also carries `token_id`,
-  `token_expires_at`, `token_mode` of the calling token (None without one). `require(user, tool, target=None)` / `permitted`: tool membership
+  `token_expires_at`, `token_mode`, `token_prefix` of the calling token (None without one). `require(user, tool, target=None)` / `permitted`: tool membership
   (REVIEW_PROPOSAL / VERIFY consult the target via can_approve / can_verify).
   `user_tools(user)` (what MCP shows), `refuse_tool(ctx, user, name)` (audits an MCP call
   to a hidden tool: admin, op=tool_refused, rejected; returns the PermissionDeniedError).
@@ -56,15 +56,25 @@ Support modules (shared by use-cases; not use-cases themselves):
   DefinitionDrift, TeamSettings, AuditPage, DefinitionReferences / UsedByReference /
   ProposalReference (ADR 0024, 0026; DefinitionCard.former_ids); ADR 0026: PartCard,
   CompositionCard (DefinitionCard.composition / ProposalView.composition), JoinCard (edge +
-  known, confirmed, pending_proposals), DefinitionCard.composed / used_by / joins,
-  LibraryPage / LibraryRow / ProposalBrief; access cards (ADR 0027):
+  known, confirmed, pending_proposals; ADR 0029: `source_states`, `source_titles`),
+  DefinitionCard.composed / used_by / joins, LibraryPage (+ `waiting`: WaitingProposal) /
+  LibraryRow / ProposalBrief (+ `lines_added`, `lines_removed`, `needs_my_review`; ADR
+  0029), `proposal_diff(proposal, base, *, full=False)` (the stored YAML, for CLI / MCP;
+  `full`: every unchanged line as context), `unified_diff` and `diff_line_counts` (headers
+  before the first hunk skipped), ProposalView.title, `sql_diff` and `metadata_changes`
+  (MetadataChange field / before / after; ADR 0029, built by `_apply.view`), AuditPage (+ `actors`:
+  AuditActor display_name, email, kind; ADR 0029); access cards (ADR 0027):
   ToolInfo + `tool_catalog()`, RoleCard (+ `role_card`, `users` count), TokenCard (+
   `token_card`: effective tools now, state active|revoked|expired; never the value or
-  hash), NewToken {token (shown once), info}, UserView (user + tokens), MeCard (tools,
-  review_all, role_allowed, role_defaults); DefinitionCard.verified_by_kind;
+  hash), NewToken {token (shown once), info}, UserView (user + tokens + display_name,
+  email), MeCard (tools, review_all, role_allowed, role_defaults, display_name, email); DefinitionCard.verified_by_kind;
   `json_safe` (enums → values) / `json_rows`.
 - `_audit.py` — records an AuditEvent for a use-case call (`record`, fail closed by
-  default); the one outcome rule (`failure_outcome`) and `audit_failures` (records a raised
+  default; ADR 0029: `surface()` / `SURFACE` ("mcp" | "api" | "cli", set by the adapter),
+  `READ_USE_CASES` / `RUN_USE_CASES` / `WRITE_USE_CASES` / `UNAUDITED_USE_CASES`,
+  `is_read`, `should_log` — a successful read outside MCP is not written; a token-authenticated caller's events carry `extra.token_id` / `token_prefix`,
+  ADR 0029 — a minted / revoked / changed token is `extra.subject_token_id` /
+  `subject_prefix`); the one outcome rule (`failure_outcome`) and `audit_failures` (records a raised
   CteforgeError, best effort, and re-raises). Every use-case wraps its permission check in it.
 - `_library.py` — library lookups shared by read/run and write/review (no permission checks,
   no audit): `parse_dialect`; `resolve_dialect(ctx, dialect, profile)` (explicit → the
@@ -75,14 +85,17 @@ Support modules (shared by use-cases; not use-cases themselves):
   "" when none —, `annotations_of`, `annotation_file`);
   the join map (`canonical_edge`, `join_edge_id`, `flip_relationship`, `mined_edges(definition,
   sql=None)` — composed ones only from their compiled SQL —, `refresh_join_map(ctx,
-  sql_of)`: mines every latest definition, inserts new edges, recomputes `sources` and
-  usage_count, keeps annotations; joins between base tables, also through CTEs/derived
+  sql_of)`: mines every latest definition, inserts new edges, recomputes `sources`,
+  `source_joins` (ADR 0029: per place a source makes the join — join type oriented like
+  the edge; location `main` / `cte` (scope = the CTE) / `subquery` (parsing's
+  `in_subquery`; scope = the enclosing CTE or None); exact duplicates within a definition
+  collapsed) and usage_count, keeps annotations; joins between base tables, also through CTEs/derived
   tables whose key columns pass through unchanged from one base table (parsing's JoinInfo
   `*_base_table`/`base_keys`); `trusted_sources` via `person_stands_behind` /
   `human_backing` (verified, or authored / approved by a human, not auto-applied);
   `known_edges` (ADR 0026: mined from a definition a person stands behind, added or
   confirmed by a person); `same_table`, `matching_edge`, `final_select_joins` (raw-table joins of a final
-  SELECT vs known edges); `join_cards(ctx, user, edges)` → JoinCard); definition lookup by id
+  SELECT vs known edges); `join_cards(ctx, user, edges)` → JoinCard, with each source's latest state and title); definition lookup by id
   (ADR 0024): `get_definition` / `definition_not_found` — the ONE place a missing id
   becomes NotFoundError, a former id naming the current one ("Definition 'a' was renamed
   to 'c' on <date>; use the new ID."), used by describe, run, compositions, review,
@@ -105,7 +118,7 @@ Support modules (shared by use-cases; not use-cases themselves):
 - `_upgrade.py` — run by `open_context` once per open: audits the store's schema-3
   migration note (admin event, op `migrate_adr_0026`, actor `cteforge`, fail closed, then
   cleared) and re-mines the join map once per mining-rule version (setting
-  `join_map_version`, 3: trusted_sources). `review.verify_definition` re-mines too (a
+  `join_map_version`, 4: source_joins; 3 was trusted_sources). `review.verify_definition` re-mines too (a
   verified definition's joins become known).
 - `_meaning.py` — meaning search (ADR 0023; no permission checks, no audit):
   `document_for(definition, former_ids=())` (domain search document + `_library.mined_edges`;
@@ -125,7 +138,13 @@ Support modules (shared by use-cases; not use-cases themselves):
   map; then `_meaning.index_definition`), diff/impact (used by) + composition `view`,
   `validation_detail`; renames (ADR 0024): `rename_proposal` (payload
   from_id, to_id, references), applied by `Store.rename_definition` (no new version, no
-  diff; `_check_base` refuses a rename whose target was renamed meanwhile —
+  diff; ADR 0029: `query_text(definition)` (the source SQL as written — `_library.
+  original_sql`, formatted alike on both sides —, for a composed definition its parts list
+  and final SELECT), `query_diff` (→ `ProposalView.sql_diff`, "" = query unchanged),
+  `metadata_changes` (described fields; never version / state / verifier),
+  `line_counts(ctx, proposal)` → (added, removed) of the QUERY diff for the Library, None
+  for renames and joins;
+  `view(..., full_diff=)`; `_check_base` refuses a rename whose target was renamed meanwhile —
   `stale_rename_error` — or whose new id was taken; `verify_refusal` refuses verify). DRAFT
   definition proposals are never auto-applied. Join proposals (`join_proposal(..., action)`)
   are checked on the default profile (`join_checks`: tables and key columns exist;
@@ -153,9 +172,12 @@ Support modules (shared by use-cases; not use-cases themselves):
 Use-cases (one file each; a use-case never imports another use-case — share via support
 modules or the core):
 - `library.py` — `list_library(ctx, user, *, q="", trust=None, approval=None,
-  created_by=None, verified_by=None, needs_my_review=False) -> LibraryPage` (ADR 0026: the
-  GUI's Library — definitions + the proposals touching them; see its docstring for the
-  rows and filters).
+  created_by=None, verified_by=None, needs_my_review=False, sort="relevance") ->
+  LibraryPage` (ADR 0026: the GUI's Library — definitions + the proposals touching them;
+  ADR 0029: `sort` relevance (score, then trust, then title) | oldest (oldest pending
+  proposal the caller may decide first; another value → PolicyError), `waiting`
+  (pending proposals the caller may decide, oldest first, regardless of filters) and
+  +/- line counts on pending briefs only; see its docstring).
 - `search.py` — `search(ctx, user, query, *, limit=10, include_drafts=False, question=None) -> list[SearchHit]` (DESIGN §19, ADR 0017, 0023; a composed definition's hit lists its open variables):
   BM25 keyword ranking (unchanged) + `_meaning.similarities`, merged by reciprocal rank
   fusion (`RRF_K` 60; equal scores share a rank). Without meaning matches the scores are
@@ -193,8 +215,10 @@ modules or the core):
   traps=None, notes=None, summary="")` → ProposalOutcome (ADR 0026: annotate an existing
   edge by id or tables + keys — NotFoundError otherwise; add an edge not in the map —
   PolicyError otherwise).
-- `review.py` — `list_proposals(ctx, user, status=None)`, `get_proposal(ctx, user, id)` →
-  ProposalView (diff + impact); `approve(ctx, user, id, *, verify=False, comment="")` →
+- `review.py` — `list_proposals(ctx, user, status=None)`, `get_proposal(ctx, user, id, *,
+  full_diff=False)` → ProposalView (diff, sql_diff, metadata_changes — `full_diff`: whole
+  file / query as context, ADR 0029 —
+  + impact); `approve(ctx, user, id, *, verify=False, comment="")` →
   ProposalOutcome; `reject(ctx, user, id, comment)`, `withdraw(ctx, user, id)` →
   ProposalView; `verify_definition(ctx, user, id, version)` → DefinitionCard;
   `count_proposals(ctx, user, status=None)` → int (nav badge: no diffs, not audited).
@@ -218,9 +242,12 @@ modules or the core):
   trust.approval): `bootstrap_admin(ctx, name, kind)` → (User, "default" token shown once;
   only while no users exist), `create_user(ctx, user, name, role, kind, *,
   issue_token=True)` → (User, token | None: a "default" token only for a human caller with
-  issue_token), `list_users` → UserView (tokens' metadata), `update_user(ctx, user, name,
-  *, role=None, active=None)` / `set_role` / `set_active` → UserView (last active admin
-  can't be demoted or deactivated), `me` → MeCard; roles: `list_roles`, `create_role`,
+  issue_token), `list_users` → UserView (tokens' metadata, profile), `update_user(ctx,
+  user, name, *, role=None, active=None, display_name=KEEP, email=KEEP)` / `set_role` /
+  `set_active` → UserView (last active admin can't be demoted or deactivated),
+  `update_profile(ctx, user, name=None, *, display_name=KEEP, email=KEEP)` → UserView (ADR
+  0029: own profile no tool; another's manage_user + can_manage_user; None / "" clears;
+  domain.users validates), `me` → MeCard (profile read from the store); roles: `list_roles`, `create_role`,
   `update_role` (admin role: Allowed and review_all fixed; shrinking allowed trims
   defaults), `delete_role` (custom, unused); tokens: `list_tokens(ctx, user, name=None)`,
   `create_token(ctx, user, owner=None, *, name, expires_at, tool_mode, include, exclude)`
@@ -233,7 +260,8 @@ modules or the core):
   clears) → TeamSettings (mode, default_connection as stored, effective_default_connection,
   issues).
 - `audit_log.py` — `list_audit(ctx, user, *, limit=100, actor=None, kind=None,
-  definition_id=None, since=None) -> AuditPage` (limit 1..1000, exact `has_more`).
+  definition_id=None, since=None) -> AuditPage` (limit 1..1000, exact `has_more`;
+  `actors` for the page's events: display name and kind, email only with list_users).
 - `library_io.py` — export/import the library as YAML files (git optional, ADR 0003) via
   files/library.py (composed definitions included; legacy recipe files imported as
   composed definitions): `export_library(ctx, user, directory, *, prune=False)` → written paths;
@@ -252,11 +280,20 @@ the admin role. "Audit" is the AuditKind recorded (with `extra.op` where one kin
 several calls) and whether a failed write fails the call (closed) or is only logged
 (best effort).
 
+What is logged (ADR 0008 addendum, ADR 0029; `_audit.should_log`): every call through MCP
+(reads included), every run and every change from any surface, and every refused or failed
+call from any surface. A **read** (marked below; `_audit.READ_USE_CASES`, the one
+classification — runs `RUN_USE_CASES`, changes `WRITE_USE_CASES`, `UNAUDITED_USE_CASES`;
+a test fails when a use-case is unclassified) that succeeds through the HTTP API (the GUI)
+or the CLI is not written. The adapter sets the surface: `mcp/server.py` wraps each tool
+call in `_audit.surface("mcp")`, `cli/_common.context()` uses `"cli"`, the default is
+`"api"`.
+
 | Use-case | Tool (`auth.require` / trust.approval) | AuditKind (`extra.op`) | Audit write |
 |---|---|---|---|
-| search | search | search | best effort |
-| get_definition, definition_history, search_document, definition_references | get_definition | get_definition (op) | best effort |
-| parse_query | parse_query (a build tool) | parse_query (SQL as SHA-256 only) | best effort |
+| search | search | search | **read**: MCP only; best effort |
+| get_definition, definition_history, search_document, definition_references | get_definition | get_definition (op) | **read**: MCP only; best effort |
+| parse_query | parse_query (a build tool) | parse_query (SQL as SHA-256 only) | **read**: MCP only; best effort |
 | compile_and_run | compile_and_run; a final SELECT that reads raw tables (or table functions) also check_and_run (exploratory SQL) — the caller's `select` and the stored final SELECT of any composed definition used, verified or not, nested too (`_compose.require_exploratory`, `Compiled.reads_raw`) | compile_and_run | closed: written before rows return |
 | check_and_run | check_and_run | check_and_run | closed: written before rows return |
 | revalidate(ids) / revalidate() | compile_and_run / review_proposal with review_all (whole library) | revalidate | closed |
@@ -264,28 +301,29 @@ several calls) and whether a failed write fails the call (closed) or is only log
 | revise_definition, rename_definition | revise_definition; owner rule | propose (op; a rename also lists `old@v` and `new@v` and `extra.renamed_from/renamed_to`) | closed |
 | propose_join (add / annotate) | propose_join | propose (op, `extra.action`) | closed |
 | import_library | propose_definition | propose (op) | closed |
-| list_proposals, get_proposal | list_proposals | review (op) | best effort |
-| list_joins, describe_tables | the tool of the same name (pending proposals on edges only with list_proposals) | get_definition (op) | best effort |
-| list_library | search; proposal rows/badges/statuses only with list_proposals; `needs_my_review` needs review_proposal (membership; four-eyes per row via can_approve) | search (op=list_library) | best effort |
+| list_proposals, get_proposal | list_proposals | review (op) | **read**: MCP only; best effort |
+| list_joins, describe_tables | the tool of the same name (pending proposals on edges only with list_proposals) | get_definition (op) | **read**: MCP only; best effort |
+| list_library | search; proposal rows/badges/statuses only with list_proposals; `needs_my_review` needs review_proposal (membership; four-eyes per row via can_approve); `waiting` needs list_proposals + review_proposal; unknown `sort` → PolicyError | search (op=list_library, `sort`) | **read**: MCP only; best effort |
 | count_proposals | list_proposals | none (cheap badge poll) | — |
 | approve, reject | review_proposal on target (review_all, or the definition's owner; joins need review_all; a VERIFIED target — or a join a person confirmed — needs a human or an admin agent); four-eyes (human admins exempt, agents never); approve(verify=True) also verify (never for joins or renames) | review (op) | closed |
 | (open_context) schema-3 migration report | — (system, actor `cteforge`) | admin (op=migrate_adr_0026) | closed (opening fails, the note stays) |
 | withdraw | the build tool of the proposal's kind, and the proposal's author | review (op) | closed |
 | verify_definition | verify (humans whose role allows it; agents only with the admin role; owners may not); four-eyes over every author since the last logic change | review (op) | closed |
-| list_audit | view_audit; then bad `kind` / naive `since` → PolicyError | admin (op=list_audit) | best effort |
-| export_library | get_definition | admin (op) | closed |
+| list_audit | view_audit; then bad `kind` / naive `since` → PolicyError; `actors[].email` only with list_users | admin (op=list_audit) | **read**: MCP only; best effort |
+| export_library | get_definition | admin (op) | **read**: MCP only (closed there) |
 | bootstrap_admin | none; only while no users exist | admin (op; token id + prefix) | closed |
 | create_user | manage_user; `can_grant_role` (agents never grant admin); token only to a human caller | admin (op; token id + prefix) | closed |
-| list_users, list_roles | list_users | admin (op) | best effort |
-| update_user, set_role, set_active | manage_user; `can_manage_user` (agents never touch an admin user), `can_grant_role`; last active admin guard | admin (op) | closed |
+| list_users, list_roles | list_users | admin (op) | **read**: MCP only; best effort |
+| update_user, set_role, set_active | manage_user; `can_manage_user` (agents never touch an admin user), `can_grant_role`; last active admin guard | admin (op; `profile` = changed profile fields) | closed |
+| update_profile (ADR 0029) | own: none; another user's: manage_user + `can_manage_user` | admin (op=update_profile; `fields` given, `changed`) | closed |
 | create_role, update_role, delete_role | manage_role; `can_edit_role` (agents never the admin role) | admin (op) | closed |
 | me | none (the caller's own access) | none | — |
-| list_tokens | own: none; another user's: list_users | admin (op=list_tokens) | best effort |
+| list_tokens | own: none; another user's: list_users | admin (op=list_tokens) | **read**: MCP only; best effort |
 | create_token | never an agent caller; own: none, but a token-authenticated caller only within its own tools, expiry (none/later refused) and mode (`only` never mints `follow_role`), and the new token gets `parent_token_id`; another user's: manage_user (root-equivalent for humans) | admin (op; token id + prefix, never the value) | closed |
 | revoke_token | own: none; another user's: manage_user + `can_manage_user`; revokes every descendant too | admin (op) | closed |
 | set_token_tools | own: none (within the calling token's tools; `only` never switches to `follow_role`); another user's: manage_user + `can_manage_user` | admin (op) | closed |
 | MCP call to a hidden tool (`auth.refuse_tool`) | — (refused) | admin (op=tool_refused, rejected) | best effort |
-| get_settings, set_settings, set_default_connection | manage_settings | admin (op) | closed (get: best effort) |
+| get_settings, set_settings, set_default_connection | manage_settings | admin (op) | closed (get: **read**, MCP only; best effort) |
 | rebuild_search_index | manage_settings; meaning search off → PolicyError | admin (op=rebuild_search_index) | closed |
 
 Outcome rule (`_audit.failure_outcome`, applied by `_audit.audit_failures`): OK on success;
@@ -293,7 +331,8 @@ REJECTED for PermissionDeniedError, PolicyError, StaleVersionError and for refus
 as outcomes (trust/strict mode, not read-only; check_and_run also counts SQL that does not
 parse as refused); ERROR for any other failure (class name only). Never stored: SQL text
 (SHA-256 only), result rows, tokens or token hashes (ids and 12-char prefixes only),
-credentials.
+credentials. Events of a token-authenticated caller carry its `token_id` and 12-char
+`token_prefix` in `extra` (ADR 0029).
 
 Every use-case: takes `ctx` and the acting `user` first; checks permissions
 (`auth.require`) inside `_audit.audit_failures`; records an audit event on success; raises

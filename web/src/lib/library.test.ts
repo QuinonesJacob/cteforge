@@ -1,5 +1,17 @@
 import { describe, expect, it } from "vitest";
-import { filtersFromParams, isFiltered, libraryQuery, paramsFromFilters, pendingLabel, rowHref, toggle } from "./library";
+import {
+  REVIEW_QUEUE_HREF,
+  clearedFilters,
+  filterPills,
+  filtersFromParams,
+  isFiltered,
+  libraryQuery,
+  paramsFromFilters,
+  pendingLabel,
+  proposalKindLabel,
+  rowHref,
+  toggle,
+} from "./library";
 
 describe("library filters", () => {
   it("defaults to pending + approved, hiding rejected and withdrawn", () => {
@@ -19,6 +31,7 @@ describe("library filters", () => {
       createdBy: ["agent"],
       verifiedBy: ["human"],
       needsMyReview: true,
+      sort: "relevance",
     });
     expect(libraryQuery(f)).toEqual({
       q: "rev",
@@ -58,5 +71,32 @@ describe("library filters", () => {
         latest_proposal: { id: "p1", kind: "new_definition", status: "pending", author: "a", author_kind: "agent", created_at: "", summary: "" },
       }),
     ).toBe("/review/p1");
+  });
+
+  it("sorts the review queue oldest first (ADR 0029)", () => {
+    const f = filtersFromParams(new URLSearchParams(REVIEW_QUEUE_HREF.slice(2)));
+    expect(f.needsMyReview).toBe(true);
+    expect(f.sort).toBe("oldest");
+    expect(libraryQuery(f)).toEqual({ needs_my_review: true, sort: "oldest" });
+    expect(paramsFromFilters(f).toString()).toBe("review=mine&sort=oldest");
+    expect(isFiltered(f)).toBe(true);
+  });
+
+  it("lists active filters as removable chips; clear all keeps the words", () => {
+    const f = filtersFromParams(new URLSearchParams("q=rev&trust=verified&approval=pending&review=mine&sort=oldest"));
+    const pills = filterPills(f);
+    expect(pills.map((p) => `${p.group}: ${p.label}`)).toEqual([
+      "Review: Needs my review",
+      "Trust: Verified",
+      "Approval: Pending",
+      "Sort: Oldest first",
+    ]);
+    expect(pills[1]?.without.trust).toEqual([]);
+    expect(filterPills(filtersFromParams(new URLSearchParams()))).toEqual([]);
+    expect(filterPills(filtersFromParams(new URLSearchParams("approval=")))[0]?.label).toBe("Any");
+    const cleared = clearedFilters(f);
+    expect(cleared.q).toBe("rev");
+    expect(isFiltered(cleared)).toBe(false);
+    expect(proposalKindLabel("revise_definition")).toBe("Change");
   });
 });

@@ -99,6 +99,7 @@ def authenticate(ctx: AppContext, token: str | None) -> User:
             "tools": tools,
             "review_all": review_all,
             "token_id": info.id,
+            "token_prefix": info.prefix,
             "token_expires_at": info.expires_at,
             "token_mode": info.tool_mode,
         }

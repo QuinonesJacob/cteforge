@@ -16,7 +16,9 @@ MCP server (ADR 0018, 0027, DESIGN §6). Thin adapter over services. Project roo
   `resolve_user`. HTTP is stateless (`stateless_http=True`), so contextvars the API sets
   per request reach `resolve_user`. `transport_security` = SDK Host/Origin checks (None =
   localhost-only; a non-localhost bind must pass its allowed hosts).
-  Tools run the service call in a worker thread (blocking I/O) with the caller's context.
+  Tools run the service call in a worker thread (blocking I/O) with the caller's context,
+  inside `services._audit.surface("mcp")` (ADR 0029: every MCP call is logged, reads
+  included; the same reads from the GUI / API / CLI are not).
   `CteforgeMCP` (FastMCP subclass) maps failures through `error_result`, overrides
   `list_tools` to show only the caller's tools (`MCP_TOOL_ACCESS` / `visible_tools` over
   `services.auth.user_tools`; no or failing caller → no tools) and `call_tool` to refuse a

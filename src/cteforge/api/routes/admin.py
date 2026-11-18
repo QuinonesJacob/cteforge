@@ -14,6 +14,7 @@ from cteforge.api.schemas import (
     CreateRoleRequest,
     CreateTokenRequest,
     CreateUserRequest,
+    ProfileRequest,
     SettingsRequest,
     TokenToolsRequest,
     UpdateRoleRequest,
@@ -37,6 +38,23 @@ router = APIRouter(tags=["admin"])
 
 @router.get("/me", response_model=MeCard)
 def me(ctx: Ctx, user: CurrentUser) -> MeCard:
+    return admin.me(ctx, user)
+
+
+def _given(body: ProfileRequest | UpdateUserRequest, field: str) -> str | None | admin.Keep:
+    """A profile field as sent (null clears), or KEEP when the body left it out."""
+    return getattr(body, field) if field in body.model_fields_set else admin.KEEP
+
+
+@router.put("/me/profile", response_model=MeCard)
+def update_my_profile(ctx: Ctx, user: CurrentUser, body: ProfileRequest) -> MeCard:
+    """Set one's own display name and/or email (ADR 0029)."""
+    admin.update_profile(
+        ctx,
+        user,
+        display_name=_given(body, "display_name"),
+        email=_given(body, "email"),
+    )
     return admin.me(ctx, user)
 
 
@@ -92,7 +110,15 @@ def create_user(ctx: Ctx, user: CurrentUser, body: CreateUserRequest) -> dict[st
 
 @router.patch("/users/{name}", response_model=UserView)
 def update_user(ctx: Ctx, user: CurrentUser, name: str, body: UpdateUserRequest) -> UserView:
-    return admin.update_user(ctx, user, name, role=body.role, active=body.active)
+    return admin.update_user(
+        ctx,
+        user,
+        name,
+        role=body.role,
+        active=body.active,
+        display_name=_given(body, "display_name"),
+        email=_given(body, "email"),
+    )
 
 
 @router.get("/users/{name}/tokens", response_model=list[TokenCard])

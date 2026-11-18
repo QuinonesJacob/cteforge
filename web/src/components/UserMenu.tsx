@@ -1,9 +1,17 @@
 import { useEffect, useRef, useState } from "react";
+import { Link } from "react-router-dom";
+import { initials, shownName } from "../lib/format";
+import { toolsOf } from "../lib/roles";
 import { useAuth } from "../state/AuthContext";
+import { Icon } from "./Icon";
+import { ThemeToggle } from "./ThemeToggle";
 
+/** The user menu (ADR 0029): name, email, role, Personal access tokens, Your tools (the
+ * token's effective tools), Theme, Sign out. */
 export function UserMenu() {
   const { user, authOff, signOut } = useAuth();
   const [open, setOpen] = useState(false);
+  const [showTools, setShowTools] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -21,6 +29,8 @@ export function UserMenu() {
   }, [open]);
 
   if (!user) return null;
+  const name = shownName(user);
+  const tools = toolsOf(user);
   return (
     <div className="user-menu" ref={ref}>
       <button
@@ -28,36 +38,78 @@ export function UserMenu() {
         className="user-btn"
         aria-haspopup="true"
         aria-expanded={open}
+        aria-label={`Your account: ${name}`}
         onClick={() => setOpen((o) => !o)}
       >
+        <span className="user-name">{name}</span>
         <span className="avatar" aria-hidden="true">
-          {user.name.slice(0, 1).toUpperCase()}
+          {initials(name)}
         </span>
-        <span className="user-name">{user.name}</span>
-        <span className="tag user-role">{user.role}</span>
+        <Icon name="chevron" size={14} strokeWidth={2.4} />
       </button>
       {open && (
         <div className="menu" role="group" aria-label="Account">
-          <p className="menu-head">
-            <strong>{user.name}</strong>
-            <span className="muted small">
-              {user.role} · {user.kind}
+          <div className="menu-head">
+            <span className="avatar avatar-lg" aria-hidden="true">
+              {initials(name)}
             </span>
-          </p>
-          {authOff ? (
-            <p className="muted small menu-note">Local mode: authentication is off on this server.</p>
-          ) : (
+            <div className="menu-who">
+              <strong>{name}</strong>
+              {user.display_name && <span className="muted small mono">{user.name}</span>}
+              {user.email && <span className="muted small">{user.email}</span>}
+            </div>
+            <span className="menu-role">
+              {user.role}
+              {user.kind === "agent" && " · agent"}
+            </span>
+          </div>
+          <div className="menu-section">
+            <Link to="/settings/tokens" className="menu-item" onClick={() => setOpen(false)}>
+              <Icon name="key" />
+              Personal access tokens
+            </Link>
             <button
               type="button"
-              className="btn btn-sm btn-block"
-              onClick={() => {
-                setOpen(false);
-                signOut();
-              }}
+              className="menu-item"
+              aria-expanded={showTools}
+              aria-controls="your-tools"
+              onClick={() => setShowTools((s) => !s)}
             >
-              Sign out
+              <Icon name="roles" />
+              Your tools
+              <span className="menu-meta">{tools.length}</span>
             </button>
-          )}
+            {showTools && (
+              <ul id="your-tools" className="menu-tools" aria-label="Your tools">
+                {tools.map((t) => (
+                  <li key={t} className="mono">
+                    {t}
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+          <div className="menu-section menu-row">
+            <span>Theme</span>
+            <ThemeToggle />
+          </div>
+          <div className="menu-section">
+            {authOff ? (
+              <p className="muted small menu-note">Local mode: authentication is off on this server.</p>
+            ) : (
+              <button
+                type="button"
+                className="menu-item"
+                onClick={() => {
+                  setOpen(false);
+                  signOut();
+                }}
+              >
+                <Icon name="signout" />
+                Sign out
+              </button>
+            )}
+          </div>
         </div>
       )}
     </div>

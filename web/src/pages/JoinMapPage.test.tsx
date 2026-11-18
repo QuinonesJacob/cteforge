@@ -20,7 +20,7 @@ const edge: JoinCard = {
   usage_count: 2,
   traps: ["fan-out: a deal has many invoices"],
   notes: "",
-  sources: ["realization_rate"],
+  sources: ["realization_rate", "booked"],
   trusted_sources: ["realization_rate"],
   evidence: {
     claimed: "one_to_many",
@@ -32,6 +32,12 @@ const edge: JoinCard = {
   known: true,
   confirmed: false,
   pending_proposals: ["p7"],
+  source_joins: [
+    { definition: "realization_rate", join_type: "left", location: "cte", scope: "monthly" },
+    { definition: "booked", join_type: "inner", location: "main", scope: null },
+  ],
+  source_states: { realization_rate: "verified", booked: "llm_annotated" },
+  source_titles: { realization_rate: "Realization rate", booked: "Booked vs collected" },
 };
 const added: JoinCard = {
   ...edge,
@@ -43,6 +49,9 @@ const added: JoinCard = {
   traps: [],
   sources: [],
   trusted_sources: [],
+  source_joins: [],
+  source_states: {},
+  source_titles: {},
   evidence: null,
   added_by: "bot",
   added_by_kind: "agent",
@@ -56,9 +65,9 @@ const outcome = {
   auto_applied: false,
 };
 
-function renderPage() {
+function renderPage(path = "/joins") {
   render(
-    <MemoryRouter>
+    <MemoryRouter initialEntries={[path]}>
       <ToastProvider>
         <AuthProvider>
           <JoinMapPage />
@@ -68,7 +77,7 @@ function renderPage() {
   );
 }
 
-describe("JoinMapPage (ADR 0026)", () => {
+describe("JoinMapPage (ADR 0026, 0029 list view)", () => {
   it("lists edges with sources, known/confirmed, evidence and pending proposals", async () => {
     mockApi({
       "GET /me": () => ({ body: { name: "vic", role: "viewer", kind: "human" } }),
@@ -87,24 +96,58 @@ describe("JoinMapPage (ADR 0026)", () => {
       }),
     });
     renderPage();
-    const proposed = await screen.findByRole("region", { name: "Proposed joins" });
-    expect(within(proposed).getByRole("link", { name: "deals ↔ invoices" })).toHaveAttribute("href", "/review/p9");
-    expect(within(proposed).getByText(/by bot \(agent\)/)).toBeInTheDocument();
-    const row = (await screen.findByText("fan-out: a deal has many invoices")).closest("tr")!;
-    expect(within(row).getByRole("link", { name: "realization_rate" })).toHaveAttribute("href", "/definitions/realization_rate");
-    expect(within(row).getByText("known")).toBeInTheDocument();
-    expect(within(row).getAllByText("one to many").length).toBeGreaterThan(0);
-    expect(within(row).getByRole("link", { name: "pending change" })).toHaveAttribute("href", "/review/p7");
-    expect(within(row).getByText(/invoices: 14 rows, 9 distinct keys \(many\)/)).toBeInTheDocument();
-    const other = screen.getByText("accounts", { exact: false, selector: "td" }).closest("tr")!;
-    expect(within(other).getByText("not known")).toBeInTheDocument();
-    expect(within(other).getByText(/added by bot \(agent\)/)).toBeInTheDocument();
-    // A viewer can't propose: no forms.
+    // one_to_many: the many side (invoices) comes first.
+    const row = (await screen.findByRole("button", { name: "invoices" })).closest("tr")!;
+    expect(within(row).getByText("deals")).toBeInTheDocument();
+    expect(within(row).getByText("deal_id = deal_id")).toBeInTheDocument();
+    expect(within(row).getByText("LEFT 1")).toBeInTheDocument();
+    expect(within(row).getByText("INNER 1")).toBeInTheDocument();
+    expect(within(row).getByText("2 variants")).toBeInTheDocument();
+    expect(within(row).getByRole("img", { name: "1 verified, 1 LLM-annotated" })).toBeInTheDocument();
+    expect(within(row).getByText("Known")).toBeInTheDocument();
+    expect(within(row).getByRole("link", { name: "Change pending" })).toHaveAttribute("href", "/review/p7");
+    // Unknown relationship: plain left / right.
+    const other = (await screen.findByRole("button", { name: "accounts" })).closest("tr")!;
+    expect(within(other).getByText("Not known")).toBeInTheDocument();
+    expect(within(other).getByText("left")).toBeInTheDocument();
+    // A pending addition is a faded "Proposed" row linking to its proposal.
+    const proposed = screen.getByRole("link", { name: "Proposed" });
+    expect(proposed).toHaveAttribute("href", "/review/p9");
+    expect(proposed.closest("tr")).toHaveTextContent(/by bot \(agent\)/);
+
+    // The row's detail: each source with its join type and location, evidence, traps.
+    await userEvent.click(within(row).getByRole("button", { name: "invoices" }));
+    const detail = document.getElementById(`join-detail-${edge.id}`)!;
+    expect(within(detail).getByRole("link", { name: "Realization rate" })).toHaveAttribute("href", "/definitions/realization_rate");
+    expect(within(detail).getByText(/in CTE monthly/)).toBeInTheDocument();
+    expect(within(detail).getByText(/in main query/)).toBeInTheDocument();
+    expect(within(detail).getByText("agent only")).toBeInTheDocument(); // booked is not trusted
+    expect(within(detail).getByText(/invoices: 14 rows, 9 distinct keys \(many\)/)).toBeInTheDocument();
+    expect(within(detail).getByText("fan-out: a deal has many invoices")).toBeInTheDocument();
+    // A viewer can't propose: no forms, and nobody adds joins here (ADR 0029).
     expect(screen.queryByRole("button", { name: "Add a join" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /Annotate/ })).not.toBeInTheDocument();
+    // No "known only" filter (ADR 0029); "Variants first" stays.
+    expect(screen.queryByRole("checkbox", { name: /Known/ })).not.toBeInTheDocument();
+    expect(screen.getByRole("checkbox", { name: "Variants first" })).toBeInTheDocument();
   });
 
-  it("proposes an annotation and a new edge", async () => {
+  it("searches without a round trip and filters by definition", async () => {
+    const user = userEvent.setup();
+    const api = mockApi({
+      "GET /me": () => ({ body: { name: "vic", role: "viewer", kind: "human", tools: ["list_joins"] } }),
+      "GET /joins": () => ({ body: [edge, added] }),
+    });
+    renderPage("/joins?definition=realization_rate");
+    expect(await screen.findByText("Definition:")).toBeInTheDocument();
+    expect(api.calls.find((c) => c.path === "/joins")).toBeDefined();
+    expect(api.fn.mock.calls.map((c) => String(c[0])).find((u) => u.includes("/joins"))).toContain("definition=realization_rate");
+    await user.type(screen.getByLabelText("Search joins"), "booked");
+    expect(screen.getByText(/1 of 2 joins match/)).toBeInTheDocument();
+    expect((await screen.findByRole("button", { name: "accounts" })).closest("tr")).toHaveClass("row-faded");
+  });
+
+  it("proposes an annotation from a row's detail", async () => {
     const user = userEvent.setup();
     const api = mockApi({
       "GET /me": () => ({ body: { name: "ann", role: "contributor", kind: "human" } }),
@@ -114,6 +157,7 @@ describe("JoinMapPage (ADR 0026)", () => {
       "GET /proposals": () => ({ body: [] }),
     });
     renderPage();
+    await user.click(await screen.findByRole("button", { name: "invoices" }));
     await user.click(await screen.findByRole("button", { name: `Annotate ${edge.id}` }));
     const form = screen.getByRole("form", { name: `Annotate ${edge.id}` });
     expect(within(form).getByRole("button", { name: "Propose annotation" })).toBeDisabled();
@@ -127,24 +171,6 @@ describe("JoinMapPage (ADR 0026)", () => {
       summary: "",
     });
     expect(await screen.findByText(/Proposed — waiting for review/)).toBeInTheDocument();
-
-    await user.click(screen.getByRole("button", { name: "Add a join" }));
-    const add = screen.getByRole("form", { name: "Add a join" });
-    await user.click(within(add).getByRole("button", { name: "Propose join" }));
-    expect(within(add).getByRole("alert")).toHaveTextContent("Name both tables.");
-    await user.type(within(add).getByLabelText("Left table"), "accounts");
-    await user.type(within(add).getByLabelText("Right table"), "regions");
-    await user.type(within(add).getByLabelText("Left column 1"), "region");
-    await user.type(within(add).getByLabelText("Right column 1"), "region");
-    await user.click(within(add).getByRole("button", { name: "Propose join" }));
-    await waitFor(() => expect(api.calls.filter((c) => c.method === "POST")).toHaveLength(2));
-    expect(api.calls.filter((c) => c.method === "POST")[1]?.body).toEqual({
-      action: "add",
-      left_table: "accounts",
-      right_table: "regions",
-      keys: [{ left: "region", right: "region" }],
-      join_type: "inner",
-      summary: "",
-    });
+    expect(screen.queryByRole("button", { name: "Add a join" })).not.toBeInTheDocument();
   });
 });

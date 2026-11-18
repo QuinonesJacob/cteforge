@@ -1,7 +1,9 @@
-import { render, screen, within } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { DefinitionCard } from "../api/types";
+import { AuthProvider } from "../state/AuthContext";
+import { mockApi } from "../test/fetchMock";
 import { DefinitionOverview } from "./DefinitionOverview";
 
 const composed: DefinitionCard = {
@@ -52,14 +54,23 @@ const composed: DefinitionCard = {
   ],
 };
 
-describe("DefinitionOverview (ADR 0026)", () => {
-  it("shows a composed definition's parts, fixed/open variables, compiled SQL, joins to and used by", () => {
-    render(
-      <MemoryRouter>
-        <DefinitionOverview d={composed} />
-      </MemoryRouter>,
-    );
-    const parts = screen.getByRole("heading", { name: "Parts" }).closest("section")!;
+function renderOverview(d: DefinitionCard) {
+  mockApi({ "GET /me": () => ({ body: { name: "ann", role: "admin", kind: "human", display_name: "Ann Lee" } }) });
+  render(
+    <MemoryRouter>
+      <AuthProvider>
+        <DefinitionOverview d={d} />
+      </AuthProvider>
+    </MemoryRouter>,
+  );
+}
+
+afterEach(() => vi.unstubAllGlobals());
+
+describe("DefinitionOverview (ADR 0026, 0029)", () => {
+  it("shows a composed definition's parts, fixed/open variables, compiled SQL, joins and used by", async () => {
+    renderOverview(composed);
+    const parts = (await screen.findByRole("heading", { name: "Parts" })).closest("section")!;
     expect(within(parts).getByRole("link", { name: "realization_rate" })).toHaveAttribute("href", "/definitions/realization_rate?version=3");
     expect(within(parts).getByText("latest (v3)")).toBeInTheDocument();
     expect(within(parts).getByText("pinned v1")).toBeInTheDocument();
@@ -67,21 +78,42 @@ describe("DefinitionOverview (ADR 0026)", () => {
     expect(screen.getByText("bc.min_booked")).toBeInTheDocument();
     expect(screen.getAllByText("rr.period").length).toBeGreaterThan(0);
     expect(screen.getByRole("heading", { name: "Compiled SQL" })).toBeInTheDocument();
-    expect(screen.queryByRole("heading", { name: "SQL template" })).not.toBeInTheDocument();
-    const joins = screen.getByRole("region", { name: "Joins of realization_with_booked" });
+    expect(screen.queryByText(/Trusted SQL ·/)).not.toBeInTheDocument();
+    const joins = screen.getByRole("list", { name: "Joins of realization_with_booked" });
     expect(within(joins).getByText("confirmed")).toBeInTheDocument();
-    const usedBy = screen.getByRole("region", { name: "Used by" });
-    expect(within(usedBy).getByRole("link", { name: "big_combo" })).toHaveAttribute("href", "/definitions/big_combo");
+    expect(screen.getByRole("link", { name: "See in Join map" })).toHaveAttribute("href", "/joins?definition=realization_with_booked");
+    expect(screen.getByRole("link", { name: "big_combo" })).toHaveAttribute("href", "/definitions/big_combo");
   });
 
-  it("shows a SQL definition's template", () => {
-    render(
-      <MemoryRouter>
-        <DefinitionOverview d={{ ...composed, composed: false, composition: null, joins: [], used_by: [] }} />
-      </MemoryRouter>,
-    );
-    expect(screen.getByRole("heading", { name: "SQL template" })).toBeInTheDocument();
+  it("shows use when / don't use when, variables with their original value, fixed ones marked, and the trusted SQL", async () => {
+    renderOverview({
+      ...composed,
+      composed: false,
+      composition: null,
+      joins: [],
+      used_by: [],
+      owner: "ann",
+      use_when: "- Monthly reporting\n- Comparing regions",
+      dont_use_when: "Daily numbers",
+      variables: [
+        { name: "period", type: "date_range", role: "changeable", input_format: "{start,end}", description: "", original_value: { start: "2026-01-01", end: "2026-04-01" }, allowed: null },
+        { name: "status", type: "text", role: "fixed", input_format: "text", description: "", original_value: "posted" },
+        { name: "regions", type: "text_list", role: "changeable", input_format: "[..]", description: "", original_value: ["NA"], allowed: ["NA", "EMEA"] },
+      ],
+    });
+    expect(await screen.findByText("Monthly reporting")).toBeInTheDocument();
+    expect(screen.getByText("Comparing regions")).toBeInTheDocument();
+    expect(screen.getByText("Daily numbers")).toBeInTheDocument();
+    const vars = screen.getByRole("region", { name: "Variables" });
+    expect(within(vars).getByRole("columnheader", { name: "Original value" })).toBeInTheDocument();
+    expect(within(vars).queryByRole("columnheader", { name: "Default" })).not.toBeInTheDocument();
+    expect(within(vars).getByText("2026-01-01 → 2026-04-01")).toBeInTheDocument();
+    expect(within(vars).getByText("fixed")).toBeInTheDocument();
+    expect(within(vars).getByText("list of text")).toBeInTheDocument();
+    expect(within(vars).getByText("NA, EMEA")).toBeInTheDocument();
+    expect(screen.getByText(/Trusted SQL · 1 line/)).toBeInTheDocument();
     expect(screen.getByText("No join-map edges touch its tables.")).toBeInTheDocument();
     expect(screen.getByText("No composed definitions use it.")).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByText("Ann Lee (ann)")).toBeInTheDocument());
   });
 });

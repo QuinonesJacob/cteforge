@@ -1,5 +1,5 @@
 import type { TokenCard } from "../api/types";
-import { formatDateTime } from "../lib/format";
+import { formatDateTime, shownName } from "../lib/format";
 import { toolSummary } from "../lib/tools";
 
 interface Props {
@@ -11,14 +11,23 @@ interface Props {
   onRevoke?: (token: TokenCard) => void;
   /** Display prefix of the token this browser signed in with ("this session"). */
   currentPrefix?: string | null;
+  /** Whose tokens (ADR 0029: display name, login name, email). */
+  owner?: { name: string; display_name?: string | null; email?: string | null };
 }
 
 /** Token metadata (ADR 0027): name, prefix, tools, last use, expiry, state. Never values. */
-export function TokenList({ tokens, label, busy = null, onRevoke, currentPrefix }: Props) {
+export function TokenList({ tokens, label, busy = null, onRevoke, currentPrefix, owner }: Props) {
   if (tokens.length === 0) return <p className="muted small">No tokens.</p>;
   return (
     <div className="table-wrap" tabIndex={0} role="region" aria-label={label}>
       <table>
+        {owner && (
+          <caption className="table-caption">
+            Owner: <strong>{shownName(owner)}</strong>
+            {owner.display_name && <span className="mono"> ({owner.name})</span>}
+            {owner.email && <span className="muted"> · {owner.email}</span>}
+          </caption>
+        )}
         <thead>
           <tr>
             <th scope="col">Name</th>

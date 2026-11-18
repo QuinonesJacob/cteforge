@@ -7,9 +7,10 @@
   cleared. Fail closed: if the event can't be written, opening fails and the note stays
   for the next open.
 - Re-mine the join map once per database version of the mining rules (setting
-  `join_map_version`, now 3): `sources` and `trusted_sources` of every edge (ADR 0026: a
-  mined edge is known only when a person stands behind a source definition) and the edges
-  of composed definitions.
+  `join_map_version`, now 4): `sources` and `trusted_sources` of every edge (ADR 0026: a
+  mined edge is known only when a person stands behind a source definition), the edges
+  of composed definitions, and `source_joins` (ADR 0029: each source's join type and
+  location).
 """
 
 from __future__ import annotations
@@ -21,8 +22,9 @@ from cteforge.services.context import AppContext
 
 JOIN_MAP_SETTING = "join_map_version"
 # 3: `trusted_sources` (ADR 0026 security review: mined edges are known only when a person
-# stands behind a source definition).
-JOIN_MAP_VERSION = "3"
+# stands behind a source definition). 4: `source_joins` (ADR 0029: per-source join type and
+# location: main query, CTE or subquery).
+JOIN_MAP_VERSION = "4"
 # The actor of events cteforge records on its own (no person or agent asked for them).
 SYSTEM_USER = User(name="cteforge", role="admin", kind=ActorKind.AGENT)
 

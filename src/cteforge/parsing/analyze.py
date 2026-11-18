@@ -433,6 +433,9 @@ class JoinInfo(BaseModel):
     right_base_table: str | None = None
     base_keys: list[tuple[str, str]] = []  # `keys` as base-table columns; [] unless both
     #                                        base tables are known and there are keys.
+    # The join sits in a derived table / subquery (or a nested WITH) inside its scope,
+    # not in the scope's own SELECT (ADR 0029: where a definition makes a join).
+    in_subquery: bool = False
 
 
 class CteInfo(BaseModel):
@@ -1922,7 +1925,20 @@ def _join_type(join: exp.Join, has_condition: bool) -> str:
     return "inner" if has_condition else "cross"
 
 
-def _join_info(join: exp.Join, scope: str, lin: _Lineage) -> JoinInfo | None:
+def _in_subquery(select: exp.Expression, root: exp.Expression) -> bool:
+    """Whether `select` is nested in a subquery / derived table / nested CTE under the
+    scope root (set operations of the scope's own query don't count)."""
+    node: exp.Expression | None = select
+    while node is not None and node is not root:
+        if isinstance(node, exp.Subquery | exp.CTE):
+            return True
+        node = node.parent
+    return False
+
+
+def _join_info(
+    join: exp.Join, scope: str, lin: _Lineage, root: exp.Expression | None = None
+) -> JoinInfo | None:
     select = join.parent
     sources = _sources(select, lin)
     right_key = _alias_key(join.this)
@@ -1952,6 +1968,7 @@ def _join_info(join: exp.Join, scope: str, lin: _Lineage) -> JoinInfo | None:
         left_base_table=left_base,
         right_base_table=right_base,
         base_keys=list(zip(left_cols, right_cols, strict=True)) if both else [],
+        in_subquery=root is not None and _in_subquery(select, root),
     )
 
 
@@ -1962,7 +1979,7 @@ def _joins(tree: exp.Expression, lin: _Lineage) -> list[JoinInfo]:
             if isinstance(node, exp.Join) and isinstance(node.parent, exp.Select):
                 if (node.kind or "").upper() == "ARRAY":  # ClickHouse ARRAY JOIN: no table
                     continue
-                info = _join_info(node, scope.name, lin)
+                info = _join_info(node, scope.name, lin, scope.root)
                 if info is not None:
                     joins.append(info)
     return joins

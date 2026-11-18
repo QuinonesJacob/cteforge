@@ -69,7 +69,14 @@ def test_mcp_tools_list_is_filtered_per_token_over_http(api) -> None:
     assert result["isError"] is True
     assert result["structuredContent"]["error"]["type"] == "PermissionDeniedError"
     event = api.ctx.audit.list_events(limit=1)[0]
-    assert event.actor == "alice" and event.extra == {"op": "tool_refused", "tool": "check_and_run"}
+    assert event.actor == "alice"
+    assert event.extra == {
+        "op": "tool_refused",
+        "tool": "check_and_run",
+        # The calling token (ADR 0029): id and display prefix only, never the value.
+        "token_id": made.json()["info"]["id"],
+        "token_prefix": narrow[:12],
+    }
     admin_tools = _result(_rpc(api.client, api.tokens["root"], "tools/list", {}))
     assert {"list_users", "manage_user", "manage_role"} <= {t["name"] for t in admin_tools["tools"]}
 

@@ -118,9 +118,13 @@ def test_join_map_of_an_earlier_rule_version_is_re_mined(tmp_path: Path) -> None
             trusted_sources=["bogus"],  # as the earlier rule would have counted it
         )
         ctx.store.upsert_join(old)
-        ctx.store.set_setting(_upgrade.JOIN_MAP_SETTING, "2")
+        ctx.store.set_setting(_upgrade.JOIN_MAP_SETTING, "3")  # before source_joins
     with open_context(AppConfig(db_url=url)) as ctx:
         edge = ctx.store.get_join(old.id)
         assert edge.sources == ["bogus"] and edge.trusted_sources == []
         assert not edge.is_known()
+        # ADR 0029: re-mined with where and how the source makes the join.
+        assert [(s.definition, s.join_type, s.location, s.scope) for s in edge.source_joins] == [
+            ("bogus", "inner", "main", None)
+        ]
         assert ctx.store.get_setting(_upgrade.JOIN_MAP_SETTING) == _upgrade.JOIN_MAP_VERSION

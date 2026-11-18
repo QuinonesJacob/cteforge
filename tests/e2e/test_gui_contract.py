@@ -1,7 +1,10 @@
 """GUI ↔ API contract: every call in web/src/api/endpoints.ts, with the body shapes the GUI
-sends (lib/importBuilder.ts, lib/variableForm.ts, lib/library.ts, lib/joins.ts, pages/*),
+sends (lib/importBuilder.ts, lib/library.ts, lib/joins.ts, lib/profile.ts, pages/*),
 against the real FastAPI app.
 Each response is checked for the fields web/src/api/types.ts declares and the GUI reads.
+
+The GUI does not run queries (ADR 0029): `POST /run` and `POST /check` stay for agents,
+scheduled jobs and the CLI and are covered by the API tests (tests/unit/api), not here.
 
 If this fails, either the API or the GUI changed a field: fix both together.
 """
@@ -36,6 +39,9 @@ ME = USER | {
     "token_id",
     "token_expires_at",
     "token_mode",
+    # ADR 0029: the user's own display name and email (user menu, My tokens).
+    "display_name",
+    "email",
 }
 TOOL_INFO = {"name", "group", "admin_only"}
 TOKEN_CARD = {
@@ -55,7 +61,7 @@ TOKEN_CARD = {
     "state",
     "parent_token_id",
 }
-USER_VIEW = USER | {"active", "tokens"}
+USER_VIEW = USER | {"active", "tokens", "display_name", "email"}
 ROLE_CARD = {"name", "description", "allowed", "defaults", "review_all", "builtin", "users"}
 TEAM_SETTINGS = {"mode", "default_connection", "effective_default_connection", "issues"}
 ISSUE = {"code", "severity", "message", "variable", "literal"}
@@ -152,7 +158,7 @@ PART_CARD = {
     "composed",
 }
 # GET /library (LibraryPage / LibraryRow / ProposalBrief).
-LIBRARY_PAGE = {"rows", "total", "pending_count", "proposals_visible"}
+LIBRARY_PAGE = {"rows", "total", "pending_count", "proposals_visible", "waiting"}
 LIBRARY_ROW = {
     "id",
     "title",
@@ -170,7 +176,21 @@ LIBRARY_ROW = {
     "pending",
     "needs_my_review",
 }
-PROPOSAL_BRIEF = {"id", "kind", "status", "author", "author_kind", "created_at", "summary"}
+PROPOSAL_BRIEF = {
+    "id",
+    "kind",
+    "status",
+    "author",
+    "author_kind",
+    "created_at",
+    "summary",
+    # ADR 0029: changed lines (pending proposals) and whether the caller may decide it.
+    "lines_added",
+    "lines_removed",
+    "needs_my_review",
+}
+# ADR 0029: the Library's "Waiting on you" panel.
+WAITING = PROPOSAL_BRIEF | {"target_id", "title"}
 PROPOSAL_REF = {
     "proposal_id",
     "kind",
@@ -203,7 +223,12 @@ JOIN_CARD = {
     "known",
     "confirmed",
     "pending_proposals",
+    # ADR 0029: per-source join type and location; the sources' states and titles.
+    "source_joins",
+    "source_states",
+    "source_titles",
 }
+JOIN_SOURCE = {"definition", "join_type", "location", "scope"}
 EVIDENCE = {"claimed", "observed", "left", "right", "consistent", "profile", "checked_at"}
 SIDE_COUNT = {"table", "keys", "rows", "distinct_keys"}
 TABLE_CARD = {"name", "found", "columns", "used_by", "joins", "units"}
@@ -241,28 +266,11 @@ PARSE_REPORT = {
     "schema_found",
     "issues",
 }
-RUN_OUTCOME = {
-    "sql",
-    "dialect",
-    "label",
-    "reasons",
-    "usable",
-    "issues",
-    "columns",
-    "rows",
-    "row_count",
-    "truncated",
-    "ran",
-    "compile_id",
-    "definitions",
-    "used",
-    "duration_ms",
-}
-USED = {"id", "version", "state", "verified_by", "verified_at"}
 PROPOSAL_VIEW = {
     "id",
     "kind",
     "target_id",
+    "title",
     "base_version",
     "payload",
     "checks",
@@ -280,7 +288,11 @@ PROPOSAL_VIEW = {
     "diff",
     "impact",
     "composition",
+    # ADR 0029: the query's diff and the described fields that change (ProposalPage).
+    "sql_diff",
+    "metadata_changes",
 }
+METADATA_CHANGE = {"field", "before", "after"}
 PROPOSAL_OUTCOME = {"proposal", "definition", "issues", "auto_applied"}
 AUDIT_EVENT = {
     "id",
@@ -309,8 +321,10 @@ LABELS = {
     "exploratory",
 }
 
+AUDIT_PAGE = {"events", "limit", "has_more", "actors"}
+AUDIT_ACTOR = {"display_name", "email", "kind"}
+
 BASE_URL = "http://127.0.0.1:8765"
-Q3_APAC = {"period": {"start": "2025-07-01", "end": "2025-10-01"}, "regions": ["APAC"]}
 
 
 def fields(obj: Any, expected: set[str], what: str) -> dict[str, Any]:
@@ -391,17 +405,6 @@ def composed_definition(gui: Gui, user: str = "alice", id: str = "rr_apac") -> d
     )
 
 
-def gui_run(def_id: str, version: int, values: dict[str, Any], *, run: bool) -> dict[str, Any]:
-    """lib/variableForm.ts buildRunRequest (alias = definition id)."""
-    return {
-        "uses": {def_id: {"id": def_id, "version": version}},
-        "values": {def_id: values},
-        "run": run,
-        "limit": 100,
-        "profile": "demo",
-    }
-
-
 class Gui:
     """Calls the API exactly as web/src/api/client.ts does (bearer token, JSON, query
     params with empty values dropped)."""
@@ -470,9 +473,30 @@ def test_identity_profiles_and_sign_in(gui: Gui) -> None:
         gui.call("GET", "/profiles", "alice"), {"name", "dialect", "default"}, "Profile"
     )
     assert profiles == [{"name": "demo", "dialect": "duckdb", "default": True}]
+    assert me["display_name"] is None and me["email"] is None
+
+    # ADR 0029: Settings → My tokens → Your profile: PUT /me/profile (lib/profile.ts sends only
+    # the changed fields; "" clears one) → the MeCard, which GET /me then returns.
+    updated = fields(
+        gui.call(
+            "PUT",
+            "/me/profile",
+            "alice",
+            body={"display_name": "Alice Ng", "email": "alice@example.com"},
+        ),
+        ME,
+        "User (MeCard)",
+    )
+    assert (updated["display_name"], updated["email"]) == ("Alice Ng", "alice@example.com")
+    cleared = gui.call("PUT", "/me/profile", "alice", body={"email": ""})
+    assert (cleared["display_name"], cleared["email"]) == ("Alice Ng", None)
+    assert gui.call("GET", "/me", "alice")["display_name"] == "Alice Ng"
+    # A bad email: an ApiError the GUI shows in a toast.
+    bad = gui.call("PUT", "/me/profile", "alice", body={"email": "not-an-email"}, status=409)
+    fields(bad["error"], {"type", "message", "issues"}, "ApiError body")
 
 
-def test_import_library_definition_and_run(gui: Gui, example) -> None:
+def test_import_library_and_definition(gui: Gui, example) -> None:
     sql, ann = example("realization_rate")
 
     # Import page, step 1: POST /parse {sql, dialect, profile}.
@@ -538,34 +562,8 @@ def test_import_library_definition_and_run(gui: Gui, example) -> None:
     )
     assert [h["version"] for h in history] == [1]
 
-    # RunPanel: compile only, then run (values only for changeable variables).
-    compiled = fields(
-        gui.call("POST", "/run", "alice", body=gui_run("realization_rate", 1, Q3_APAC, run=False)),
-        RUN_OUTCOME,
-        "RunOutcome",
-    )
-    assert compiled["ran"] is False and compiled["rows"] == []
-    ran = fields(
-        gui.call("POST", "/run", "alice", body=gui_run("realization_rate", 1, Q3_APAC, run=True)),
-        RUN_OUTCOME,
-        "RunOutcome",
-    )
-    assert ran["ran"] and ran["row_count"] == 3 and ran["label"] in LABELS
-    assert ran["columns"] == ["month", "region", "realization_rate"]
-    used = each(ran["used"], USED, "UsedDefinition")
-    assert used[0]["id"] == "realization_rate" and used[0]["version"] == 1
-
-    # A bad value: ApiError with structured issues for IssueList.
-    bad = gui.call(
-        "POST",
-        "/run",
-        "alice",
-        body=gui_run("realization_rate", 1, {"period": {"start": "2025-Q3"}}, run=True),
-        status=422,
-    )
-    error = fields(bad["error"], {"type", "message", "issues"}, "ApiError body")
-    assert error["type"] == "VariableValueError"
-    each(error["issues"], {"code", "severity", "message"}, "Issue")
+    # ADR 0029: no Run tab. The overview reads each variable's original value (no defaults).
+    assert variables["period"]["original_value"] == {"start": "2026-01-01", "end": "2026-04-01"}
 
 
 def test_revise_from_the_definition_page(gui: Gui, example) -> None:
@@ -592,6 +590,18 @@ def test_revise_from_the_definition_page(gui: Gui, example) -> None:
     assert edited["auto_applied"] is True
     card = fields(edited["definition"], DEFINITION_CARD, "DefinitionCard")
     assert card["version"] == 2 and card["use_when"] == "cash questions"
+    # ProposalPage (ADR 0029): the query does not change (""); the described fields do,
+    # without version / state noise.
+    edit_view = fields(
+        gui.call(
+            "GET", f"/proposals/{edited['proposal']['id']}", "alice", query={"full_diff": True}
+        ),
+        PROPOSAL_VIEW,
+        "ProposalView",
+    )
+    assert edit_view["sql_diff"] == ""
+    changes = each(edit_view["metadata_changes"], METADATA_CHANGE, "MetadataChange")
+    assert {c["field"] for c in changes} == {"use_when", "keywords"}
 
     # Import page in revise mode: GET /definitions/{id}?include_source=true …
     source = fields(
@@ -630,6 +640,8 @@ def test_revise_from_the_definition_page(gui: Gui, example) -> None:
         "ProposalOutcome",
     )
     assert revised["issues"] == [] and revised["definition"]["version"] == 3
+    # The same query back: no query change, no described-field change.
+    assert revised["proposal"]["sql_diff"] == "" and revised["proposal"]["metadata_changes"] == []
     # A stale base version comes back as a structured 409 the page shows.
     stale = gui.call(
         "POST",
@@ -746,19 +758,6 @@ def test_composed_definition_and_join_map(gui: Gui, example) -> None:
     assert composition["fixed"] == {"rr": {"regions": ["APAC"]}}
     names = [fields(v, VARIABLE_CARD, "VariableCard")["name"] for v in card["variables"]]
     assert "rr.period" in names and "rr.regions" not in names
-    # Its Run tab: values[alias]["<part alias>.<var>"] (lib/variableForm.ts).
-    ran = fields(
-        gui.call(
-            "POST",
-            "/run",
-            "alice",
-            body=gui_run("rr_apac", 1, {"rr.period": Q3_APAC["period"]}, run=True),
-        ),
-        RUN_OUTCOME,
-        "RunOutcome",
-    )
-    assert ran["ran"] and [r[0] for r in ran["rows"]] == ["APAC"]
-    assert [u["id"] for u in ran["used"]] == ["rr_apac", "realization_rate"]
     # The part's page: "used by" and "joins to".
     part_card = gui.call("GET", "/definitions/realization_rate", "alice")
     (used,) = each(part_card["used_by"], USED_BY_REF, "UsedByReference")
@@ -774,6 +773,17 @@ def test_composed_definition_and_join_map(gui: Gui, example) -> None:
     assert joins and all(fields(k, {"left", "right"}, "JoinKey") for j in joins for k in j["keys"])
     edge = next(j for j in joins if j["id"] == "deals__invoices__deal_id=deal_id")
     assert edge["sources"] == ["realization_rate", "rr_apac"] and edge["known"] is True
+    # ADR 0029 list view: where each source joins (lib/joins.ts typeVariants, locationLabel)
+    # and the sources' states (trust bar) and titles (row detail).
+    sources = each(edge["source_joins"], JOIN_SOURCE, "JoinSource")
+    assert {s["definition"] for s in sources} == {"realization_rate", "rr_apac"}
+    assert all(s["location"] in {"main", "cte", "subquery"} for s in sources)
+    assert all(s["join_type"] in {"inner", "left", "right", "full"} for s in sources)
+    assert set(edge["source_states"]) == {"realization_rate", "rr_apac"}
+    assert set(edge["source_states"].values()) <= STATES
+    assert edge["source_titles"]["rr_apac"] == "RR APAC by region"
+    by_definition = gui.call("GET", "/joins", "alice", query={"definition": "rr_apac"})
+    assert edge["id"] in {j["id"] for j in by_definition}
     by_table = gui.call("GET", "/joins", "alice", query={"table": edge["left_table"]})
     assert edge["id"] in {j["id"] for j in by_table}
     # JoinAnnotateForm (lib/joins.ts annotateRequest): only what changed, by id.
@@ -801,7 +811,8 @@ def test_composed_definition_and_join_map(gui: Gui, example) -> None:
     fields(evidence["left"], SIDE_COUNT, "SideCount")
     after = next(j for j in gui.call("GET", "/joins", "alice") if j["id"] == edge["id"])
     assert after["notes"] == "partial payments" and after["evidence"]["consistent"] is True
-    # JoinAddForm (lib/joins.ts addRequest): a person's new edge.
+    # The GUI adds no joins (ADR 0029); an edge added through propose_join (MCP / API) is
+    # listed like any other.
     added = gui.call(
         "POST",
         "/proposals/joins",
@@ -864,7 +875,18 @@ def test_review_queue_four_eyes_verify_and_audit(gui: Gui, example) -> None:
     assert row["version"] is None and row["approval"] == "pending" and row["needs_my_review"]
     (brief,) = each(row["pending"], PROPOSAL_BRIEF, "ProposalBrief")
     assert brief["id"] == proposal_id and mine["pending_count"] == 1
+    assert brief["needs_my_review"] is True and brief["lines_added"] > 0
+    assert brief["lines_removed"] == 0
     assert gui.call("GET", "/library", "alice", query={"needs_my_review": True})["rows"] == []
+    # ADR 0029: "Waiting on you" (oldest first, every filter aside) and its link, the review
+    # queue sorted oldest first (lib/library.ts REVIEW_QUEUE_HREF → sort=oldest).
+    plain = gui.call("GET", "/library", "ann", query={"q": "no such words"})
+    (waiting,) = each(plain["waiting"], WAITING, "WaitingProposal")
+    assert (waiting["id"], waiting["target_id"]) == (proposal_id, "realization_rate")
+    assert waiting["title"] == row["title"] and waiting["lines_added"] == brief["lines_added"]
+    queue = gui.call("GET", "/library", "ann", query={"needs_my_review": True, "sort": "oldest"})
+    assert [r["id"] for r in queue["rows"]] == ["realization_rate"]
+    assert gui.call("GET", "/library", "alice")["waiting"] == []
     # Review page: list + detail (diff, impact, checks).
     listed = each(
         gui.call("GET", "/proposals", "ann", query={"status": "pending"}),
@@ -872,10 +894,22 @@ def test_review_queue_four_eyes_verify_and_audit(gui: Gui, example) -> None:
         "ProposalView",
     )
     assert [p["id"] for p in listed] == [proposal_id]
+    # ProposalPage asks for the full-context diff and collapses it itself (lib/diff.ts).
     detail = fields(
-        gui.call("GET", f"/proposals/{proposal_id}", "ann"), PROPOSAL_VIEW, "ProposalView"
+        gui.call("GET", f"/proposals/{proposal_id}", "ann", query={"full_diff": True}),
+        PROPOSAL_VIEW,
+        "ProposalView",
     )
     assert detail["kind"] == "new_definition" and "realization_rate" in detail["diff"]
+    assert detail["title"] == row["title"]
+    # ADR 0029: the query as written (one hunk with full_diff), all additions for a new
+    # definition; the Library's +/- counts are this diff's.
+    sql_lines = detail["sql_diff"].splitlines()
+    assert sql_lines[0] == "--- /dev/null" and detail["sql_diff"].count("\n@@") == 1
+    assert sum(ln.startswith("+") for ln in sql_lines[2:]) == brief["lines_added"]
+    assert "version:" not in detail["sql_diff"] and "$period" not in detail["sql_diff"]
+    titles = {c["field"]: c for c in each(detail["metadata_changes"], METADATA_CHANGE, "x")}
+    assert titles["title"]["before"] is None and titles["title"]["after"] == row["title"]
     assert isinstance(detail["impact"], list)
     each(detail["checks"], {"code", "severity", "message"}, "Issue")
 
@@ -948,12 +982,23 @@ def test_review_queue_four_eyes_verify_and_audit(gui: Gui, example) -> None:
             "ann",
             query={"actor": "", "kind": "review", "definition_id": "", "limit": 50},
         ),
-        {"events", "limit", "has_more"},
+        AUDIT_PAGE,
         "AuditPage",
     )
     events = each(page["events"], AUDIT_EVENT, "AuditEvent")
     assert page["limit"] == 50 and events and {e["kind"] for e in events} == {"review"}
     assert {e["outcome"] for e in events} <= {"ok", "error", "rejected"}
+    # ADR 0029 Log: the call name is kind + extra.op; a row shows the token's prefix (never
+    # the token) and the actors' profiles (email only for callers who may list users).
+    assert all(isinstance(e["extra"].get("op"), str) for e in events)
+    assert all(e["extra"]["token_prefix"].startswith("cfg_pat_") for e in events)
+    assert all(len(e["extra"]["token_prefix"]) == 12 for e in events)
+    actors = {name: fields(a, AUDIT_ACTOR, "AuditActor") for name, a in page["actors"].items()}
+    assert {e["actor"] for e in events} <= set(actors)
+    assert all(a["email"] is None for a in actors.values())  # ann may not list users
+    gui.call("PUT", "/me/profile", "alice", body={"email": "alice@example.com"})
+    as_root = gui.call("GET", "/audit", "root", query={"actor": "alice", "limit": 5})
+    assert as_root["actors"]["alice"]["email"] == "alice@example.com"
 
 
 def test_settings_users_and_tokens(gui: Gui) -> None:
@@ -999,6 +1044,21 @@ def test_settings_users_and_tokens(gui: Gui) -> None:
     revoked = gui.call("DELETE", f"/users/claude-agent/tokens/{info['id']}", "root")
     assert revoked["state"] == "revoked"
     gui.call("GET", "/me", "laptop", status=401)
+
+    # ADR 0029: UsersTable "Profile" → PATCH /users/{name} {display_name?, email?}.
+    profiled = fields(
+        gui.call(
+            "PATCH",
+            "/users/claude-agent",
+            "root",
+            body={"display_name": "Claude (agent)", "email": "agent@example.com"},
+        ),
+        USER_VIEW,
+        "UserView",
+    )
+    assert (profiled["display_name"], profiled["email"]) == ("Claude (agent)", "agent@example.com")
+    listed_users = {u["name"]: u for u in gui.call("GET", "/users", "root")}
+    assert listed_users["claude-agent"]["display_name"] == "Claude (agent)"
 
     # Role / active change: PATCH /users/{name} {role} | {active} → UserView.
     changed = fields(

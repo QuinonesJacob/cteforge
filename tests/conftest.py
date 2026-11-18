@@ -5,7 +5,7 @@ import importlib.util
 import math
 import os
 import re
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from pathlib import Path
 
 import pytest
@@ -114,6 +114,16 @@ class FakeEmbedder:
         self.load()
         self.calls.append((tuple(texts), query))
         return [self.vector(t) for t in texts]
+
+
+@pytest.fixture
+def mcp_surface() -> Iterator[None]:
+    """Calls in the test come through MCP, where reads are logged too (ADR 0029; outside
+    MCP a successful read is not written to the audit log)."""
+    from cteforge.services._audit import surface
+
+    with surface("mcp"):
+        yield
 
 
 @pytest.fixture

@@ -15,20 +15,18 @@ export function FilterGroup<T extends string>({
   return (
     <fieldset className="filter-group">
       <legend>{legend}</legend>
-      <div className="filter-options">
-        {options.map((o) => (
-          <label key={o.value} className="check small">
-            <input
-              type="checkbox"
-              name={name}
-              value={o.value}
-              checked={selected.includes(o.value)}
-              onChange={(e) => onChange(o.value, e.target.checked)}
-            />
-            <span>{o.label}</span>
-          </label>
-        ))}
-      </div>
+      {options.map((o) => (
+        <label key={o.value} className="check">
+          <input
+            type="checkbox"
+            name={name}
+            value={o.value}
+            checked={selected.includes(o.value)}
+            onChange={(e) => onChange(o.value, e.target.checked)}
+          />
+          <span>{o.label}</span>
+        </label>
+      ))}
     </fieldset>
   );
 }

@@ -1,7 +1,7 @@
 // Trust labels and definition states → badge text, tone and explanation (DESIGN §8).
 import type { DefinitionState, ProposalStatus, Severity, TrustLabel } from "../api/types";
 
-export type Tone = "verified" | "built" | "llm" | "newlogic" | "exploratory" | "draft" | "neutral" | "danger";
+export type Tone = "verified" | "built" | "llm" | "newlogic" | "exploratory" | "draft" | "neutral" | "danger" | "pending";
 
 export interface BadgeInfo {
   text: string;
@@ -55,7 +55,7 @@ export function stateBadge(state: string | null | undefined): BadgeInfo {
 }
 
 const STATUS: Record<ProposalStatus, Tone> = {
-  pending: "newlogic",
+  pending: "pending",
   approved: "verified",
   rejected: "danger",
   withdrawn: "neutral",
@@ -69,4 +69,31 @@ const SEVERITY_ORDER: Record<Severity, number> = { error: 0, warning: 1, info: 2
 
 export function severityRank(severity: string): number {
   return SEVERITY_ORDER[severity as Severity] ?? 3;
+}
+
+/** The trust icon (ADR 0029: verified ✓, LLM-annotated ◐, draft ◌) for a definition state
+ * or a result's trust label. Built from verified parts gets an outlined check; raw SQL
+ * labels (new logic, exploratory) the dashed circle. */
+export type TrustIconKind = "verified" | "built" | "llm" | "draft";
+
+export function trustIconKind(value: string | null | undefined): TrustIconKind | null {
+  switch (value) {
+    case "verified":
+      return "verified";
+    case "built_from_verified_parts":
+      return "built";
+    case "llm_annotated":
+      return "llm";
+    case "draft":
+    case "new_logic_on_known_joins":
+    case "exploratory":
+      return "draft";
+    default:
+      return null;
+  }
+}
+
+/** Sort rank of a definition state, best first (verified, LLM-annotated, draft, none). */
+export function stateRank(state: string | null | undefined): number {
+  return state === "verified" ? 0 : state === "llm_annotated" ? 1 : state === "draft" ? 2 : 3;
 }

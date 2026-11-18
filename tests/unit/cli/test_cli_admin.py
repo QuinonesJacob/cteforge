@@ -205,3 +205,19 @@ def test_role_commands_and_deactivate(cli: Invoke):
     assert cli("role", "delete", "support_bot").exit_code == 0
     last = cli("user", "deactivate", "admin")
     assert last.exit_code == 1 and "last admin" in last.output
+
+
+def test_user_profile(cli: Invoke):
+    """ADR 0029: `user profile NAME --display-name --email`; "" clears."""
+    assert cli("user", "add", "admin", "--bootstrap").exit_code == 0
+    assert cli("user", "add", "bob", "--role", "viewer").exit_code == 0
+    done = cli("user", "profile", "bob", "--display-name", "Bob B", "--email", "bob@example.com")
+    assert done.exit_code == 0, done.output
+    assert "display name Bob B, email bob@example.com" in done.output
+    users = {u["name"]: u for u in json.loads(cli("user", "list", "--json").stdout)}
+    assert (users["bob"]["display_name"], users["bob"]["email"]) == ("Bob B", "bob@example.com")
+    cleared = cli("user", "profile", "bob", "--email", "")
+    assert cleared.exit_code == 0 and "email (none)" in cleared.output
+    bad = cli("user", "profile", "bob", "--email", "not-an-email")
+    assert bad.exit_code == 1 and "email" in bad.output
+    assert cli("user", "profile", "bob").exit_code == 2

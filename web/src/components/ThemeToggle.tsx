@@ -1,19 +1,29 @@
-import { useTheme } from "../state/ThemeContext";
+import { useTheme, type ThemeChoice } from "../state/ThemeContext";
+import { Icon, type IconName } from "./Icon";
 
-const LABEL = { system: "System", light: "Light", dark: "Dark" } as const;
-const ICON = { system: "◐", light: "☀", dark: "☾" } as const;
+const OPTIONS: { value: ThemeChoice; label: string; icon: IconName }[] = [
+  { value: "system", label: "System theme", icon: "auto" },
+  { value: "light", label: "Light theme", icon: "sun" },
+  { value: "dark", label: "Dark theme", icon: "moon" },
+];
 
+/** Theme: follow the system, light or dark (a segmented control, ADR 0029 user menu). */
 export function ThemeToggle() {
-  const { choice, cycle } = useTheme();
+  const { choice, setChoice } = useTheme();
   return (
-    <button
-      type="button"
-      className="icon-btn theme-toggle"
-      onClick={cycle}
-      aria-label={`Theme: ${LABEL[choice]}. Switch theme`}
-      title={`Theme: ${LABEL[choice]}`}
-    >
-      <span aria-hidden="true">{ICON[choice]}</span>
-    </button>
+    <div className="seg seg-icons" role="group" aria-label="Theme">
+      {OPTIONS.map((o) => (
+        <button
+          key={o.value}
+          type="button"
+          aria-label={o.label}
+          title={o.label}
+          aria-pressed={choice === o.value}
+          onClick={() => setChoice(o.value)}
+        >
+          <Icon name={o.icon} size={16} strokeWidth={2} />
+        </button>
+      ))}
+    </div>
   );
 }

@@ -351,4 +351,10 @@ def test_user_tools_and_refuse_tool_audit(ctx: AppContext) -> None:
     assert isinstance(error, PermissionDeniedError) and "manage_user" in str(error)
     [event] = ctx.audit.list_events(limit=1)
     assert event.actor == "bot" and event.outcome is AuditOutcome.REJECTED
-    assert event.extra == {"op": "tool_refused", "tool": "manage_user"}
+    assert event.extra == {
+        "op": "tool_refused",
+        "tool": "manage_user",
+        "token_id": bot.token_id,  # the calling token (ADR 0029), never its value
+        "token_prefix": bot.token_prefix,
+    }
+    assert bot.token_prefix is not None and bot.token_prefix.startswith("cfg_pat_")

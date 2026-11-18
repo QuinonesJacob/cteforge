@@ -28,10 +28,14 @@ If something does not clearly fit one of the above, it does not belong here.
 
 ## Routes (all under /api/v1, JSON)
 GET /me → MeCard {name, role, kind, active, created_at, tools, review_all, role_allowed,
-role_defaults, token_id, token_expires_at, token_mode (the session's token; null without)} · GET /tools → ToolInfo[] {name, group, admin_only} · GET /profiles (name, dialect, `default` = the effective default connection; only these) ·
-GET /library?q=&trust=&approval=&created_by=&verified_by=&needs_my_review= → LibraryPage
-(ADR 0026; tool `search`; proposal rows/badges only with list_proposals; needs_my_review
-needs review_proposal) ·
+role_defaults, token_id, token_expires_at, token_mode (the session's token; null without),
+display_name, email} · PUT /me/profile {display_name?, email?} → MeCard (ADR 0029; own
+profile, no tool; absent = unchanged, null or "" clears; bad input → 409 PolicyError) · GET /tools → ToolInfo[] {name, group, admin_only} · GET /profiles (name, dialect, `default` = the effective default connection; only these) ·
+GET /library?q=&trust=&approval=&created_by=&verified_by=&needs_my_review=&sort=relevance|oldest
+→ LibraryPage (ADR 0026; tool `search`; proposal rows/badges only with list_proposals;
+needs_my_review needs review_proposal; ADR 0029: `waiting` — pending proposals the caller
+may decide, oldest first — and pending briefs with `needs_my_review`, `lines_added`,
+`lines_removed` (lines of the query diff); another sort → 422) ·
 GET /definitions?q=&include_drafts=&limit= · GET /definitions/{id}?version=&include_source= (adds `source_sql` + `annotations`, for revising; card has composed, composition, used_by, joins) ·
 GET /definitions/{id}/history · GET /definitions/{id}/references → DefinitionReferences
 (used_by, pending proposals, former_ids, outside_warning; ADR 0024, 0026) ·
@@ -45,13 +49,17 @@ POST /proposals/definitions/{id}/revise {base_version, sql? | composition?, meta
 POST /proposals/definitions/{id}/rename {new_id, base_version?, summary} (ADR 0024) ·
 POST /proposals/joins {action: annotate (default) | add, id?, left_table?, right_table?,
 keys?, join_type?, relationship?, traps?, notes?, summary} ·
-GET /proposals?status= · GET /proposals/count?status= (cheap, not audited; for the nav badge) · GET /proposals/{id} · POST /proposals/{id}/approve {verify, comment} ·
+GET /proposals?status= · GET /proposals/count?status= (cheap, not audited; for the nav badge) · GET /proposals/{id}?full_diff= (ADR 0029: true → the diff with every unchanged line, one hunk; ProposalView.title) · POST /proposals/{id}/approve {verify, comment} ·
 POST /proposals/{id}/reject {comment} · POST /proposals/{id}/withdraw ·
-GET /joins?table=&known_only=&definition= → JoinCard[] ·
-GET /tables?name=&name=&profile= · GET /audit?actor=&kind=&definition_id=&limit= ·
+GET /joins?table=&known_only=&definition= → JoinCard[] (ADR 0029: `source_joins`,
+`source_states`, `source_titles`) ·
+GET /tables?name=&name=&profile= · GET /audit?actor=&kind=&definition_id=&limit= →
+AuditPage {events, limit, has_more, actors: name → {display_name, email (only with
+list_users), kind}} ·
 GET /users → UserView[] (role, kind, active, tokens' metadata — never values) ·
 POST /users {name, role, kind} → 201 {user, token | null} (a "default" token, once, only
-to a human caller) · PATCH /users/{name} {role?, active?} → UserView ·
+to a human caller) · PATCH /users/{name} {role?, active?, display_name?, email?} → UserView
+(UserView has display_name, email) ·
 GET /users/{name}/tokens · POST /users/{name}/tokens · PUT /users/{name}/tokens/{id}
 {tool_mode, include, exclude} · DELETE /users/{name}/tokens/{id} (revoke → TokenCard) ·
 GET /me/tokens · POST /me/tokens · PUT /me/tokens/{id} · DELETE /me/tokens/{id} — token

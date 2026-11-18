@@ -13,7 +13,8 @@ import type {
   Role,
   VariableType,
 } from "../api/types";
-import { GRAINS } from "./variableForm";
+/** Grain units (DESIGN §4: grain → day|week|month|quarter|year). */
+export const GRAINS = ["day", "week", "month", "quarter", "year"] as const;
 
 export const VARIABLE_TYPES: VariableType[] = [
   "date_range",

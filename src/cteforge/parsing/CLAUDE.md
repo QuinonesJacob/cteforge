@@ -123,7 +123,9 @@ If something does not clearly fit one of the above, it does not belong here.
 - **Joins**: per JOIN, sources resolved through aliases to base tables / CTE names /
   derived-table aliases; keys are column = column pairs in the ON's top-level AND chain
   (or USING columns), oriented (left, right). `join_type`: semi / anti win over the side
-  (`LEFT SEMI JOIN` → semi), then left / right / full, cross, else inner.
+  (`LEFT SEMI JOIN` → semi), then left / right / full, cross, else inner. `in_subquery`
+  (ADR 0029): the join's SELECT is nested in a subquery / derived table / nested CTE
+  under its scope's root (a UNION branch of the scope's own query is not).
 
 ## Common misplacements
 - Producing templates or new SQL — templating/.

@@ -52,16 +52,17 @@ def test_propose_search_run_approve_verify_audit(api) -> None:
         }
     ]
 
-    # 5. Audit: every step is attributed to its actor.
+    # 5. Audit: every change and run is attributed to its actor; a person's successful
+    # read through the API (vic's search) is not logged (ADR 0029).
     events = _ok(api.get("/audit", "ann", params={"limit": 1000}))["events"]
     seen = {(e["actor"], e["kind"]) for e in events}
     assert {
         ("bot", "propose"),
-        ("vic", "search"),
         ("bot", "compile_and_run"),
         ("ann", "review"),
         ("root", "admin"),
     } <= seen
+    assert ("vic", "search") not in seen
     runs = [e for e in events if e["kind"] == "compile_and_run" and e["outcome"] == "ok"]
     assert runs[0]["question"] == "How much did we collect?"
     assert runs[0]["trust_label"] == "verified" and runs[0]["definitions"] == ["realization_rate@1"]
@@ -77,7 +78,7 @@ def test_proposal_count_is_not_audited(api) -> None:
         assert api.get("/proposals/count", "vic", params=params).status_code == 200
     after = api.ctx.audit.list_events(limit=1000)
     assert [e.id for e in after] == [e.id for e in before]
-    # ...whereas listing proposals is audited.
+    # ...and neither is listing them through the API (a successful read, ADR 0029); a
+    # refused listing is.
     api.get("/proposals", "vic")
-    listed = api.ctx.audit.list_events(limit=1000, kind=AuditKind.REVIEW, actor="vic")
-    assert len(listed) == 1
+    assert api.ctx.audit.list_events(limit=1000, kind=AuditKind.REVIEW, actor="vic") == []

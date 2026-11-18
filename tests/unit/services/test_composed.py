@@ -432,6 +432,87 @@ def test_library_rows_filters_and_needs_my_review(rr: AppContext) -> None:
     assert all(r.pending == [] and r.latest_proposal is None for r in plain.rows)
 
 
+def test_library_waiting_on_you_oldest_first_with_line_counts(rr: AppContext) -> None:
+    """ADR 0029: `waiting` lists what the caller may decide, oldest first, whatever the
+    filters; pending briefs say whether the caller may decide them and carry +/- counts."""
+    _compose(rr)  # auto-applied: no pending proposal
+    set_team_mode(rr, TeamMode.STRICT)
+    new = _compose(rr, id="waiting")
+    revision = propose.revise_definition(
+        rr, BOT, id="realization_rate", base_version=1, metadata={"title": "Renamed title"}
+    )
+    page = library.list_library(rr, ANN, q="nothing matches this")
+    assert page.rows == []
+    assert [(w.id, w.target_id) for w in page.waiting] == [
+        (new.proposal.id, "waiting"),
+        (revision.proposal.id, "realization_rate"),
+    ]
+    first, second = page.waiting
+    assert first.title == "Realization by region" and first.author == "bot"
+    # ProposalView.title (ADR 0029): the proposed definition's title.
+    assert review.get_proposal(rr, ANN, new.proposal.id).title == "Realization by region"
+    assert review.get_proposal(rr, ANN, revision.proposal.id).title == "Renamed title"
+    # A new composed definition: its parts list and final SELECT are all additions.
+    assert first.lines_removed == 0 and first.lines_added >= 2
+    # ADR 0029: counts are of the QUERY diff; a title change is metadata only (0, 0) and
+    # shows as a field change, never as version / state lines.
+    view = review.get_proposal(rr, ANN, revision.proposal.id)
+    assert view.sql_diff == ""
+    assert [(c.field, c.before, c.after) for c in view.metadata_changes] == [
+        ("title", "Realization Rate (monthly, by region)", "Renamed title")
+    ]
+    added, removed = 0, 0
+    assert (second.lines_added, second.lines_removed) == (added, removed)
+    assert first.created_at <= second.created_at and first.needs_my_review
+    rows = {r.id: r for r in library.list_library(rr, ANN).rows}
+    [brief] = rows["realization_rate"].pending
+    assert brief.needs_my_review and (brief.lines_added, brief.lines_removed) == (added, removed)
+    # Approved history carries no counts (only pending briefs are counted).
+    assert rows["rr_by_region"].latest_proposal.lines_added is None
+    # The author may not decide their own proposals (four-eyes): nothing waits on them,
+    # and their briefs say so.
+    author = library.list_library(rr, BOT.model_copy(update={"role": UserRole.APPROVER}))
+    assert author.waiting == []
+    assert not any(b.needs_my_review for r in author.rows for b in r.pending)
+    # Without review_proposal: nothing waits.
+    assert library.list_library(rr, VIEWER).waiting == []
+
+
+def test_library_sorts_by_relevance_then_trust_or_oldest(rr: AppContext) -> None:
+    _compose(rr)
+    set_team_mode(rr, TeamMode.STRICT)
+    _compose(rr, id="waiting")
+    # No query: trust first (the verified definition), then title.
+    assert [r.id for r in library.list_library(rr, ANN).rows] == [
+        "realization_rate",
+        "rr_by_region",
+        "waiting",
+    ]
+    # A query word in the title outranks one only in the meaning / keywords.
+    rr.store.add_definition_version(
+        Definition(
+            id="zz_meaning",
+            title="Something else",
+            meaning="mentions region in passing",
+            source_dialect=Dialect.DUCKDB,
+            template="SELECT 1 AS x",
+            state=DefinitionState.VERIFIED,
+        ),
+        author="alice",
+    )
+    ranked = [r.id for r in library.list_library(rr, ANN, q="region").rows]
+    assert ranked.index("rr_by_region") < ranked.index("zz_meaning")
+    # Oldest: rows with a pending proposal the caller may decide come first, oldest first.
+    revision = propose.revise_definition(
+        rr, BOT, id="realization_rate", base_version=1, metadata={"title": "x"}
+    )
+    oldest = library.list_library(rr, ANN, needs_my_review=True, sort="oldest")
+    assert [r.id for r in oldest.rows] == ["waiting", "realization_rate"]
+    assert oldest.rows[1].pending[0].id == revision.proposal.id
+    with pytest.raises(PolicyError, match="Unknown sort"):
+        library.list_library(rr, ANN, sort="newest")
+
+
 def test_definition_yaml_of_a_composed_proposal_round_trips(rr: AppContext) -> None:
     out = _compose(rr)
     text = out.proposal.payload["definition_yaml"]
@@ -462,3 +543,60 @@ def test_raw_table_reads_in_a_composed_definition_need_check_and_run(rr: AppCont
     assert rr.store.get_definition("raw_again") is None
     # Over the aliases only, nothing extra is needed.
     assert _compose(rr, builder, id="clean").auto_applied
+
+
+def test_proposal_query_diff_and_metadata_changes(rr: AppContext) -> None:
+    """ADR 0029: a proposal shows the QUERY change (the source SQL as written, formatted
+    alike on both sides; for a composed definition its parts and final SELECT) and the
+    described fields that change — never version / state / verifier noise."""
+    assert _compose(rr).auto_applied
+    set_team_mode(rr, TeamMode.STRICT)
+    # Pin the part and tighten the final SELECT.
+    out = propose.revise_definition(
+        rr,
+        BOT,
+        id="rr_by_region",
+        base_version=1,
+        composition={
+            "uses": {"rr": {"id": "realization_rate", "version": 1}},
+            "select": SELECT.replace("GROUP BY", "WHERE rr.region <> 'LATAM' GROUP BY"),
+        },
+        metadata={"keywords": ["by region"]},
+    )
+    view = review.get_proposal(rr, ANN, out.proposal.id)
+    sql = view.sql_diff.splitlines()
+    assert sql[0] == "--- rr_by_region@v1.sql" and sql[1] == "+++ rr_by_region (proposed).sql"
+    assert "--- part rr: realization_rate (latest)" in sql
+    assert "+-- part rr: realization_rate v1" in sql
+    assert any(line.startswith("+") and "LATAM" in line for line in sql)
+    for noise in ("version:", "state:", "verified_by", "schema_version"):
+        assert noise not in view.sql_diff
+    assert [c.field for c in view.metadata_changes] == ["keywords"]
+    assert view.metadata_changes[0].after == ["by region"]
+    # The Library's counts are the query diff's.
+    [brief] = {r.id: r for r in library.list_library(rr, ANN).rows}["rr_by_region"].pending
+    changed = [ln for ln in sql[2:] if ln[:1] in "+-"]  # past the two file headers
+    assert (brief.lines_added, brief.lines_removed) == (
+        sum(ln.startswith("+") for ln in changed),
+        sum(ln.startswith("-") for ln in changed),
+    )
+    assert brief.lines_added >= 2 and brief.lines_removed >= 1
+    # Full context: every line of the query, one hunk.
+    full = review.get_proposal(rr, ANN, out.proposal.id, full_diff=True).sql_diff
+    assert full.count("\n@@") == 1 and len(full.splitlines()) >= len(sql)
+
+
+def test_new_definition_query_diff_is_all_additions(ctx: AppContext) -> None:
+    set_team_mode(ctx, TeamMode.STRICT)
+    out = _example(ctx, "realization_rate")
+    view = review.get_proposal(ctx, ANN, out.proposal.id)
+    lines = view.sql_diff.splitlines()
+    assert lines[0] == "--- /dev/null"
+    body = [ln for ln in lines[3:]]
+    assert body and all(ln.startswith("+") for ln in body)
+    assert any("SELECT" in ln.upper() for ln in body) and "$period" not in view.sql_diff
+    fields = {c.field: c for c in view.metadata_changes}
+    assert fields["title"].before is None and fields["title"].after
+    assert fields["variables"].before is None
+    assert any(v.startswith("period: date_range changeable") for v in fields["variables"].after)
+    assert "state" not in fields and "version" not in fields

@@ -3,7 +3,7 @@ tables (DESIGN §3, §6, §19; ADR 0026)."""
 
 from __future__ import annotations
 
-from typing import Annotated
+from typing import Annotated, Literal
 
 from fastapi import APIRouter, Query
 
@@ -108,8 +108,10 @@ def list_library(
     created_by: Annotated[list[str] | None, Query()] = None,
     verified_by: Annotated[list[str] | None, Query()] = None,
     needs_my_review: bool = False,
+    sort: Literal["relevance", "oldest"] = "relevance",
 ) -> LibraryPage:
-    """The Library (ADR 0026): definitions + the proposals touching them, filtered."""
+    """The Library (ADR 0026): definitions + the proposals touching them, filtered;
+    sorted by relevance then trust, or by the oldest pending proposal (ADR 0029)."""
     return library.list_library(
         ctx,
         user,
@@ -119,4 +121,5 @@ def list_library(
         created_by=created_by,
         verified_by=verified_by,
         needs_my_review=needs_my_review,
+        sort=sort,
     )

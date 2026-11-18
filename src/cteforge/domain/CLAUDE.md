@@ -10,7 +10,9 @@ cteforge. Project root: ../../../CLAUDE.md
   `fixed` alias → var → value), Annotation, VariableSpec, VariableSlot (one place a
   variable fills; M1 files migrate on read), DefinitionVersionInfo, DefinitionRef,
   FormerId (a renamed definition's earlier id → its current id; ADR 0024), JoinEdge
-  (relationship, traps, notes, `sources`, `trusted_sources`, `added_by(_kind)`,
+  (relationship, traps, notes, `sources`, `source_joins` — JoinSource per place a source
+  makes it: definition, join_type oriented like the edge, location main | cte | subquery,
+  scope = CTE name; ADR 0029 —, `trusted_sources`, `added_by(_kind)`,
   `confirmed_by`, `evidence`; `is_known()`: mined from a definition a person stands behind
   (`trusted_sources`), added by a person or confirmed by a person; a legacy `state` is
   dropped on read), JoinKey, RelationshipEvidence + SideCount, JOIN_TYPES, RELATIONSHIPS,
@@ -26,8 +28,11 @@ cteforge. Project root: ../../../CLAUDE.md
   (`recipe_invalid` stays for stored history).
 - `users.py` — User (`role` = a role NAME; `active`; the acting user's resolved `tools` /
   `review_all`, None = its built-in role's; the calling token's `token_id`,
-  `token_expires_at`, `token_mode`, None without one), UserRole (the built-in role names), ActorKind
-  (ADR 0018, 0027). No tokens or hashes here.
+  `token_expires_at`, `token_mode`, `token_prefix` (12 chars, for the audit log), None
+  without one; optional profile `display_name` / `email`, ADR 0029), UserRole (the built-in
+  role names), ActorKind (ADR 0018, 0027); `clean_display_name` (stripped, ≤ 80 chars, no
+  control characters) / `clean_email` (stripped, ≤ 254 chars, light format check): ""
+  or None → None, bad input → PolicyError. No tokens or hashes here.
 - `access.py` — ADR 0027: the `Tool` catalog (one name per operation; MCP tools use the
   same names), `ToolGroup` + `TOOL_GROUPS` (use/build/review/admin), `ALL_TOOLS`,
   `ADMIN_ONLY_TOOLS`, `REMOVED_TOOLS` (names ADR 0026 removed; stripped from stored roles

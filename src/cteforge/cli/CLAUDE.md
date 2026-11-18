@@ -4,7 +4,8 @@ Typer CLI: the local admin tool. Thin adapter over services. Project root: ../..
 
 ## What belongs here (authoritative)
 - `_common.py` — the shared Typer `app`; `context()` (open_context from CTEFORGE_* env,
-  closed after) and `session()` (context + acting user = `services.auth.local_user`,
+  closed after; calls inside run on the `"cli"` audit surface — ADR 0029: a successful
+  read from the CLI is not logged, runs and changes are) and `session()` (context + acting user = `services.auth.local_user`,
   i.e. CTEFORGE_USER); exits (`fail` → 1, `usage` → 2); `--vars`-style JSON parsing
   (decimals exact); printing helpers (issues, tables, JSON, tokens, proposals, runs).
 - `main.py` — console-script entry (`cteforge.cli.main:app`); imports the modules below so
@@ -20,7 +21,8 @@ Typer CLI: the local admin tool. Thin adapter over services. Project root: ../..
   `user add NAME --role R [--agent]` (R: built-in or custom role; prints the "default"
   token once) / `user add NAME --bootstrap [--agent]` (first admin, no acting user; prints
   its "default" token once) · `user list [--json]` (role, kind, active, active-token count)
-  · `user role NAME ROLE` · `user deactivate NAME` / `user activate NAME` ·
+  · `user role NAME ROLE` · `user deactivate NAME` / `user activate NAME` · `user profile
+  NAME [--display-name X] [--email Y]` (ADR 0029; "" clears; neither → exit 2) ·
   `settings show [--json]` (mode, default connection, effective default, warnings on
   stderr) · `settings mode strict|open` · `settings connection [NAME] [--clear]` (the team's
   default connection, ADR 0021; no argument shows it; NAME with --clear → exit 2; unknown

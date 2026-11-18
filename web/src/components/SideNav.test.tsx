@@ -5,7 +5,7 @@ import { AuthProvider } from "../state/AuthContext";
 import { ThemeProvider } from "../state/ThemeContext";
 import { ToastProvider } from "../state/ToastContext";
 import { mockApi } from "../test/fetchMock";
-import { TopNav } from "./TopNav";
+import { SideNav } from "./SideNav";
 
 afterEach(() => vi.unstubAllGlobals());
 
@@ -15,7 +15,7 @@ function renderNav() {
       <ThemeProvider>
         <ToastProvider>
           <AuthProvider>
-            <TopNav />
+            <SideNav />
           </AuthProvider>
         </ToastProvider>
       </ThemeProvider>
@@ -23,26 +23,24 @@ function renderNav() {
   );
 }
 
-describe("TopNav (ADR 0026)", () => {
-  it("is Library · Join map · Import · Audit · Settings, with the pending badge on Library", async () => {
+const names = (nav: HTMLElement) => within(nav).getAllByRole("link").map((a) => a.textContent?.replace(/\d+$/, ""));
+
+describe("SideNav (ADR 0029)", () => {
+  it("is Library · Join map · Import · Log, then the Settings sections, with the pending badge on Library", async () => {
     mockApi({
       "GET /me": () => ({ body: { name: "ann", role: "admin", kind: "human" } }),
       "GET /proposals/count": () => ({ body: { count: 3 } }),
     });
     renderNav();
     const nav = await screen.findByRole("navigation", { name: "Primary" });
-    await within(nav).findByText("Settings");
-    expect(within(nav).getAllByRole("link").map((a) => a.textContent?.replace(/\d+$/, ""))).toEqual([
-      "Library",
-      "Join map",
-      "Import",
-      "Audit",
-      "Settings",
-    ]);
+    await within(nav).findByText("Log");
+    expect(names(nav)).toEqual(["Library", "Join map", "Import", "Log"]);
     expect(await within(nav).findByLabelText("3 pending")).toBeInTheDocument();
     expect(within(nav).getByRole("link", { name: /Library/ })).toContainElement(within(nav).getByLabelText("3 pending"));
-    expect(within(nav).queryByText("Explore")).not.toBeInTheDocument();
-    expect(within(nav).queryByText("Review")).not.toBeInTheDocument();
+    expect(within(nav).getByRole("link", { name: "Log" })).toHaveAttribute("href", "/log");
+    expect(within(nav).queryByText("Audit")).not.toBeInTheDocument();
+    const settings = screen.getByRole("navigation", { name: "Settings" });
+    expect(names(settings)).toEqual(["Connections", "Team mode", "Users & roles", "Roles", "My tokens"]);
   });
 
   it("hides what the token can't use", async () => {
@@ -51,7 +49,8 @@ describe("TopNav (ADR 0026)", () => {
     });
     renderNav();
     const nav = await screen.findByRole("navigation", { name: "Primary" });
-    await within(nav).findByText("Settings");
-    expect(within(nav).getAllByRole("link").map((a) => a.textContent)).toEqual(["Library", "Settings"]);
+    const settings = await screen.findByRole("navigation", { name: "Settings" });
+    expect(names(nav)).toEqual(["Library"]);
+    expect(names(settings)).toEqual(["My tokens"]);
   });
 });

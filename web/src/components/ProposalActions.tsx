@@ -15,8 +15,9 @@ interface Props {
   onDone: () => void;
 }
 
-/** Approve (optionally verify), reject with a comment, or withdraw (author). Approvers and,
- * for definition proposals, the target definition's owner may decide; only approvers verify. */
+/** "Your decision" (ADR 0029): approve — with "keep it verified" / "also verify" (approve with
+ * verify) where allowed —, reject with a note, or withdraw (author). Approvers and, for
+ * definition proposals, the target definition's owner may decide; only approvers verify. */
 export function ProposalActions({ proposal, user, target = null, targetLoading = false, onDone }: Props) {
   const toast = useToast();
   const [comment, setComment] = useState("");
@@ -37,6 +38,9 @@ export function ProposalActions({ proposal, user, target = null, targetLoading =
   const hasErrors = proposal.checks.some((c) => c.severity === "error");
   const incomplete = proposal.checks.some((c) => c.code === "checks_incomplete");
   const verifyAllowed = canVerify(user) && !incomplete;
+  const targetVerified = target?.state === "verified";
+  const verifyLabel = targetVerified ? "Keep it verified after this change" : "Also verify the definition";
+  const approveLabel = verify && verifyAllowed ? (targetVerified ? "Approve and keep verified" : "Approve and verify") : "Approve";
 
   async function act(kind: "approve" | "reject" | "withdraw") {
     if (kind === "reject" && !comment.trim()) {
@@ -59,8 +63,11 @@ export function ProposalActions({ proposal, user, target = null, targetLoading =
   }
 
   return (
-    <section className="card actions" aria-label="Decide">
-      <h3>Decision</h3>
+    <section className="card decision" aria-label="Decide">
+      <h2 className="decision-title">{decider ? "Your decision" : "Your proposal"}</h2>
+      {decider && targetVerified && mayApprove && (
+        <p className="muted small">This definition is verified. Approving keeps it verified only if you check the box.</p>
+      )}
       {decider && (
         <>
           {ownWork ? (
@@ -70,9 +77,6 @@ export function ProposalActions({ proposal, user, target = null, targetLoading =
           ) : (
             ownerOnly && <p className="muted small">You own this definition, so you may approve or reject this proposal.</p>
           )}
-          <Field label="Comment" htmlFor="pa-comment" hint="Kept with the proposal. Required to reject.">
-            <textarea id="pa-comment" rows={2} value={comment} onChange={(e) => setComment(e.target.value)} />
-          </Field>
           {mayApprove &&
             proposal.kind !== "new_join" &&
             proposal.kind !== "new_recipe" &&
@@ -86,7 +90,7 @@ export function ProposalActions({ proposal, user, target = null, targetLoading =
                 onChange={(e) => setVerify(e.target.checked)}
               />
               <span>
-                Also verify the definition
+                {verifyLabel}
                 {!canVerify(user) && <span className="muted small"> (needs the verify tool; agents only as admin)</span>}
                 {canVerify(user) && incomplete && (
                   <span className="muted small"> (not fully checked: checks_incomplete; approve only)</span>
@@ -94,6 +98,9 @@ export function ProposalActions({ proposal, user, target = null, targetLoading =
               </span>
             </label>
           )}
+          <Field label={`Note to ${proposal.author}`} htmlFor="pa-comment" hint="Kept with the proposal. Optional to approve, required to reject.">
+            <textarea id="pa-comment" rows={3} value={comment} onChange={(e) => setComment(e.target.value)} />
+          </Field>
           {hasErrors && mayApprove && (
             <p className="field-warn" role="status">
               This proposal has failing checks, so it can't be approved. Reject it or ask the author for a revision.
@@ -101,29 +108,29 @@ export function ProposalActions({ proposal, user, target = null, targetLoading =
           )}
         </>
       )}
-      <div className="btn-row mt">
-        {decider && (
-          <>
-            {mayApprove && (
-              <button
-                type="button"
-                className="btn btn-primary"
-                disabled={busy !== null || hasErrors}
-                onClick={() => void act("approve")}
-              >
-                {busy === "approve" ? "Approving…" : verify && verifyAllowed ? "Approve and verify" : "Approve"}
-              </button>
-            )}
-            <button type="button" className="btn btn-danger" disabled={busy !== null} onClick={() => void act("reject")}>
-              {busy === "reject" ? "Rejecting…" : "Reject"}
-            </button>
-          </>
-        )}
-        {isAuthor && (
-          <button type="button" className="btn" disabled={busy !== null} onClick={() => void act("withdraw")}>
-            {busy === "withdraw" ? "Withdrawing…" : "Withdraw"}
+      <div className="decision-buttons">
+        {decider && mayApprove && (
+          <button
+            type="button"
+            className="btn btn-primary btn-lg btn-glow btn-block"
+            disabled={busy !== null || hasErrors}
+            onClick={() => void act("approve")}
+          >
+            {busy === "approve" ? "Approving…" : approveLabel}
           </button>
         )}
+        <div className="decision-row">
+          {decider && (
+            <button type="button" className="btn btn-danger-ghost" disabled={busy !== null} onClick={() => void act("reject")}>
+              {busy === "reject" ? "Rejecting…" : "Reject"}
+            </button>
+          )}
+          {isAuthor && (
+            <button type="button" className="btn" disabled={busy !== null} onClick={() => void act("withdraw")}>
+              {busy === "withdraw" ? "Withdrawing…" : "Withdraw"}
+            </button>
+          )}
+        </div>
       </div>
     </section>
   );

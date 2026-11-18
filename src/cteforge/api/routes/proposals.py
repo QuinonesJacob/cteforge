@@ -103,8 +103,9 @@ def count_proposals(
 
 
 @router.get("/proposals/{id}", response_model=ProposalView)
-def get_proposal(ctx: Ctx, user: CurrentUser, id: str) -> ProposalView:
-    return review.get_proposal(ctx, user, id)
+def get_proposal(ctx: Ctx, user: CurrentUser, id: str, full_diff: bool = False) -> ProposalView:
+    """`full_diff=true`: the diff with every unchanged line (ADR 0029: the GUI's Full view)."""
+    return review.get_proposal(ctx, user, id, full_diff=full_diff)
 
 
 @router.post("/proposals/{id}/approve", response_model=ProposalOutcome)

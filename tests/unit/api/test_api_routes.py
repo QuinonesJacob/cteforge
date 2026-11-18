@@ -3,6 +3,7 @@ status mapping (src/cteforge/api/CLAUDE.md)."""
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 
@@ -372,6 +373,37 @@ def test_library_page(rr, check_error) -> None:
     check_error(rr.client.get("/api/v1/library"), 401, "Unauthorized")
 
 
+def test_library_waiting_and_oldest_sort(rr, check_error) -> None:
+    """ADR 0029: `waiting` (oldest first, +/- counts) and `sort=oldest`."""
+    pending = _pending_revision(rr)
+    page = rr.get("/library", "ann", params={"q": "no such words"}).json()
+    assert page["rows"] == []
+    (waiting,) = page["waiting"]
+    assert waiting["id"] == pending and waiting["target_id"] == "realization_rate"
+    assert waiting["title"] and waiting["needs_my_review"] is True
+    # ADR 0029: counts are of the query diff: a keywords change is metadata only.
+    assert (waiting["lines_added"], waiting["lines_removed"]) == (0, 0)
+    oldest = rr.get("/library", "ann", params={"needs_my_review": "true", "sort": "oldest"}).json()
+    (brief,) = oldest["rows"][0]["pending"]
+    assert brief["lines_added"] == waiting["lines_added"] and brief["needs_my_review"] is True
+    assert rr.get("/library", "vic").json()["waiting"] == []
+    check_error(rr.get("/library", "ann", params={"sort": "newest"}), 422, "RequestValidationError")
+
+
+def test_get_proposal_full_diff(rr) -> None:
+    """ADR 0029: `full_diff=true` keeps every unchanged line (one hunk); default 3 lines."""
+    pending = _pending_revision(rr)
+    view = rr.get(f"/proposals/{pending}", "vic").json()
+    assert view["title"] == "Realization Rate (monthly, by region)"  # ADR 0029
+    short = view["diff"]
+    full = rr.get(f"/proposals/{pending}", "vic", params={"full_diff": "true"}).json()["diff"]
+    assert full.count("\n@@") == 1 and len(full.splitlines()) > len(short.splitlines())
+    changed = [ln for ln in short.splitlines() if ln[:1] in "+-" and ln[:3] not in ("+++", "---")]
+    assert changed == [
+        ln for ln in full.splitlines() if ln[:1] in "+-" and ln[:3] not in ("+++", "---")
+    ]
+
+
 def test_list_get_and_count_proposals(rr, check_error) -> None:
     pending = _pending_revision(rr)
     listed = rr.get("/proposals", "vic", params={"status": "pending"})
@@ -435,13 +467,17 @@ def test_withdraw(rr, check_error) -> None:
 
 
 def test_audit(rr, check_error) -> None:
+    # ADR 0029: a person's successful read through the API is not logged; a refused one is.
     rr.get("/definitions", "vic", params={"q": "realization"})
-    response = rr.get("/audit", "ann", params={"actor": "vic", "kind": "search", "limit": 5})
+    assert rr.get("/audit", "ann", params={"actor": "vic", "kind": "search"}).json()["events"] == []
+    check_error(rr.get("/audit", "vic"), 403, "PermissionDeniedError")
+    response = rr.get("/audit", "ann", params={"actor": "vic", "kind": "admin", "limit": 5})
     assert response.status_code == 200
     page = response.json()
     assert page["limit"] == 5 and page["has_more"] is False
-    assert [e["kind"] for e in page["events"]] == ["search"]
-    assert page["events"][0]["actor"] == "vic"
+    assert [(e["kind"], e["outcome"], e["extra"]["op"]) for e in page["events"]] == [
+        ("admin", "rejected", "list_audit")
+    ]
     by_def = rr.get("/audit", "ann", params={"definition_id": "realization_rate"}).json()
     assert by_def["events"]
     check_error(rr.get("/audit", "vic"), 403, "PermissionDeniedError")
@@ -461,6 +497,40 @@ def test_users(api, check_error) -> None:
         assert [t["name"] for t in u["tokens"]] == ["default"]
         assert all(t["prefix"].startswith("cfg_pat_") for t in u["tokens"])
     check_error(api.get("/users", "ann"), 403, "PermissionDeniedError")
+
+
+def test_user_profiles(api, check_error) -> None:
+    """ADR 0029: PUT /me/profile (own), PATCH /users/{name} (manage_user), GET /me."""
+    me = api.put("/me/profile", "vic", {"display_name": "Vic", "email": "vic@example.com"})
+    assert me.status_code == 200, me.text
+    assert (me.json()["display_name"], me.json()["email"]) == ("Vic", "vic@example.com")
+    # Absent = unchanged; null or "" clears.
+    assert api.put("/me/profile", "vic", {"email": None}).json()["display_name"] == "Vic"
+    got = api.get("/me", "vic").json()
+    assert (got["display_name"], got["email"]) == ("Vic", None)
+    check_error(api.put("/me/profile", "vic", {"email": "nope"}), 409, "PolicyError")
+    check_error(api.put("/me/profile", "vic", {"nickname": "x"}), 422, "RequestValidationError")
+    patched = api.patch("/users/vic", "root", {"display_name": "", "email": "v@example.org"})
+    assert patched.status_code == 200
+    assert (patched.json()["display_name"], patched.json()["email"]) == (None, "v@example.org")
+    listed = {u["name"]: u for u in api.get("/users", "root").json()}
+    assert listed["vic"]["email"] == "v@example.org"
+    check_error(
+        api.patch("/users/root", "vic", {"display_name": "x"}), 403, "PermissionDeniedError"
+    )
+    check_error(api.patch("/users/vic", "root", {}), 422, "RequestValidationError")
+    # The Log names actors; emails only for callers who may list users.
+    audit = api.get("/audit", "root").json()
+    assert audit["actors"]["vic"]["email"] == "v@example.org"
+    assert api.get("/audit", "ann").json()["actors"]["vic"]["email"] is None
+    # Every event recorded for a token-authenticated call names its token, by prefix.
+    [event] = [
+        e
+        for e in audit["events"]
+        if e["actor"] == "vic" and e["extra"].get("op") == "update_profile"
+    ][:1]
+    assert event["extra"]["token_prefix"] == api.tokens["vic"][:12]
+    assert api.tokens["vic"] not in json.dumps(audit)
 
 
 def _no_token_values(api, response) -> None:
@@ -678,6 +748,16 @@ def test_joins_and_tables(rr, check_error) -> None:
     joins = rr.get("/joins", "vic", params={"table": "accounts"}).json()
     assert joins and all("accounts" in (j["left_table"], j["right_table"]) for j in joins)
     assert all(j["known"] and j["sources"] == ["realization_rate"] for j in joins)
+    # ADR 0029: where each source makes the join, and the sources' state and title.
+    (place,) = joins[0]["source_joins"]
+    assert place == {
+        "definition": "realization_rate",
+        "join_type": "inner",
+        "location": "cte",
+        "scope": "deals_in_region",
+    }
+    assert joins[0]["source_states"] == {"realization_rate": "llm_annotated"}
+    assert joins[0]["source_titles"]["realization_rate"].startswith("Realization")
     known = rr.get("/joins", "vic", params={"known_only": "true", "definition": "x"}).json()
     assert known == []
     tables = rr.get("/tables", "vic", params=[("name", "deals"), ("name", "nope")]).json()

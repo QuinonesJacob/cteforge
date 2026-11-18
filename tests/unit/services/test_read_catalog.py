@@ -56,6 +56,7 @@ def _edge(**fields: object) -> JoinEdge:
     )
 
 
+@pytest.mark.usefixtures("mcp_surface")  # reads are logged through MCP (ADR 0029)
 def test_list_joins_by_table_and_known(ctx: AppContext) -> None:
     ctx.store.upsert_join(_edge(added_by="claude-agent", added_by_kind="agent"))
     (card,) = catalog.list_joins(ctx, AGENT)

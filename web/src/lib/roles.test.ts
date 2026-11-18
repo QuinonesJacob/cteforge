@@ -10,6 +10,7 @@ import {
   canSeeUsers,
   canVerify,
   isOwnWork,
+  settingsSections,
   toolsOf,
 } from "./roles";
 
@@ -55,5 +56,18 @@ describe("tool-based checks (ADR 0027)", () => {
     expect(canMintOwnToken(viewer)).toBe(true);
     expect(canMintOwnToken({ ...admin, kind: "agent" })).toBe(false);
     expect(canMintOwnToken({ ...viewer, active: false })).toBe(false);
+  });
+});
+
+describe("settingsSections (ADR 0029 sidebar)", () => {
+  it("offers admin sections only with their tools; My tokens to everyone", () => {
+    expect(settingsSections({ name: "root", role: "admin", kind: "human" })).toEqual(["connections", "team", "users", "roles", "tokens"]);
+    expect(settingsSections({ name: "vic", role: "viewer", kind: "human" })).toEqual(["tokens"]);
+    expect(settingsSections({ name: "x", role: "custom", kind: "human", tools: ["search", "list_users"] })).toEqual([
+      "users",
+      "roles",
+      "tokens",
+    ]);
+    expect(settingsSections(null)).toEqual([]);
   });
 });

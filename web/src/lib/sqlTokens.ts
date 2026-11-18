@@ -85,3 +85,42 @@ export function tokenizeLines(sql: string): Token[][] {
   }
   return lines;
 }
+
+/** How a value token is shown on Import (ADR 0029): a variable, a selected value, or a value
+ * left fixed (underlined). Colouring only: matched by text, so equal values look alike. */
+export type ValueMark = "variable" | "selected" | "value";
+
+export interface MarkedToken extends Token {
+  mark?: ValueMark;
+}
+
+/** Strip one pair of SQL quotes: "'a''b'" → "a'b". */
+const unquote = (s: string) => (s.startsWith("'") && s.endsWith("'") && s.length >= 2 ? s.slice(1, -1).replace(/''/g, "'") : s);
+
+/**
+ * Marks string and number tokens whose text is the value of a parsed literal: `variable`
+ * when a variable uses a literal with that value, `selected` when one is selected, else
+ * `value`. Display only — the import is built from literal IDs, never from this.
+ */
+export function markValues(
+  lines: Token[][],
+  literals: { id: string; value: string; is_string: boolean }[],
+  variableIds: Set<string>,
+  selectedIds: Set<string>,
+): MarkedToken[][] {
+  const marks = new Map<string, ValueMark>();
+  const rank: Record<ValueMark, number> = { value: 0, selected: 1, variable: 2 };
+  for (const l of literals) {
+    const key = `${l.is_string ? "s" : "n"}:${l.value}`;
+    const mark: ValueMark = variableIds.has(l.id) ? "variable" : selectedIds.has(l.id) ? "selected" : "value";
+    const prev = marks.get(key);
+    if (!prev || rank[mark] > rank[prev]) marks.set(key, mark);
+  }
+  return lines.map((line) =>
+    line.map((t) => {
+      if (t.kind === "string") return { ...t, mark: marks.get(`s:${unquote(t.text)}`) };
+      if (t.kind === "number") return { ...t, mark: marks.get(`n:${t.text}`) };
+      return t;
+    }),
+  );
+}

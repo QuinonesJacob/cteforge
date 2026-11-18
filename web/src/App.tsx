@@ -2,11 +2,11 @@ import { Navigate, Route, Routes } from "react-router-dom";
 import { AppLayout } from "./components/AppLayout";
 import { Loading } from "./components/Loading";
 import { ToastViewport } from "./components/ToastViewport";
-import { AuditPage } from "./pages/AuditPage";
 import { DefinitionPage } from "./pages/DefinitionPage";
 import { ImportPage } from "./pages/ImportPage";
 import { JoinMapPage } from "./pages/JoinMapPage";
 import { LibraryPage } from "./pages/LibraryPage";
+import { LogPage } from "./pages/LogPage";
 import { NotFoundPage } from "./pages/NotFoundPage";
 import { ProposalPage } from "./pages/ProposalPage";
 import { SettingsPage } from "./pages/SettingsPage";
@@ -39,8 +39,11 @@ export function App() {
         <Route path="/import" element={<ImportPage />} />
         <Route path="/review" element={<Navigate to="/?review=mine" replace />} />
         <Route path="/review/:id" element={<ProposalPage />} />
-        <Route path="/audit" element={<AuditPage />} />
+        {/* ADR 0029: the audit log is the Log; /audit keeps working. */}
+        <Route path="/log" element={<LogPage />} />
+        <Route path="/audit" element={<Navigate to="/log" replace />} />
         <Route path="/settings" element={<SettingsPage />} />
+        <Route path="/settings/:section" element={<SettingsPage />} />
         <Route path="*" element={<NotFoundPage />} />
       </Routes>
     </AppLayout>

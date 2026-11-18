@@ -104,12 +104,16 @@ class _NewerSchema(StoreError):
 
 def _ensure_columns(conn: Connection) -> None:
     """Columns added after their table first shipped (idempotent; static DDL only):
-    `users.active` (version-1 databases) and `tokens.parent_token_id` (version-2 databases
-    written before it existed)."""
+    `users.active` (version-1 databases), `tokens.parent_token_id` (version-2 databases
+    written before it existed) and `users.display_name` / `users.email` (ADR 0029)."""
     inspector = inspect(conn)
     users = {c["name"] for c in inspector.get_columns("users")}
     if "active" not in users:
         conn.execute(text("ALTER TABLE users ADD COLUMN active BOOLEAN NOT NULL DEFAULT TRUE"))
+    if "display_name" not in users:
+        conn.execute(text("ALTER TABLE users ADD COLUMN display_name VARCHAR(80)"))
+    if "email" not in users:
+        conn.execute(text("ALTER TABLE users ADD COLUMN email VARCHAR(254)"))
     tokens = {c["name"] for c in inspector.get_columns("tokens")}
     if "parent_token_id" not in tokens:
         conn.execute(text("ALTER TABLE tokens ADD COLUMN parent_token_id VARCHAR(64)"))
@@ -793,6 +797,8 @@ class Store:
             kind=user.kind,
             active=user.active,
             created_at=_utc(user.created_at or _now()),
+            display_name=user.display_name,
+            email=user.email,
         )
         conflict = StoreError(f"User '{user.name}' already exists")
         with self._tx(conflict=conflict) as conn:
@@ -804,6 +810,8 @@ class Store:
                     token_sha256=secrets.token_hex(32),  # never shown, never matched
                     created_at=created.created_at,
                     active=created.active,
+                    display_name=created.display_name,
+                    email=created.email,
                 )
             )
         return created
@@ -831,6 +839,11 @@ class Store:
 
     def set_user_active(self, name: str, active: bool) -> User:
         return self._update_user(name, active=active)
+
+    def set_user_profile(self, name: str, display_name: str | None, email: str | None) -> User:
+        """Replace the user's display name and email (None clears; ADR 0029). Values
+        arrive validated (domain.users.clean_display_name / clean_email)."""
+        return self._update_user(name, display_name=display_name, email=email)
 
     # --------------------------------------------------------------------- roles
 
@@ -973,6 +986,8 @@ class Store:
                 us.c.kind.label("u_kind"),
                 us.c.active.label("u_active"),
                 us.c.created_at.label("u_created_at"),
+                us.c.display_name.label("u_display_name"),
+                us.c.email.label("u_email"),
             )
             .join(us, us.c.name == tk.c.user_name)
             .where(
@@ -995,6 +1010,8 @@ class Store:
             kind=ActorKind(row.u_kind),
             active=bool(row.u_active),
             created_at=_utc(row.u_created_at),
+            display_name=row.u_display_name,
+            email=row.u_email,
         )
         return user, token
 
@@ -1126,6 +1143,8 @@ def _user(row: Row[Any]) -> User:
         kind=ActorKind(row.kind),
         active=bool(row.active),
         created_at=_utc(row.created_at),
+        display_name=row.display_name,
+        email=row.email,
     )
 
 

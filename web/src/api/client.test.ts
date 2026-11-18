@@ -177,8 +177,13 @@ describe("response normalizers", () => {
   });
 
   it("audit accepts the AuditPage wrapper or a list", () => {
-    expect(toAuditPage({ events: [], limit: 50, has_more: true }, 100)).toEqual({ events: [], limit: 50, has_more: true });
+    expect(toAuditPage({ events: [], limit: 50, has_more: true, actors: { bot: { display_name: "Bot" } } }, 100)).toEqual({
+      events: [],
+      limit: 50,
+      has_more: true,
+      actors: { bot: { display_name: "Bot" } },
+    });
     expect(toAuditPage([{ id: "1" }, { id: "2" }], 2).has_more).toBe(true);
-    expect(toAuditPage(null, 10)).toEqual({ events: [], limit: 10, has_more: false });
+    expect(toAuditPage(null, 10)).toEqual({ events: [], limit: 10, has_more: false, actors: {} });
   });
 });

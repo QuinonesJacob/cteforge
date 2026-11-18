@@ -29,18 +29,18 @@ test("revise SQL and variables in the import builder", async ({ page }) => {
   // The stored SQL (rebuilt from the template) and its variables are filled in.
   await expect(page.getByLabel(/Trusted SQL/)).toHaveValue(/status <> 'void'/);
   await page.getByRole("button", { name: "Back to variables" }).click();
-  await expect(page.getByRole("heading", { name: "Variables (2)" })).toBeVisible();
+  await expect(page.getByRole("region", { name: "Variables", exact: true }).locator(".draft-item")).toHaveCount(2);
   await screenshot(page, "08-revise-variables");
-  await page.getByRole("button", { name: "Continue" }).click();
+  await page.getByRole("button", { name: "Next: describe meaning →" }).click();
   await expect(page.getByLabel(/^ID/)).toHaveValue("invoices_by_status");
   await page.getByLabel("Proposal summary").fill("Re-check invoices_by_status");
-  await page.getByRole("button", { name: "Continue" }).click();
+  await page.getByRole("button", { name: "Next: review and submit →" }).click();
   await page.getByRole("button", { name: "Submit proposal" }).click();
   await expect(page.getByRole("heading", { name: "Revision applied" })).toBeVisible();
   await screenshot(page, "08-revise-result");
 });
 
-test("a composed definition shows its parts, variables and compiled SQL, and runs", async ({ page }) => {
+test("a composed definition shows its parts, variables and compiled SQL", async ({ page }) => {
   // The demo agent composed realization_with_booked from realization_rate (rr) and
   // booked_vs_collected (bc), both floating on their latest usable version (ADR 0026).
   await signIn(page, tokens.admin, "/definitions/realization_with_booked");
@@ -51,19 +51,13 @@ test("a composed definition shows its parts, variables and compiled SQL, and run
   await expect(parts.getByText(/^latest/).first()).toBeVisible();
   await expect(page.getByRole("heading", { name: "Compiled SQL" })).toBeVisible();
   await expect(page.getByLabel(/full query with original values/)).toContainText("rr__");
-  await expect(page.getByRole("region", { name: "Variables" })).toContainText("rr.period");
-  await expect(page.getByRole("region", { name: "Joins to" })).toContainText("invoices");
+  await expect(page.getByRole("region", { name: "Variables", exact: true })).toContainText("rr.period");
+  await expect(page.getByRole("list", { name: "Joins of realization_with_booked" })).toContainText("invoices");
   await screenshot(page, "08-composed-definition");
 
   // A part lists it under "Used by".
   await parts.getByRole("link", { name: "booked_vs_collected" }).click();
-  await expect(page.getByRole("region", { name: "Used by" }).getByRole("link", { name: "realization_with_booked" })).toBeVisible();
-
-  // It runs by id like any other definition; its variables are <part>.<variable>.
-  await page.goto("/definitions/realization_with_booked?tab=run");
-  await page.getByRole("button", { name: "Run", exact: true }).click();
-  const result = page.getByRole("region", { name: "Run result" });
-  await expect(result.locator("table tbody tr").first()).toBeVisible();
-  await expect(result.getByRole("list", { name: "Definitions used" })).toContainText("realization_rate");
-  await screenshot(page, "08-composed-run");
+  await expect(page.getByRole("complementary", { name: "Facts" }).getByRole("link", { name: "realization_with_booked" })).toBeVisible();
+  // No Run tab (ADR 0029): agents run it by id through MCP.
+  await expect(page.getByRole("tab", { name: "Run" })).toHaveCount(0);
 });

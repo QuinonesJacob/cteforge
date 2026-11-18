@@ -132,6 +132,8 @@ def test_open_mode_rename_applies_everywhere_without_a_new_version(library: AppC
     assert out.proposal.kind is ProposalKind.RENAME_DEFINITION
     assert out.proposal.payload["from_id"] == OLD and out.proposal.payload["to_id"] == NEW
     assert out.proposal.target_id == NEW and out.proposal.resulting_version is None
+    # ADR 0029: a rename's view is titled like the stored definition.
+    assert out.proposal.title == ctx.store.get_definition(NEW).title
     assert out.definition is not None and (out.definition.id, out.definition.version) == (NEW, 2)
     # Every version moved, its YAML rewritten; states, authors and numbers kept.
     assert ctx.store.get_definition(OLD) is None and ctx.store.latest_version(OLD) is None

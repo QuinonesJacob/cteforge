@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { Navigate, useParams } from "react-router-dom";
 import {
   createToken,
   getSettings,
@@ -8,46 +9,104 @@ import {
   listUsers,
   putSettings,
   revokeToken,
+  updateMyProfile,
   updateUser,
 } from "../api/endpoints";
-import type { CreatedUser, CreateTokenRequest, TeamMode, TokenCard, ToolInfo, User } from "../api/types";
+import type { CreatedUser, CreateTokenRequest, ProfileUpdate, TeamMode, TokenCard, ToolInfo, User } from "../api/types";
 import { CreateUserForm } from "../components/CreateUserForm";
 import { DefaultConnectionCard } from "../components/DefaultConnectionCard";
 import { ErrorState } from "../components/ErrorState";
 import { Loading } from "../components/Loading";
 import { MyTokensCard } from "../components/MyTokensCard";
-import { PageHeader } from "../components/PageHeader";
+import { ProfileForm } from "../components/ProfileForm";
 import { RolesCard } from "../components/RolesCard";
 import { TeamModeCard } from "../components/TeamModeCard";
 import { TokenReveal } from "../components/TokenReveal";
 import { UsersTable } from "../components/UsersTable";
-import { canManageRoles, canManageSettings, canManageUsers, canSeeUsers } from "../lib/roles";
+import { canManageRoles, canManageUsers, SETTINGS_LABELS, settingsSections, type SettingsSection } from "../lib/roles";
 import { useAuth } from "../state/AuthContext";
 import { useToast } from "../state/ToastContext";
 import { useAsync } from "../state/useAsync";
 
+const SUBTITLES: Record<SettingsSection, string> = {
+  connections: "The team's default connection: imports start on it and its dialect (ADR 0021).",
+  team: "Strict: every change waits for a person. Open: checked changes apply at once.",
+  users: "People and agents, their roles, profiles and tokens.",
+  roles: "What each role may use, and what a new token starts with.",
+  tokens: "Your profile and personal access tokens.",
+};
+
 /**
- * Settings (ADR 0027): My tokens for everyone; team mode and default connection with
- * manage_settings; Users and Roles with list_users (editing with manage_user / manage_role).
- * Each admin section is mounted only when the signed-in token holds its tool, so others never
- * call those routes. The server enforces every rule again.
+ * Settings (ADR 0027, 0029), one section per sidebar entry: Connections (default connection)
+ * and Team mode with manage_settings; Users & roles and Roles with list_users (editing with
+ * manage_user / manage_role); My tokens (your profile and tokens) for everyone. A section is
+ * mounted only when the signed-in token holds its tool, so others never call those routes.
+ * The server enforces every rule again.
  */
 export function SettingsPage() {
   const { user } = useAuth();
+  const { section } = useParams();
   const catalog = useAsync((signal) => listTools({ signal }), []);
   if (!user) return null;
+  const allowed = settingsSections(user);
+  const active = allowed.find((s) => s === section);
+  if (!active) return <Navigate to={`/settings/${allowed[0] ?? "tokens"}`} replace />;
   const tools = catalog.error ? null : catalog.data;
   return (
     <div className="page">
-      <PageHeader title="Settings" subtitle="Your tokens, and — for admins — the team's settings, users and roles." />
-      <MyTokensCard user={user} catalog={tools} />
-      {canManageSettings(user) && <TeamSettingsSections />}
-      {canSeeUsers(user) && <AccessSections user={user} catalog={tools} />}
+      <div className="title-row">
+        <div className="title-group">
+          <h1>{SETTINGS_LABELS[active]}</h1>
+          <span className="title-sub">{SUBTITLES[active]}</span>
+        </div>
+      </div>
+      {(active === "connections" || active === "team") && <TeamSettingsSections show={active} />}
+      {active === "users" && <UsersSection user={user} catalog={tools} />}
+      {active === "roles" && <RolesSection user={user} catalog={tools} />}
+      {active === "tokens" && (
+        <>
+          <MyProfileCard user={user} />
+          <MyTokensCard user={user} catalog={tools} />
+        </>
+      )}
     </div>
   );
 }
 
-function TeamSettingsSections() {
+/** Your display name and email (ADR 0029: PUT /me/profile). */
+function MyProfileCard({ user }: { user: User }) {
+  const { recheck } = useAuth();
+  const toast = useToast();
+  const [busy, setBusy] = useState(false);
+  const [key, setKey] = useState(0);
+
+  async function save(body: ProfileUpdate) {
+    setBusy(true);
+    try {
+      await updateMyProfile(body);
+      toast.success("Profile saved");
+      await recheck();
+      setKey((k) => k + 1);
+    } catch (err) {
+      toast.error(err, "Could not save your profile");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <section className="card" aria-labelledby="my-profile-title">
+      <h2 id="my-profile-title">Your profile</h2>
+      <p className="muted small">
+        Signed in as <code>{user.name}</code> ({user.role}
+        {user.kind === "agent" ? ", agent" : ""}). Your name is never shown in search results or on definitions.
+      </p>
+      <ProfileForm key={key} idPrefix="me" value={user} busy={busy} onSave={(b) => void save(b)} />
+    </section>
+  );
+}
+
+function TeamSettingsSections({ show }: { show: "connections" | "team" }) {
   const toast = useToast();
   const settings = useAsync((signal) => getSettings({ signal }), []);
   const profiles = useAsync((signal) => listProfiles({ signal }), []);
@@ -83,6 +142,7 @@ function TeamSettingsSections() {
 
   return (
     <>
+      {show === "team" && (
       <section className="card">
         <h2>Team mode</h2>
         {settings.loading && !settings.data ? (
@@ -93,6 +153,8 @@ function TeamSettingsSections() {
           <TeamModeCard mode={settings.data?.mode ?? "strict"} busy={savingMode} onChange={(m) => void changeMode(m)} />
         )}
       </section>
+      )}
+      {show === "connections" && (
       <section className="card">
         <h2>Default connection</h2>
         {settings.loading && !settings.data ? (
@@ -108,12 +170,13 @@ function TeamSettingsSections() {
           />
         ) : null}
       </section>
+      )}
     </>
   );
 }
 
-/** Users and roles (list_users); controls only with manage_user / manage_role. */
-function AccessSections({ user, catalog }: { user: User; catalog: ToolInfo[] | null | undefined }) {
+/** Users (list_users); controls only with manage_user. */
+function UsersSection({ user, catalog }: { user: User; catalog: ToolInfo[] | null | undefined }) {
   const toast = useToast();
   const users = useAsync((signal) => listUsers({ signal }), []);
   const roles = useAsync((signal) => listRoles({ signal }), []);
@@ -122,7 +185,7 @@ function AccessSections({ user, catalog }: { user: User; catalog: ToolInfo[] | n
   const manageUsers = canManageUsers(user);
   const mint = manageUsers && user.kind === "human";
 
-  async function changeUser(name: string, change: { role?: string; active?: boolean }, done: string) {
+  async function changeUser(name: string, change: { role?: string; active?: boolean } & ProfileUpdate, done: string) {
     setBusyUser(name);
     try {
       const updated = await updateUser(name, change);
@@ -205,9 +268,19 @@ function AccessSections({ user, catalog }: { user: User; catalog: ToolInfo[] | n
             onActive={(n, a) => void changeUser(n, { active: a }, a ? `${n} is active` : `${n} is deactivated`)}
             onRevoke={(n, t) => void revoke(n, t)}
             onGenerate={(n, b) => void generate(n, b)}
+            onProfile={(n, b) => void changeUser(n, b, `Profile of ${n} saved`)}
           />
         )}
       </section>
+    </>
+  );
+}
+
+/** Roles (list_users); editing with manage_role. */
+function RolesSection({ user, catalog }: { user: User; catalog: ToolInfo[] | null | undefined }) {
+  const roles = useAsync((signal) => listRoles({ signal }), []);
+  return (
+    <>
       <section className="card">
         <h2>Roles</h2>
         <p className="muted small">

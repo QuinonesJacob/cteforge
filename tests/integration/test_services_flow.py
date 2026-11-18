@@ -100,6 +100,7 @@ def _no_sql_text(event_json: str) -> None:
         assert fragment not in lowered, f"audit event contains SQL text ({fragment!r})"
 
 
+@pytest.mark.usefixtures("mcp_surface")  # reads are logged through MCP (ADR 0029)
 def test_whole_flow_through_services(workdir: Path) -> None:
     with _open(workdir, "library.db") as ctx:
         root, agent, ana = _team(ctx)

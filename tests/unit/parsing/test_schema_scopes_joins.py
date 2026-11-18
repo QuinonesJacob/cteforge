@@ -161,3 +161,27 @@ def test_join_variants():
         ("analytics.deals", "sq", "inner", [("region", "r")]),
     ]
     assert analyze(sql, D).joins[1].on_sql == "USING (region)"
+
+
+def test_joins_in_subqueries_and_derived_tables_are_marked() -> None:
+    """ADR 0029: `in_subquery` when the join is nested under its scope's own SELECT."""
+    sql = """
+    WITH c AS (
+      SELECT x.id FROM (SELECT a.id FROM a JOIN b ON b.id = a.id) AS x JOIN e ON e.id = x.id
+    )
+    SELECT c.id FROM c JOIN d ON d.id = c.id
+    WHERE c.id IN (SELECT f.id FROM f JOIN g ON g.id = f.id)
+    UNION ALL
+    SELECT h.id FROM h JOIN k ON k.id = h.id
+    """
+    found = {
+        (j.scope, j.left_table, j.right_table): j.in_subquery
+        for j in analyze(sql, Dialect.POSTGRES).joins
+    }
+    assert found == {
+        ("c", "a", "b"): True,  # derived table inside the CTE
+        ("c", "x", "e"): False,  # the CTE's own SELECT
+        ("main", "c", "d"): False,
+        ("main", "f", "g"): True,  # IN (subquery)
+        ("main", "h", "k"): False,  # a UNION branch of the outer query is not nested
+    }

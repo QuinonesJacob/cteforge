@@ -150,18 +150,31 @@ class CreateUserRequest(BaseModel):
 
 
 class UpdateUserRequest(BaseModel):
-    """Changes only the fields given (at least one): `role` (a role name), `active`."""
+    """Changes only the fields given (at least one): `role` (a role name), `active`,
+    `display_name`, `email` (ADR 0029; null or "" clears a profile field)."""
 
     model_config = _REQUEST
 
     role: str | None = None
     active: bool | None = None
+    display_name: str | None = None
+    email: str | None = None
 
     @model_validator(mode="after")
     def _something_to_change(self) -> UpdateUserRequest:
-        if self.role is None and self.active is None:
-            raise ValueError("give `role` and/or `active`")
+        profile = {"display_name", "email"} & self.model_fields_set
+        if self.role is None and self.active is None and not profile:
+            raise ValueError("give `role`, `active`, `display_name` and/or `email`")
         return self
+
+
+class ProfileRequest(BaseModel):
+    """`PUT /me/profile` (ADR 0029): only the fields given change; null or "" clears."""
+
+    model_config = _REQUEST
+
+    display_name: str | None = None
+    email: str | None = None
 
 
 class CreateRoleRequest(BaseModel):

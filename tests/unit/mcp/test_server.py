@@ -630,6 +630,8 @@ async def test_run_stdio_with_a_token_shows_only_its_tools(tmp_path: Path) -> No
         assert event.actor == "jo" and event.extra == {
             "op": "tool_refused",
             "tool": "check_and_run",
+            "token_id": narrow.info.id,
+            "token_prefix": narrow.token[:12],
         }
 
 

@@ -41,6 +41,7 @@ from cteforge.domain.models import (
     FormerId,
     JoinEdge,
     JoinKey,
+    JoinSource,
     TeamMode,
 )
 from cteforge.domain.proposals import DEFINITION_KINDS, ProposalKind, ProposalStatus
@@ -351,7 +352,12 @@ def mined_edges(definition: Definition, sql: str | None = None) -> list[JoinEdge
     from one base table (JoinInfo's `*_base_table` / `base_keys`); a join through CTEs that
     lands on one table on both sides is skipped. A composed definition is mined only from
     its compiled SQL (`sql`; its final SELECT alone names aliases, not tables): without
-    it, nothing. Empty when it can't be rendered or analyzed (mining is best-effort)."""
+    it, nothing. Empty when it can't be rendered or analyzed (mining is best-effort).
+
+    Each edge carries `source_joins` for this definition (ADR 0029): one JoinSource per
+    distinct (join type, location, scope) where the SQL makes it — `cte` for a top-level
+    CTE (scope = its name), `subquery` for a derived table / subquery (scope = the
+    enclosing CTE, None in the outer query), else `main`."""
     if sql is None and definition.composition is not None:
         return []
     try:
@@ -359,7 +365,9 @@ def mined_edges(definition: Definition, sql: str | None = None) -> list[JoinEdge
     except CteforgeError:
         return []
     tables = {t.lower() for t in analysis.tables}
+    cte_names = {c.name for c in analysis.ctes}
     edges: dict[str, JoinEdge] = {}
+    places: dict[str, list[JoinSource]] = {}
     for join in analysis.joins:
         left, right, keys = join.left_base_table, join.right_base_table, join.base_keys
         if join.join_type not in JOIN_TYPES or not keys or left is None or right is None:
@@ -373,7 +381,17 @@ def mined_edges(definition: Definition, sql: str | None = None) -> list[JoinEdge
             continue
         edge = canonical_edge(left, right, keys, join.join_type)
         edges.setdefault(edge.id, edge)
-    return list(edges.values())
+        in_cte = join.scope in cte_names
+        place = JoinSource(
+            definition=definition.id,
+            join_type=edge.join_type,
+            location="subquery" if join.in_subquery else "cte" if in_cte else "main",
+            scope=join.scope if in_cte else None,
+        )
+        found = places.setdefault(edge.id, [])
+        if place not in found:
+            found.append(place)
+    return [e.model_copy(update={"source_joins": places[id]}) for id, e in edges.items()]
 
 
 SqlOf = Callable[[Definition], str | None]
@@ -426,11 +444,13 @@ def person_stands_behind(
 def refresh_join_map(ctx: AppContext, sql_of: SqlOf | None = None) -> None:
     """Mine every latest definition (ADR 0026: composed ones from their compiled SQL,
     `sql_of`), insert edges not in the map yet, and recompute each edge's `sources`
-    (definition ids whose SQL contains it), `trusted_sources` (those a person stands
+    (definition ids whose SQL contains it), `source_joins` (where and how each source
+    makes it, ADR 0029), `trusted_sources` (those a person stands
     behind: `person_stands_behind`) and `usage_count`. Annotations, who added and who
     confirmed an edge are kept. Mining never fails a caller."""
     sources: dict[str, set[str]] = {}
     trusted: dict[str, set[str]] = {}
+    places: dict[str, list[JoinSource]] = {}
     mined: dict[str, JoinEdge] = {}
     kinds = {u.name: u.kind for u in ctx.store.list_users()}
     backing = human_backing(ctx)
@@ -442,7 +462,8 @@ def refresh_join_map(ctx: AppContext, sql_of: SqlOf | None = None) -> None:
             sources.setdefault(edge.id, set()).add(definition.id)
             if behind:
                 trusted.setdefault(edge.id, set()).add(definition.id)
-            mined.setdefault(edge.id, edge)
+            places.setdefault(edge.id, []).extend(edge.source_joins)
+            mined.setdefault(edge.id, edge.model_copy(update={"source_joins": []}))
     stored = {e.id: e for e in ctx.store.list_joins()}
     for id, edge in mined.items():
         if id not in stored:
@@ -451,14 +472,24 @@ def refresh_join_map(ctx: AppContext, sql_of: SqlOf | None = None) -> None:
     for edge in stored.values():
         found = sorted(sources.get(edge.id, ()))
         backed = sorted(trusted.get(edge.id, ()))
+        where = sorted(
+            places.get(edge.id, ()),
+            key=lambda p: (p.definition, p.location, p.scope or "", p.join_type),
+        )
         if (
             edge.sources != found
             or edge.usage_count != len(found)
             or edge.trusted_sources != backed
+            or edge.source_joins != where
         ):
             ctx.store.upsert_join(
                 edge.model_copy(
-                    update={"sources": found, "trusted_sources": backed, "usage_count": len(found)}
+                    update={
+                        "sources": found,
+                        "trusted_sources": backed,
+                        "usage_count": len(found),
+                        "source_joins": where,
+                    }
                 )
             )
 
@@ -551,8 +582,10 @@ def final_select_joins(
 
 def join_cards(ctx: AppContext, user: User, edges: Sequence[JoinEdge]) -> list[JoinCard]:
     """Edges as JoinCards: known, confirmed (a person approved it, or a source definition
-    is verified) and, for callers who may list proposals, the pending proposals on it."""
-    verified = {d.id for d in ctx.store.list_definitions({DefinitionState.VERIFIED})}
+    is verified), each source's latest state and title (ADR 0029) and, for callers who
+    may list proposals, the pending proposals on it."""
+    latest = {d.id: d for d in ctx.store.list_definitions()}
+    verified = {id for id, d in latest.items() if d.state is DefinitionState.VERIFIED}
     pending: dict[str, list[str]] = {}
     if permitted(user, Tool.LIST_PROPOSALS):
         for p in ctx.store.list_proposals(ProposalStatus.PENDING):
@@ -564,6 +597,8 @@ def join_cards(ctx: AppContext, user: User, edges: Sequence[JoinEdge]) -> list[J
             known=e.is_known(),
             confirmed=e.confirmed_by is not None or any(s in verified for s in e.sources),
             pending_proposals=pending.get(e.id, []),
+            source_states={s: latest[s].state for s in e.sources if s in latest},
+            source_titles={s: latest[s].title for s in e.sources if s in latest},
         )
         for e in edges
     ]

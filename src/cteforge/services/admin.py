@@ -30,6 +30,12 @@ tools and active of non-admin users, revoke non-admin users' tokens, and create/
 other than admin. They may not grant the admin role, touch an admin user, edit the admin
 role, or see/mint tokens.
 
+Profiles (ADR 0029): an optional display name and email per user. Anyone sets their own
+(`update_profile`, no tool); another user's needs manage_user and `can_manage_user` (so
+an agent admin never edits an admin user's). Validated by domain.users
+(`clean_display_name`, `clean_email`); audited as `update_profile` (or within
+`update_user`) with the fields changed.
+
 Bootstrap: `bootstrap_admin` creates the first admin with no acting user, and only while
 the users table is empty (CLI `cteforge user add --bootstrap`), plus its "default" token.
 Lock-out guard: the last active admin cannot be demoted or deactivated.
@@ -41,6 +47,7 @@ import datetime as dt
 import re
 import uuid
 from collections.abc import Iterable
+from enum import Enum
 from typing import Any
 
 from cteforge.domain.access import (
@@ -56,7 +63,7 @@ from cteforge.domain.access import (
 from cteforge.domain.audit import AuditKind
 from cteforge.domain.errors import NotFoundError, PermissionDeniedError, PolicyError, StoreError
 from cteforge.domain.models import TeamMode
-from cteforge.domain.users import ActorKind, User, UserRole
+from cteforge.domain.users import ActorKind, User, UserRole, clean_display_name, clean_email
 from cteforge.services import _audit
 from cteforge.services.auth import display_prefix, hash_token, new_token, require
 from cteforge.services.cards import (
@@ -280,7 +287,9 @@ def bootstrap_admin(
         ctx,
         user,
         AuditKind.ADMIN,
-        **_fields("bootstrap_admin", name=user.name, token_id=info.id, prefix=info.prefix),
+        **_fields(
+            "bootstrap_admin", name=user.name, subject_token_id=info.id, subject_prefix=info.prefix
+        ),
     )
     return user, token
 
@@ -316,7 +325,7 @@ def create_user(
         token: str | None = None
         if issue_token and can_mint_token(user, created):
             info, token = _mint(ctx, user.name, created, name=DEFAULT_TOKEN_NAME)
-            extra |= {"token_id": info.id, "prefix": info.prefix}
+            extra |= {"subject_token_id": info.id, "subject_prefix": info.prefix}
     _audit.record(ctx, user, AuditKind.ADMIN, **fields)
     return created, token
 
@@ -330,7 +339,74 @@ def _view(ctx: AppContext, target: User, tokens: list[TokenInfo] | None = None) 
         active=target.active,
         created_at=target.created_at,
         tokens=[_card(ctx, target, info) for info in infos if info.user_name == target.name],
+        display_name=target.display_name,
+        email=target.email,
     )
+
+
+class Keep(Enum):
+    """A profile field left as it is (`KEEP`); None or "" clears it."""
+
+    KEEP = "keep"
+
+
+KEEP = Keep.KEEP
+
+
+def _profile_changes(
+    target: User, display_name: str | None | Keep, email: str | None | Keep
+) -> dict[str, str | None]:
+    """The validated profile fields that differ from `target`'s (PolicyError on bad
+    input)."""
+    changes: dict[str, str | None] = {}
+    if display_name is not KEEP:
+        cleaned = clean_display_name(display_name)
+        if cleaned != target.display_name:
+            changes["display_name"] = cleaned
+    if email is not KEEP:
+        cleaned = clean_email(email)
+        if cleaned != target.email:
+            changes["email"] = cleaned
+    return changes
+
+
+def _apply_profile(ctx: AppContext, target: User, changes: dict[str, str | None]) -> User:
+    if not changes:
+        return target
+    return ctx.store.set_user_profile(
+        target.name,
+        changes.get("display_name", target.display_name),
+        changes.get("email", target.email),
+    )
+
+
+def update_profile(
+    ctx: AppContext,
+    user: User,
+    name: str | None = None,
+    *,
+    display_name: str | None | Keep = KEEP,
+    email: str | None | Keep = KEEP,
+) -> UserView:
+    """Set a user's display name and/or email (ADR 0029; `KEEP` leaves a field, None or
+    "" clears it). Own profile (`name` None or the caller's): no tool. Another user's:
+    manage_user, and `can_manage_user` (agents never an admin user's)."""
+    name = name or user.name
+    given = [f for f, v in (("display_name", display_name), ("email", email)) if v is not KEEP]
+    extra: dict[str, object] = {"op": "update_profile", "name": name, "fields": given}
+    fields = {"extra": extra}
+    with _audit.audit_failures(ctx, user, AuditKind.ADMIN, **fields):
+        if name != user.name:
+            require(user, Tool.MANAGE_USER)  # before revealing whether the user exists
+        target = _target(ctx, name)
+        if name != user.name and not can_manage_user(user, target):
+            raise _denied(user, f"change admin user '{name}'; a person must")
+        changes = _profile_changes(target, display_name, email)
+        extra["changed"] = changes
+        updated = _apply_profile(ctx, target, changes)
+        view = _view(ctx, updated)
+    _audit.record(ctx, user, AuditKind.ADMIN, **fields)
+    return view
 
 
 def list_users(ctx: AppContext, user: User) -> list[UserView]:
@@ -355,18 +431,22 @@ def update_user(
     *,
     role: str | None = None,
     active: bool | None = None,
+    display_name: str | None | Keep = KEEP,
+    email: str | None | Keep = KEEP,
 ) -> UserView:
-    """Change a user's role and/or active flag (manage_user). Agents never touch an
-    admin user or grant the admin role; the last active admin cannot be demoted or
-    deactivated. Deactivated users cannot authenticate; their tokens are kept."""
-    if role is None and active is None:
-        raise PolicyError("Give a role and/or active to change")
+    """Change a user's role, active flag and/or profile (manage_user; display name and
+    email as `update_profile`, ADR 0029). Agents never touch an admin user or grant the
+    admin role; the last active admin cannot be demoted or deactivated. Deactivated
+    users cannot authenticate; their tokens are kept."""
+    if role is None and active is None and display_name is KEEP and email is KEEP:
+        raise PolicyError("Give a role, active, display_name and/or email to change")
     changes: dict[str, Any] = {}
     if role is not None:
         changes["role"] = str(role)
     if active is not None:
         changes["active"] = active
-    fields = _fields("update_user", name=name, **changes)
+    extra: dict[str, object] = {"op": "update_user", "name": name, **changes}
+    fields = {"extra": extra}
     with _audit.audit_failures(ctx, user, AuditKind.ADMIN, **fields):
         require(user, Tool.MANAGE_USER)
         target = _target(ctx, name)
@@ -388,6 +468,10 @@ def update_user(
             updated = ctx.store.set_user_role(name, new_role)
         if active is not None and active != target.active:
             updated = ctx.store.set_user_active(name, active)
+        profile = _profile_changes(target, display_name, email)
+        if profile:
+            extra["profile"] = profile
+        updated = _apply_profile(ctx, updated, profile)
         view = _view(ctx, updated)
     _audit.record(ctx, user, AuditKind.ADMIN, **fields)
     return view
@@ -402,7 +486,8 @@ def set_active(ctx: AppContext, user: User, name: str, active: bool) -> UserView
 
 
 def me(ctx: AppContext, user: User) -> MeCard:
-    """The acting user's own access (any authenticated user; not audited)."""
+    """The acting user's own access and profile (any authenticated user; not audited)."""
+    stored = ctx.store.get_user(user.name)
     role = ctx.store.get_role(user.role)
     allowed = role_tools(role, user.kind) if role is not None else frozenset()
     defaults = role_tools(role, user.kind, defaults_only=True) if role else frozenset()
@@ -418,6 +503,8 @@ def me(ctx: AppContext, user: User) -> MeCard:
         role_defaults=sorted_tools(defaults),
         token_id=user.token_id,
         token_expires_at=user.token_expires_at,
+        display_name=stored.display_name if stored is not None else user.display_name,
+        email=stored.email if stored is not None else user.email,
         token_mode=user.token_mode.value if user.token_mode is not None else None,
     )
 
@@ -658,7 +745,7 @@ def create_token(
             exclude=exclude_set,
             parent_token_id=parent,
         )
-        extra |= {"token_id": info.id, "prefix": info.prefix}
+        extra |= {"subject_token_id": info.id, "subject_prefix": info.prefix}
         card = _card(ctx, owner, info)
     _audit.record(ctx, user, AuditKind.ADMIN, **fields)
     return NewToken(token=token, info=card)
@@ -670,7 +757,7 @@ def revoke_token(
     """Revoke a token (effective on its next call) and every token minted from it. Own
     tokens; a human admin any; an agent admin only non-admin users'."""
     owner_name = owner_name or user.name
-    fields = _fields("revoke_token", name=owner_name, token_id=token_id)
+    fields = _fields("revoke_token", name=owner_name, subject_token_id=token_id)
     with _audit.audit_failures(ctx, user, AuditKind.ADMIN, **fields):
         if owner_name != user.name:
             require(user, Tool.MANAGE_USER)  # before revealing whether the user exists
@@ -702,7 +789,7 @@ def set_token_tools(
     fields = _fields(
         "set_token_tools",
         name=owner_name,
-        token_id=token_id,
+        subject_token_id=token_id,
         tool_mode=str(tool_mode),
         include=[t.value for t in sorted_tools(include_set)],
         exclude=[t.value for t in sorted_tools(exclude_set)],

@@ -353,6 +353,23 @@ class RelationshipEvidence(BaseModel):
     checked_at: dt.datetime | None = None
 
 
+JoinLocation = Literal["main", "cte", "subquery"]
+
+
+class JoinSource(BaseModel):
+    """One place a definition's SQL makes a join-map edge (ADR 0029): its join type
+    (oriented like the edge) and where it sits — the outer query (`main`), a top-level
+    CTE (`cte`, `scope` = its name) or a derived table / subquery (`subquery`, `scope` =
+    the enclosing CTE's name, None in the outer query)."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    definition: str
+    join_type: str
+    location: JoinLocation = "main"
+    scope: str | None = None
+
+
 class JoinEdge(BaseModel):
     """Join map entry (DESIGN §3, ADR 0026): mined from definitions' SQL, or added by a
     proposal. A reference, not a gate.
@@ -376,6 +393,8 @@ class JoinEdge(BaseModel):
     traps: list[str] = Field(default_factory=list)  # e.g. "fan-out: one deal has many invoices"
     notes: str = ""
     sources: list[str] = Field(default_factory=list)  # Definition ids it was mined from.
+    # Where each source makes the join and with which type (recomputed by mining).
+    source_joins: list[JoinSource] = Field(default_factory=list)
     # The subset of `sources` a person stands behind (recomputed by mining).
     trusted_sources: list[str] = Field(default_factory=list)
     added_by: str | None = None  # Who proposed it when no definition contained it.

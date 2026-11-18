@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 
 from cteforge.domain.audit import AuditKind, AuditOutcome
+from cteforge.domain.codec import definition_to_yaml
 from cteforge.domain.dialects import Dialect
 from cteforge.domain.errors import (
     NotFoundError,
@@ -192,3 +193,105 @@ def test_proposal_diff_accepts_enum_members_in_a_payload() -> None:
         created_at=dt.datetime(2026, 1, 1, tzinfo=dt.UTC),
     )
     assert "+  state: draft" in proposal_diff(p, None).splitlines()
+
+
+def test_full_proposal_diff_keeps_every_unchanged_line() -> None:
+    """ADR 0029: the GUI's Full view asks for the whole file as context."""
+    base = example()
+    changed = base.model_copy(update={"version": 2, "title": "A new title"})
+    p = Proposal(
+        id="p2",
+        kind=ProposalKind.REVISE_DEFINITION,
+        target_id=base.id,
+        base_version=1,
+        payload={"definition_yaml": definition_to_yaml(changed)},
+        author="a",
+        author_kind=ActorKind.HUMAN,
+        created_at=dt.datetime(2026, 1, 1, tzinfo=dt.UTC),
+    )
+    short, full = proposal_diff(p, base), proposal_diff(p, base, full=True)
+    body = [line for line in full.splitlines() if not line.startswith(("---", "+++"))]
+    assert sum(line.startswith("@@") for line in body) == 1  # one hunk: the whole file
+    context = [line[1:] for line in body if line.startswith(" ")]
+    removed = [line[1:] for line in body if line.startswith("-")]
+    assert context + removed  # every line of the base appears, as context or removed
+    assert len(context) + len(removed) == len(definition_to_yaml(base).splitlines())
+    assert len(full.splitlines()) > len(short.splitlines())
+    changed_lines = [
+        ln for ln in full.splitlines() if ln[:1] in "+-" and ln[:3] not in ("+++", "---")
+    ]
+    assert changed_lines == [
+        ln for ln in short.splitlines() if ln[:1] in "+-" and ln[:3] not in ("+++", "---")
+    ]
+
+
+# ── join map: where each source makes a join (ADR 0029) ──────────────────────────────
+
+PLACES_SQL = """
+WITH won AS (
+  SELECT d.deal_id, a.region FROM deals AS d JOIN accounts AS a ON a.account_id = d.account_id
+),
+nested AS (
+  SELECT x.deal_id FROM (
+    SELECT d.deal_id FROM deals AS d LEFT JOIN invoices AS i ON i.deal_id = d.deal_id
+  ) AS x
+)
+SELECT w.region, i.paid_amount
+FROM won AS w
+LEFT JOIN invoices AS i ON i.deal_id = w.deal_id
+WHERE w.deal_id IN (
+  SELECT d2.deal_id FROM deals AS d2 JOIN accounts AS a2 ON a2.account_id = d2.account_id
+)
+"""
+
+
+def _places(edge) -> list[tuple[str, str, str, str | None]]:
+    return [(s.definition, s.join_type, s.location, s.scope) for s in edge.source_joins]
+
+
+def test_mined_edges_record_join_type_and_location_per_source(ctx: AppContext) -> None:
+    definition = Definition(
+        id="places", title="places", source_dialect=Dialect.DUCKDB, template=PLACES_SQL
+    )
+    edges = {e.id: e for e in _library.mined_edges(definition)}
+    accounts = edges["accounts__deals__account_id=account_id"]
+    invoices = edges["deals__invoices__deal_id=deal_id"]
+    assert sorted(_places(accounts)) == [
+        ("places", "inner", "cte", "won"),
+        ("places", "inner", "subquery", None),  # IN (subquery) in the outer query
+    ]
+    assert sorted(_places(invoices)) == [
+        ("places", "left", "main", None),  # through the CTE `won` to deals
+        ("places", "left", "subquery", "nested"),  # a derived table inside a CTE
+    ]
+    # Stored by refresh_join_map, merged across definitions and sorted.
+    ctx.store.add_definition_version(definition, author="analyst")
+    ctx.store.add_definition_version(example(), author="analyst")
+    _library.refresh_join_map(ctx)
+    stored = ctx.store.get_join("accounts__deals__account_id=account_id")
+    assert stored.sources == ["places", "realization_rate"]
+    assert _places(stored) == [
+        ("places", "inner", "cte", "won"),
+        ("places", "inner", "subquery", None),
+        ("realization_rate", "inner", "cte", "deals_in_region"),
+    ]
+
+
+def test_left_join_type_is_oriented_like_the_edge(ctx: AppContext) -> None:
+    """`invoices LEFT JOIN deals` is stored on deals__invoices as a RIGHT join."""
+    sql = "SELECT i.deal_id FROM invoices AS i LEFT JOIN deals AS d ON d.deal_id = i.deal_id"
+    definition = Definition(id="flip", title="flip", source_dialect=Dialect.DUCKDB, template=sql)
+    [edge] = _library.mined_edges(definition)
+    assert edge.left_table == "deals" and edge.join_type == "right"
+    assert _places(edge) == [("flip", "right", "main", None)]
+
+
+def test_join_cards_carry_source_states_and_titles(ctx: AppContext) -> None:
+    ctx.store.add_definition_version(
+        example(state=DefinitionState.VERIFIED, verified_by="ann", verified_at=dt.date.today()),
+        author="analyst",
+    )
+    _library.refresh_join_map(ctx)
+    [card, *_] = _library.join_cards(ctx, AGENT, ctx.store.list_joins())
+    assert card.source_states == {"realization_rate": DefinitionState.VERIFIED}
+    assert card.source_titles == {"realization_rate": example().title}

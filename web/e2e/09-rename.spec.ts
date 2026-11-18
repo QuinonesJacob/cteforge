@@ -34,7 +34,7 @@ test("rename a definition used by a composed definition: references, typed confi
   // Open mode, not verified: applied at once; the page moves to the new ID.
   await expect(page.getByRole("status").filter({ hasText: `Renamed ${OLD} to ${NEW}` })).toBeVisible();
   await expect(page).toHaveURL(new RegExp(`/definitions/${NEW}$`));
-  await expect(page.locator(".def-meta")).toContainText(`formerly ${OLD}`);
+  await expect(page.locator(".def-state")).toContainText(`formerly ${OLD}`);
   await screenshot(page, "09-renamed-definition");
 
   // The old ID fails with an error naming the new one (what an agent with stale
@@ -75,7 +75,7 @@ test("a rename proposal shows old → new and the references on its proposal pag
     const decide = page.getByRole("region", { name: "Decide" });
     await expect(decide.getByRole("checkbox", { name: /Also verify/ })).toHaveCount(0);
     await screenshot(page, "09-rename-proposal");
-    await decide.getByLabel(/comment/i).fill("Keep the descriptive name");
+    await decide.getByLabel(/Note to/).fill("Keep the descriptive name");
     await decide.getByRole("button", { name: "Reject" }).click();
     await expect(page.getByRole("status").filter({ hasText: "Proposal rejected" })).toBeVisible();
   } finally {

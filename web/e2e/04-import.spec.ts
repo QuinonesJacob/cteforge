@@ -7,7 +7,7 @@ WHERE invoiced_at >= DATE '2026-01-01'
   AND status <> 'void'
 GROUP BY status`;
 
-test("import a trusted query, build variables, auto-apply, then run it", async ({ page }) => {
+test("import a trusted query, build variables, auto-apply, then see its overview", async ({ page }) => {
   await signIn(page, tokens.admin);
   await page.getByRole("link", { name: "Import SQL" }).click();
   await expect(page).toHaveURL(/\/import$/);
@@ -61,9 +61,15 @@ test("import a trusted query, build variables, auto-apply, then run it", async (
   await expect(builder).not.toContainText("Required because");
   await builder.getByLabel(/^Description/).fill("Void invoices never count.");
   await builder.getByRole("button", { name: "Add variable" }).click();
-  await expect(page.getByRole("heading", { name: "Variables (2)" })).toBeVisible();
+  const variables = page.getByRole("region", { name: "Variables", exact: true });
+  await expect(variables.locator(".draft-item")).toHaveCount(2);
+  // ADR 0029: the SQL with its values underlined; the variable's values highlighted.
+  const sqlPanel = page.locator(".marked-sql");
+  await expect(sqlPanel).toContainText("Values are underlined");
+  await expect(sqlPanel.locator(".val-variable")).toHaveText(["'2026-01-01'", "'2026-04-01'"]);
+  await expect(page.locator(".stepper [aria-current=step]")).toContainText("Make variables");
   await screenshot(page, "04-import-variables");
-  await page.getByRole("button", { name: "Continue" }).click();
+  await page.getByRole("button", { name: "Next: describe meaning →" }).click();
 
   // Step 3: describe it. Continue without a meaning shows the error first.
   await page.getByLabel(/^Title/).fill("Invoices by status");
@@ -77,14 +83,14 @@ test("import a trusted query, build variables, auto-apply, then run it", async (
   await page.getByRole("button", { name: "Use title" }).click();
   await expect(idField).toHaveAttribute("readonly", "");
   await expect(idField).toHaveValue("invoices_by_status");
-  await page.getByRole("button", { name: "Continue" }).click();
+  await page.getByRole("button", { name: "Next: review and submit →" }).click();
   await expect(page.locator("#md-meaning-error")).toBeVisible();
   await page.getByLabel(/^Meaning/).fill("Number of non-void invoices per invoice status in a period.");
   await page.getByLabel("Keywords").fill("invoice count, invoices by status");
   await page.getByLabel("Grain").fill("one row per invoice status");
   await page.getByLabel("Proposal summary").fill("Import invoices by status");
   await screenshot(page, "04-import-describe");
-  await page.getByRole("button", { name: "Continue" }).click();
+  await page.getByRole("button", { name: "Next: review and submit →" }).click();
 
   // Step 4: review and submit; the team is in open mode, so it applies at once.
   await expect(page.getByRole("region", { name: "Review before submitting" })).toContainText("2 variables (1 changeable)");
@@ -96,31 +102,26 @@ test("import a trusted query, build variables, auto-apply, then run it", async (
   await page.getByRole("link", { name: /Open definition invoices_by_status v1/ }).click();
   await expect(page).toHaveURL(/\/definitions\/invoices_by_status$/);
   await expect(page.getByRole("heading", { level: 1, name: "Invoices by status" })).toBeVisible();
-  await page.getByRole("tab", { name: "Run" }).click();
-  const period = page.getByRole("group").filter({ has: page.getByLabel("Start") }).first();
-  await expect(period.getByLabel("Start")).toHaveValue("2026-01-01");
-  await expect(period.getByLabel("End")).toHaveValue("2026-04-01");
-  await page.getByRole("button", { name: "Run", exact: true }).click();
-  const result = page.getByRole("region", { name: "Run result" });
-  await expect(result.locator(".badge").first()).toContainText(/LLM annotated/i);
-  const rows = result.locator("table tbody tr");
-  await expect(rows.first()).toBeVisible();
-  const statuses = await rows.locator("td:nth-child(2)").allTextContents();
-  expect(statuses.length).toBeGreaterThan(0);
-  expect(statuses).not.toContain("void");
-  await expect(result.getByText(/\/\* cteforge: invoices_by_status v1 compile_id=\w+ \*\//)).toBeVisible();
-  await screenshot(page, "04-imported-definition-run");
+  // ADR 0029: no Run tab; the variables agents can fill, with their original values.
+  await expect(page.getByRole("tab", { name: "Run" })).toHaveCount(0);
+  const vars = page.getByRole("region", { name: "Variables", exact: true });
+  await expect(vars.getByRole("row", { name: /period/ })).toContainText("2026-01-01 → 2026-04-01");
+  await expect(vars.getByRole("row", { name: /excluded_status/ })).toContainText("fixed");
+  await expect(vars.getByRole("row", { name: /excluded_status/ })).toContainText("void");
+  await screenshot(page, "04-imported-definition");
 });
 
 test("admin sets the default connection in Settings; Import starts on it", async ({ page }) => {
   try {
-    await signIn(page, tokens.admin, "/settings");
+    await signIn(page, tokens.admin, "/settings/connections");
     const select = page.getByLabel("Default connection");
     await expect(select).toBeEnabled();
     await expect(select.locator("option")).toHaveText(["None", "demo (duckdb)"]);
     await select.selectOption("demo");
     await expect(page.getByText("Default connection set to demo")).toBeVisible();
     await expect(select).toHaveValue("demo");
+    // ADR 0029: the header shows the default connection.
+    await expect(page.getByRole("banner")).toContainText("demo default connection");
     await screenshot(page, "04-settings-default-connection");
 
     await page.getByRole("link", { name: "Import", exact: true }).click();
@@ -139,10 +140,13 @@ test("admin sets the default connection in Settings; Import starts on it", async
     await page.evaluate(() => sessionStorage.clear()); // sign out (the token lives there)
     await signIn(page, tokens.approver);
     await expect(page.getByRole("link", { name: "Import", exact: true })).toBeVisible();
-    await page.getByRole("link", { name: "Settings", exact: true }).click();
-    await expect(page.getByRole("heading", { name: "My tokens" })).toBeVisible();
+    const settings = page.getByRole("navigation", { name: "Settings" });
+    await expect(settings.getByRole("link")).toHaveText(["My tokens"]);
+    await settings.getByRole("link", { name: "My tokens" }).click();
+    await expect(page.getByRole("heading", { level: 1, name: "My tokens" })).toBeVisible();
+    await page.goto("/settings/connections"); // not offered: lands on My tokens
+    await expect(page.getByRole("heading", { level: 1, name: "My tokens" })).toBeVisible();
     await expect(page.getByLabel("Default connection")).toHaveCount(0);
-    await expect(page.getByRole("heading", { name: "Users", exact: true })).toHaveCount(0);
   } finally {
     await api("PUT", "/settings", tokens.admin, { default_connection: null });
   }

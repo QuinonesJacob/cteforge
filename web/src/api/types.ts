@@ -71,6 +71,15 @@ export interface User {
   token_id?: string | null;
   token_expires_at?: string | null;
   token_mode?: ToolMode | null;
+  /** Optional profile (ADR 0029): set by the user (PUT /me/profile) or an admin. */
+  display_name?: string | null;
+  email?: string | null;
+}
+
+/** PUT /me/profile and PATCH /users/{name} (ADR 0029): absent = unchanged, "" = clear. */
+export interface ProfileUpdate {
+  display_name?: string | null;
+  email?: string | null;
 }
 
 export type TokenState = "active" | "revoked" | "expired";
@@ -124,6 +133,8 @@ export interface UserView {
   kind: ActorKind;
   active: boolean;
   created_at?: string | null;
+  display_name?: string | null;
+  email?: string | null;
   tokens: TokenCard[];
 }
 
@@ -338,6 +349,17 @@ export interface ProposalBrief {
   author_kind: ActorKind;
   created_at: string;
   summary: string;
+  /** Changed lines of its diff (pending proposals only; ADR 0029). */
+  lines_added?: number | null;
+  lines_removed?: number | null;
+  /** The caller may decide this proposal (permission + four-eyes). */
+  needs_my_review?: boolean;
+}
+
+/** A proposal in the Library's "Waiting on you" panel (oldest first). */
+export interface WaitingProposal extends ProposalBrief {
+  target_id: string;
+  title: string;
 }
 
 export interface LibraryRow {
@@ -368,7 +390,11 @@ export interface LibraryPage {
   pending_count: number;
   /** The caller may list proposals: rows include them. */
   proposals_visible: boolean;
+  /** Pending proposals the caller may decide, oldest first (ADR 0029). */
+  waiting?: WaitingProposal[];
 }
+
+export type LibrarySort = "relevance" | "oldest";
 
 /** GET /library query (repeatable list params; omitted approval = pending + approved). */
 export interface LibraryFilter {
@@ -378,6 +404,8 @@ export interface LibraryFilter {
   created_by?: ActorKind[];
   verified_by?: ActorKind[];
   needs_my_review?: boolean;
+  /** relevance (default: relevance, then trust) | oldest (needs-my-review queue). */
+  sort?: LibrarySort;
 }
 
 /** How a search hit matched (ADR 0023): its words, the meaning of the query, or both. */
@@ -495,51 +523,6 @@ export interface ParseReport {
   issues: Issue[];
 }
 
-// ── Run (services/run.py) ──────────────────────────────────────────────────────
-export interface RunOutcome {
-  sql: string;
-  dialect: Dialect;
-  label: TrustLabel;
-  reasons: string[];
-  usable: boolean;
-  issues: Issue[];
-  columns: string[];
-  rows: unknown[][];
-  row_count: number;
-  truncated: boolean;
-  ran: boolean;
-  compile_id: string | null;
-  definitions: string[];
-  /** One entry per definition version used: state and who verified it, when (DESIGN §8). */
-  used: UsedDefinition[];
-  duration_ms: number | null;
-}
-
-export interface UsedDefinition {
-  id: string;
-  version: number;
-  state: DefinitionState;
-  verified_by?: string | null;
-  verified_at?: string | null;
-}
-
-export interface DefinitionRef {
-  id: string;
-  version?: number | null;
-}
-
-export interface RunRequest {
-  uses: Record<string, DefinitionRef>;
-  values: Record<string, Record<string, unknown>>;
-  select?: string;
-  dialect?: Dialect;
-  profile?: string;
-  run: boolean;
-  limit: number;
-  /** The user's question, recorded in the audit log. */
-  question?: string;
-}
-
 // ── Join map (domain/models.py JoinEdge, services/cards.py JoinCard; ADR 0026) ─
 export interface JoinKey {
   left: string;
@@ -589,6 +572,17 @@ export interface JoinEdge {
   /** A person who approved a proposal on it. */
   confirmed_by?: string | null;
   evidence?: RelationshipEvidence | null;
+  /** Where each source definition makes this join (ADR 0029). */
+  source_joins?: JoinSource[];
+}
+
+/** One place a definition's SQL makes a join: its type and where (CTE / main / subquery). */
+export interface JoinSource {
+  definition: string;
+  join_type: string;
+  location: "main" | "cte" | "subquery";
+  /** The CTE name (location cte; for a subquery, the enclosing CTE if any). */
+  scope?: string | null;
 }
 
 /** GET /joins: an edge + what it means for trust. */
@@ -599,6 +593,9 @@ export interface JoinCard extends JoinEdge {
   confirmed: boolean;
   /** Pending proposals on it (only for callers who may list proposals). */
   pending_proposals: string[];
+  /** Latest state and title of each source definition (ADR 0029). */
+  source_states?: Record<string, DefinitionState>;
+  source_titles?: Record<string, string>;
 }
 
 /** POST /proposals/joins: add a new edge, or annotate an existing one. */
@@ -708,6 +705,8 @@ export interface ProposalView {
   id: string;
   kind: ProposalKind;
   target_id: string;
+  /** The (proposed) definition's title; null for joins (ADR 0029). */
+  title?: string | null;
   base_version?: number | null;
   payload: Record<string, unknown>;
   checks: Issue[];
@@ -722,12 +721,24 @@ export interface ProposalView {
   decided_at?: string | null;
   comment: string;
   resulting_version?: number | null;
-  /** Unified diff of the stored YAML, base → proposed ("" or /dev/null base when new). */
+  /** Unified diff of the stored YAML, base → proposed (CLI / MCP; the GUI shows sql_diff). */
   diff?: string | null;
+  /** ADR 0029: the trusted query's diff (source SQL as written; for a composed definition
+   * its parts and final SELECT); "" = the query does not change; null for renames / joins. */
+  sql_diff?: string | null;
+  /** ADR 0029: described fields that change (never version / state / verifier). */
+  metadata_changes?: MetadataChange[] | null;
   /** Ids of composed definitions using the target definition ("used by"). */
   impact?: ProposalImpact;
   /** A proposed composed definition: parts, fixed/open variables, compiled SQL. */
   composition?: CompositionCard | null;
+}
+
+/** One described field a definition proposal changes (null before = not set / new). */
+export interface MetadataChange {
+  field: string;
+  before?: unknown;
+  after?: unknown;
 }
 
 export interface ProposalOutcome {
@@ -784,4 +795,12 @@ export interface AuditPage {
   events: AuditEvent[];
   limit: number;
   has_more: boolean;
+  /** Profiles of the actors in `events` (ADR 0029); email only for callers with list_users. */
+  actors?: Record<string, AuditActor>;
+}
+
+export interface AuditActor {
+  display_name?: string | null;
+  email?: string | null;
+  kind?: ActorKind | null;
 }

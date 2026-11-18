@@ -66,6 +66,7 @@ PolicyError.
 
 from __future__ import annotations
 
+import json
 import threading
 import uuid
 from collections.abc import Mapping, Sequence
@@ -99,6 +100,7 @@ from cteforge.domain.models import (
     JoinEdge,
     RelationshipEvidence,
     SideCount,
+    VariableSpec,
 )
 from cteforge.domain.proposals import Proposal, ProposalKind, ProposalStatus
 from cteforge.domain.users import User
@@ -106,10 +108,14 @@ from cteforge.parsing.analyze import parse
 from cteforge.services import _audit, _compose, _library, _meaning
 from cteforge.services.auth import permitted
 from cteforge.services.cards import (
+    MetadataChange,
     ProposalOutcome,
     ProposalView,
     card_from_definition,
+    diff_line_counts,
+    json_safe,
     proposal_view,
+    unified_diff,
 )
 from cteforge.services.context import AppContext, team_mode
 from cteforge.services.import_query import import_query
@@ -683,29 +689,160 @@ def outcome(ctx: AppContext, proposal: Proposal, applied: Applied | None) -> Pro
     )
 
 
-def view(ctx: AppContext, proposal: Proposal) -> ProposalView:
-    """Proposal + diff against its base + impact preview ("used by": composed definitions
-    using the target definition, ADR 0026) + for a composed definition its parts,
-    fixed/open variables and compiled SQL."""
+def view(ctx: AppContext, proposal: Proposal, *, full_diff: bool = False) -> ProposalView:
+    """Proposal + diff against its base (`full_diff`: with every unchanged line, ADR 0029)
+    + impact preview ("used by": composed definitions using the target definition, ADR
+    0026) + for a composed definition its parts, fixed/open variables and compiled SQL +
+    its title (ADR 0029: the proposed definition's; a rename's: the stored target's) + the
+    query diff and the described fields that change (ADR 0029: `sql_diff`,
+    `metadata_changes`; definition proposals only)."""
     base: Applied | None = None
     impact: list[str] = []
     composition = None
+    title: str | None = None
+    sql: str | None = None
+    changes: list[MetadataChange] | None = None
     if proposal.kind in (ProposalKind.NEW_DEFINITION, ProposalKind.REVISE_DEFINITION):
         if proposal.base_version is not None:
             base = ctx.store.get_definition(proposal.target_id, proposal.base_version)
         impact = [d.id for d in ctx.store.definitions_using(proposal.target_id)]
-        try:
-            proposed = definition_from_yaml(str(proposal.payload["definition_yaml"]))
-        except (CodecError, KeyError):
-            proposed = None
+        proposed = _proposed_definition(proposal)
         if proposed is not None and proposed.composition is not None:
             composition = _compose.composition_card(ctx, proposed)
+        title = proposed.title if proposed is not None else _stored_title(ctx, proposal)
+        old = base if isinstance(base, Definition) else None
+        sql = query_diff(proposal, old, proposed, full=full_diff)
+        changes = metadata_changes(old, proposed)
     elif proposal.kind is ProposalKind.RENAME_DEFINITION:
         # No diff: the payload says from → to; impact is what uses the definition now.
         impact = [d.id for d in ctx.store.definitions_using(proposal.target_id)]
+        title = _stored_title(ctx, proposal)
     elif proposal.kind is ProposalKind.NEW_JOIN:
         base = ctx.store.get_join(proposal.target_id)
-    return proposal_view(proposal, base, impact, composition)
+    return proposal_view(
+        proposal,
+        base,
+        impact,
+        composition,
+        full_diff=full_diff,
+        title=title,
+        sql_diff=sql,
+        metadata_changes=changes,
+    )
+
+
+def _stored_title(ctx: AppContext, proposal: Proposal) -> str | None:
+    """The target definition's latest title (or None when it is not stored)."""
+    stored = ctx.store.get_definition(proposal.target_id)
+    return stored.title if stored is not None else None
+
+
+def _proposed_definition(proposal: Proposal) -> Definition | None:
+    try:
+        return definition_from_yaml(str(proposal.payload["definition_yaml"]))
+    except (CodecError, KeyError):
+        return None
+
+
+def query_text(definition: Definition | None) -> str:
+    """The trusted query as a reviewer reads it (ADR 0029): the source SQL as written —
+    the template rendered with its original values, so both sides of a diff are formatted
+    alike —; for a composed definition its parts (alias → id, pinned version or latest,
+    fixed values) and its final SELECT. "" for none."""
+    if definition is None:
+        return ""
+    lines: list[str] = []
+    if definition.composition is not None:
+        for alias, ref in definition.composition.uses.items():
+            pin = f" v{ref.version}" if ref.version is not None else " (latest)"
+            lines.append(f"-- part {alias}: {ref.id}{pin}")
+            for var, value in definition.composition.fixed.get(alias, {}).items():
+                lines.append(f"--   fixed {alias}.{var} = {json.dumps(value, default=str)}")
+    try:
+        body = _library.original_sql(definition)
+    except CteforgeError:
+        body = definition.template  # cannot be rendered: show it as stored
+    if body.strip():
+        lines.extend(body.rstrip("\n").splitlines())
+    return "\n".join(lines) + ("\n" if lines else "")
+
+
+def query_diff(
+    proposal: Proposal,
+    base: Definition | None,
+    proposed: Definition | None,
+    *,
+    full: bool = False,
+) -> str:
+    """Unified diff of `query_text` base → proposed (ADR 0029); "" when the query is the
+    same (a metadata-only change)."""
+    old_name = "/dev/null" if base is None else f"{proposal.target_id}@v{base.version}.sql"
+    return unified_diff(
+        query_text(base),
+        query_text(proposed),
+        old_name,
+        f"{proposal.target_id} (proposed).sql",
+        full=full,
+    )
+
+
+# The described fields a reviewer compares (ADR 0029). Never version / state / verifier /
+# schema_version / tables / outputs (derived from the SQL, shown by the query diff).
+_DESCRIBED = (
+    "title",
+    "meaning",
+    "keywords",
+    "use_when",
+    "dont_use_when",
+    "grain",
+    "join_keys",
+    "owner",
+    "profile",
+    "source_dialect",
+)
+
+
+def _variable_text(v: VariableSpec) -> str:
+    text = f"{v.name}: {v.type.value} {v.role.value}"
+    if v.allowed:
+        text += f", allowed {', '.join(str(a) for a in v.allowed)}"
+    if v.unit or v.format:
+        text += f", {v.unit or v.format}"
+    if v.description:
+        text += f" — {v.description}"
+    return text
+
+
+def metadata_changes(base: Definition | None, proposed: Definition | None) -> list[MetadataChange]:
+    """Described fields that differ base → proposed (a new definition: every set field,
+    before None), and the variables as one entry per side."""
+    if proposed is None:
+        return []
+    changes: list[MetadataChange] = []
+    for name in _DESCRIBED:
+        before = json_safe(getattr(base, name)) if base is not None else None
+        after = json_safe(getattr(proposed, name))
+        if base is None and after in (None, "", []):
+            continue
+        if before != after:
+            changes.append(MetadataChange(field=name, before=before, after=after))
+    before_vars = [_variable_text(v) for v in base.variables] if base is not None else None
+    after_vars = [_variable_text(v) for v in proposed.variables]
+    if before_vars != after_vars and not (base is None and not after_vars):
+        changes.append(MetadataChange(field="variables", before=before_vars, after=after_vars))
+    return changes
+
+
+def line_counts(ctx: AppContext, proposal: Proposal) -> tuple[int, int] | None:
+    """(added, removed) lines of the proposal's QUERY diff (ADR 0029: the trusted SQL, or a
+    composed definition's parts and final SELECT) — (0, 0) for a metadata-only change.
+    None for renames and joins (no query)."""
+    if proposal.kind not in (ProposalKind.NEW_DEFINITION, ProposalKind.REVISE_DEFINITION):
+        return None
+    base = None
+    if proposal.base_version is not None:
+        base = ctx.store.get_definition(proposal.target_id, proposal.base_version)
+    return diff_line_counts(query_diff(proposal, base, _proposed_definition(proposal)))
 
 
 # ── Applying ─────────────────────────────────────────────────────────────────────────

@@ -32,6 +32,8 @@ STORE_SCHEMA_VERSION = 3
 
 _ID = 200  # Max length of ids and names used as keys.
 _ENUM = 32  # Max length of enum values (state, status, role, kind).
+_DISPLAY_NAME = 80  # domain.users.MAX_DISPLAY_NAME
+_EMAIL = 254  # domain.users.MAX_EMAIL
 
 metadata = MetaData()
 
@@ -126,6 +128,9 @@ users = Table(
     Column("created_at", DateTime(timezone=True), nullable=False),
     # Added to version-1 databases by an explicit ALTER (Store._migrate_v1).
     Column("active", Boolean, nullable=False, server_default=true()),
+    # ADR 0029: optional profile. Added to older databases by an explicit ALTER.
+    Column("display_name", String(_DISPLAY_NAME), nullable=True),
+    Column("email", String(_EMAIL), nullable=True),
 )
 
 # Configurable roles (ADR 0027). Built-ins are seeded by init_schema when missing.

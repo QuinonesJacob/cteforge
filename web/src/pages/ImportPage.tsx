@@ -10,6 +10,7 @@ import { GrainTable } from "../components/GrainTable";
 import { ImportSqlStep } from "../components/ImportSqlStep";
 import { LiteralTable } from "../components/LiteralTable";
 import { MetadataForm } from "../components/MetadataForm";
+import { MarkedSql } from "../components/MarkedSql";
 import { PageHeader } from "../components/PageHeader";
 import { ParseSummary } from "../components/ParseSummary";
 import { Stepper } from "../components/Stepper";
@@ -33,12 +34,13 @@ import {
 } from "../lib/importBuilder";
 import { changedMetadata, draftFromAnnotation, metadataFromCard, seedDrafts } from "../lib/revise";
 import { can as hasTool, canPropose, canRevise } from "../lib/roles";
+import { plural } from "../lib/format";
 import { useAuth } from "../state/AuthContext";
 import { useToast } from "../state/ToastContext";
 import { useAsync } from "../state/useAsync";
 import { notifyProposalsChanged } from "../state/usePendingCount";
 
-const STEPS = ["Paste SQL", "Variables", "Describe", "Submit"];
+const STEPS = ["Paste SQL", "Make variables", "Describe meaning", "Submit for review"];
 
 /** The input a parse report was made from; the proposal is always built from this. */
 interface ParsedInput {
@@ -302,23 +304,23 @@ function ImportFlow({ reviseId }: { reviseId: string | null }) {
 
   return (
     <div className="page">
-      {card ? (
-        <>
-          <p className="small">
-            <Link to={`/definitions/${encodeURIComponent(card.id)}`}>← {card.id}</Link>
-          </p>
-          <PageHeader
-            title={`Revise ${card.title}`}
-            subtitle={`Proposes v${card.version + 1} of ${card.id}: change the SQL, the variables or the description. Every check runs again.`}
-          />
-        </>
-      ) : (
-        <PageHeader
-          title="Import SQL"
-          subtitle="Paste a query you already trust. You decide which values become variables; nothing changes by default."
-        />
+      {card && (
+        <nav className="crumbs" aria-label="Breadcrumb">
+          <Link to="/">Library</Link> <span aria-hidden="true">/</span>{" "}
+          <Link to={`/definitions/${encodeURIComponent(card.id)}`}>{card.id}</Link> <span aria-hidden="true">/</span> Revise
+        </nav>
       )}
-      <Stepper steps={STEPS} current={step} maxReachable={outcome ? -1 : stale ? 0 : maxStep} onSelect={go} />
+      <div className="title-row import-head">
+        <div className="title-group">
+          <h1>{card ? `Revise ${card.title}` : "Import"}</h1>
+        </div>
+        <Stepper steps={STEPS} current={step} maxReachable={outcome ? -1 : stale ? 0 : maxStep} onSelect={go} />
+      </div>
+      <p className="page-sub">
+        {card
+          ? `Proposes v${card.version + 1} of ${card.id}: change the SQL, the variables or the description. Every check runs again.`
+          : "Paste a query you already trust. You decide which values become variables; nothing changes by default."}
+      </p>
 
       {step === 0 && (
         <ImportSqlStep
@@ -341,101 +343,122 @@ function ImportFlow({ reviseId }: { reviseId: string | null }) {
         />
       )}
 
-      {step === 1 && report && !stale && (
+      {step === 1 && report && !stale && parsed && (
         <div className="stack">
-          <section className="card">
-            <ParseSummary report={report} />
-          </section>
-          <section aria-label="Literals">
-            <div className="section-head">
-              <h2>Literals</h2>
-              <div className="btn-row">
-                <span className="muted small" aria-live="polite">
-                  {selected.length} selected
-                </span>
-                {selected.length > 0 && (
-                  <button type="button" className="btn btn-sm" onClick={() => setSelected([])}>
-                    Clear
-                  </button>
-                )}
-                <button
-                  type="button"
-                  className="btn btn-primary btn-sm"
-                  disabled={selected.length === 0 || editing !== null || mixedSelection}
-                  onClick={makeVariable}
-                >
-                  Make variable
-                </button>
-              </div>
-            </div>
-            {mixedSelection && (
-              <p className="field-warn small" role="status">
-                Select literals or date truncations, not both: a grain variable covers truncations only.
-              </p>
-            )}
-            <p className="muted small">
-              Select one literal, a suggested range pair (start and end), or every value of an IN list, then “Make variable”.
-              Literals you leave alone stay part of the trusted SQL.
-            </p>
-            <LiteralTable
-              literals={report.literals}
-              ranges={ranges}
-              selected={selected}
-              usedBy={usedBy}
-              onToggle={toggle}
-              onSelectMany={(ids) => setSelected(ids)}
-            />
-          </section>
-          {grains.length > 0 && (
-            <section aria-label="Date truncations">
-              <h2>Date truncations</h2>
-              <p className="muted small">
-                Select every truncation that should follow one grain (the GROUP BY copy too), then “Make variable” to
-                build a grain variable. Truncations you leave alone stay part of the trusted SQL.
-              </p>
-              <GrainTable
-                grains={grains}
-                selected={selected}
-                usedBy={usedBy}
-                onToggle={toggle}
-                onSelectMany={(ids) => setSelected(ids)}
+          <div className="import-grid">
+            <div className="stack import-main">
+              <MarkedSql
+                sql={parsed.sql}
+                label={card ? `${card.id}.sql` : "your_query.sql"}
+                literals={report.literals}
+                variableIds={drafts.filter((d) => d.role === "changeable").flatMap((d) => d.literals)}
+                selectedIds={selected}
               />
-            </section>
-          )}
-          {editing && (
-            <VariableBuilder
-              draft={editing.draft}
-              editing={editing.index !== null}
-              onChange={(draft) => setEditing({ ...editing, draft })}
-              onSave={saveDraft}
-              onCancel={() => setEditing(null)}
-              byId={byId}
-              ranges={ranges}
-              grainsById={grainsById}
-              otherNames={drafts.filter((_, i) => i !== editing.index).map((d) => d.name)}
-            />
-          )}
-          <section className="card" aria-label="Variables">
-            <h2>Variables ({drafts.length})</h2>
-            <VariableDraftList
-              drafts={drafts}
-              byId={byId}
-              ranges={ranges}
-              grainsById={grainsById}
-              onEdit={(i) => {
-                const d = drafts[i];
-                if (d) setEditing({ index: i, draft: d });
-              }}
-              onRemove={(i) => setDrafts((ds) => ds.filter((_, j) => j !== i))}
-            />
-          </section>
-          <div className="btn-row">
-            <button type="button" className="btn" onClick={() => go(0)}>
-              Back
+              <section className="card" aria-label="Values">
+                <div className="section-head">
+                  <h2>Values</h2>
+                  <div className="btn-row">
+                    <span className="muted small" aria-live="polite">
+                      {selected.length} selected
+                    </span>
+                    {selected.length > 0 && (
+                      <button type="button" className="btn btn-sm" onClick={() => setSelected([])}>
+                        Clear
+                      </button>
+                    )}
+                    <button
+                      type="button"
+                      className="btn btn-sm btn-outline-accent"
+                      disabled={selected.length === 0 || editing !== null || mixedSelection}
+                      onClick={makeVariable}
+                    >
+                      Make variable
+                    </button>
+                  </div>
+                </div>
+                {mixedSelection && (
+                  <p className="field-warn small" role="status">
+                    Select literals or date truncations, not both: a grain variable covers truncations only.
+                  </p>
+                )}
+                <p className="muted small">
+                  Select one literal, a suggested range pair (start and end), or every value of an IN list, then “Make
+                  variable”. Values you leave alone stay part of the trusted SQL.
+                </p>
+                <LiteralTable
+                  literals={report.literals}
+                  ranges={ranges}
+                  selected={selected}
+                  usedBy={usedBy}
+                  onToggle={toggle}
+                  onSelectMany={(ids) => setSelected(ids)}
+                />
+                <ParseSummary report={report} />
+              </section>
+              {grains.length > 0 && (
+                <section className="card" aria-label="Date truncations">
+                  <h2>Date truncations</h2>
+                  <p className="muted small">
+                    Select every truncation that should follow one grain (the GROUP BY copy too), then “Make variable” to
+                    build a grain variable. Truncations you leave alone stay part of the trusted SQL.
+                  </p>
+                  <GrainTable
+                    grains={grains}
+                    selected={selected}
+                    usedBy={usedBy}
+                    onToggle={toggle}
+                    onSelectMany={(ids) => setSelected(ids)}
+                  />
+                </section>
+              )}
+            </div>
+            <div className="stack import-side">
+              <section aria-label="Variables" className="vars-panel">
+                <div className="vars-head">
+                  <h2>Variables</h2>
+                  <span className="muted small">
+                    {Object.keys(usedBy).length} of {report.literals.length + grains.length} values
+                  </span>
+                </div>
+                {editing && (
+                  <VariableBuilder
+                    draft={editing.draft}
+                    editing={editing.index !== null}
+                    onChange={(draft) => setEditing({ ...editing, draft })}
+                    onSave={saveDraft}
+                    onCancel={() => setEditing(null)}
+                    byId={byId}
+                    ranges={ranges}
+                    grainsById={grainsById}
+                    otherNames={drafts.filter((_, i) => i !== editing.index).map((d) => d.name)}
+                  />
+                )}
+                <VariableDraftList
+                  drafts={drafts}
+                  byId={byId}
+                  ranges={ranges}
+                  grainsById={grainsById}
+                  onEdit={(i) => {
+                    const d = drafts[i];
+                    if (d) setEditing({ index: i, draft: d });
+                  }}
+                  onRemove={(i) => setDrafts((ds) => ds.filter((_, j) => j !== i))}
+                />
+              </section>
+            </div>
+          </div>
+          <div className="step-bar">
+            <button type="button" className="link-btn plain-link" onClick={() => go(0)}>
+              ← Back to SQL
             </button>
-            <button type="button" className="btn btn-primary" disabled={editing !== null} onClick={() => go(2)}>
-              Continue
-            </button>
+            <div className="step-bar-end">
+              <span className="muted small">
+                {plural(drafts.length, "variable")} · {plural(drafts.filter((d) => d.role === "changeable").length, "changeable", "changeable")}
+              </span>
+              <button type="button" className="btn btn-primary btn-lg btn-glow" disabled={editing !== null} onClick={() => go(2)}>
+                Next: describe meaning →
+              </button>
+            </div>
           </div>
         </div>
       )}
@@ -451,19 +474,19 @@ function ImportFlow({ reviseId }: { reviseId: string | null }) {
             onIdTouched={() => setIdTouched(true)}
             idLocked={card !== null}
           />
-          <div className="btn-row">
-            <button type="button" className="btn" onClick={() => go(1)}>
-              Back
+          <div className="step-bar">
+            <button type="button" className="link-btn plain-link" onClick={() => go(1)}>
+              ← Back to variables
             </button>
             <button
               type="button"
-              className="btn btn-primary"
+              className="btn btn-primary btn-lg btn-glow"
               onClick={() => {
                 setShowMetaErrors(true);
                 if (Object.keys(metaErrors).length === 0) go(3);
               }}
             >
-              Continue
+              Next: review and submit →
             </button>
           </div>
         </section>

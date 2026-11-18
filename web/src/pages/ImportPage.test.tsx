@@ -77,7 +77,7 @@ describe("ImportPage", () => {
     expect(screen.getByRole("button", { name: "Add variable" })).toBeDisabled();
     await user.type(screen.getByLabelText(/Description/), "Stage excluded from the result");
     await user.click(screen.getByRole("button", { name: "Add variable" }));
-    await user.click(screen.getByRole("button", { name: "Continue" }));
+    await user.click(screen.getByRole("button", { name: "Next: describe meaning →" }));
 
     // Step 3: metadata.
     await user.type(screen.getByLabelText(/^Title/), "Closed deals");
@@ -95,7 +95,7 @@ describe("ImportPage", () => {
     expect(idInput.readOnly).toBe(true);
     await user.type(screen.getByLabelText(/^Meaning/), "One row per closed deal");
     await user.type(screen.getByLabelText(/^Keywords/), "bookings, won");
-    await user.click(screen.getByRole("button", { name: "Continue" }));
+    await user.click(screen.getByRole("button", { name: "Next: review and submit →" }));
 
     // Step 4: submit.
     await user.click(screen.getByRole("button", { name: "Submit proposal" }));
@@ -129,10 +129,10 @@ describe("ImportPage", () => {
   }
 
   async function fillMetaAndSubmit(user: ReturnType<typeof userEvent.setup>) {
-    await user.click(screen.getByRole("button", { name: "Continue" }));
+    await user.click(screen.getByRole("button", { name: "Next: describe meaning →" }));
     await user.type(screen.getByLabelText(/^Title/), "Deals by month");
     await user.type(screen.getByLabelText(/^Meaning/), "One row per month");
-    await user.click(screen.getByRole("button", { name: "Continue" }));
+    await user.click(screen.getByRole("button", { name: "Next: review and submit →" }));
     await user.click(screen.getByRole("button", { name: "Submit proposal" }));
   }
 
@@ -204,18 +204,18 @@ describe("ImportPage", () => {
     await user.click(await screen.findByLabelText("Select literal main.L1 (EMEA)"));
     await user.click(screen.getByRole("button", { name: "Make variable" }));
     await user.click(screen.getByRole("button", { name: "Add variable" }));
-    expect(screen.getByText("Variables (1)")).toBeInTheDocument();
+    expect(screen.getByText(/^1 variable ·/)).toBeInTheDocument();
 
     // Edit the SQL: the old report no longer applies.
-    await user.click(screen.getByRole("button", { name: "Back" }));
+    await user.click(screen.getByRole("button", { name: "← Back to SQL" }));
     await user.type(screen.getByLabelText(/Trusted SQL/), " AND 1=1");
     expect(screen.getByText(/changed since the last parse/)).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Back to variables" })).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: /Variables/ })).not.toBeInTheDocument(); // stepper
+    expect(screen.queryByRole("button", { name: /Make variables/ })).not.toBeInTheDocument(); // stepper
 
     // Re-parse: main.L1 now names 'open', so the `region` draft is removed, not rebound.
     await user.click(screen.getByRole("button", { name: "Parse again" }));
-    expect(await screen.findByText("Variables (0)")).toBeInTheDocument();
+    expect(await screen.findByText(/^0 variables ·/)).toBeInTheDocument();
     expect(screen.getByText(/Removed 1 variable after re-parsing/)).toBeInTheDocument();
     expect(api.calls.filter((c) => c.path === "/parse")).toHaveLength(2);
   });
@@ -338,12 +338,12 @@ describe("ImportPage", () => {
 
     await user.click(screen.getByRole("button", { name: "Back to variables" }));
     expect(await screen.findByText("period")).toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: "Continue" }));
+    await user.click(screen.getByRole("button", { name: "Next: describe meaning →" }));
     const id = screen.getByLabelText(/^ID/) as HTMLInputElement;
     expect(id.value).toBe("closed_deals");
     expect(id.readOnly).toBe(true);
     await user.type(screen.getByLabelText(/Keywords/), ", won");
-    await user.click(screen.getByRole("button", { name: "Continue" }));
+    await user.click(screen.getByRole("button", { name: "Next: review and submit →" }));
     await user.click(await screen.findByRole("button", { name: /Submit|Propose/ }));
 
     await waitFor(() => expect(api.calls.some((c) => c.path === "/proposals/definitions/closed_deals/revise")).toBe(true));

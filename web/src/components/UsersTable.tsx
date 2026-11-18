@@ -1,6 +1,7 @@
 import { Fragment, useState } from "react";
-import type { CreateTokenRequest, RoleCard, TokenCard, ToolInfo, ToolName, UserView } from "../api/types";
-import { formatDateTime } from "../lib/format";
+import type { CreateTokenRequest, ProfileUpdate, RoleCard, TokenCard, ToolInfo, ToolName, UserView } from "../api/types";
+import { formatDateTime, shownName } from "../lib/format";
+import { ProfileForm } from "./ProfileForm";
 import { toolSummary } from "../lib/tools";
 import { TokenForm } from "./TokenForm";
 import { TokenList } from "./TokenList";
@@ -19,6 +20,8 @@ interface Props {
   onActive: (name: string, active: boolean) => void;
   onRevoke: (user: string, token: TokenCard) => void;
   onGenerate: (user: string, body: CreateTokenRequest) => void;
+  /** manage_user: set a user's display name / email (ADR 0029). */
+  onProfile?: (user: string, body: ProfileUpdate) => void;
 }
 
 /** What a user of `role` may get (agents never verify outside admin; ADR 0027). */
@@ -27,10 +30,12 @@ function roleTools(role: RoleCard | undefined, kind: string): ToolName[] {
   return kind === "agent" && role.name !== "admin" ? role.allowed.filter((t) => t !== "verify") : role.allowed;
 }
 
-/** Settings → Users: role, active, the role's tools, and each user's tokens (ADR 0027). */
-export function UsersTable({ users, roles, catalog, me, busy, canEdit, canMint, onRole, onActive, onRevoke, onGenerate }: Props) {
+/** Settings → Users & roles: name (display name, email; ADR 0029), role, active, the role's
+ * tools, and each user's tokens (ADR 0027). */
+export function UsersTable({ users, roles, catalog, me, busy, canEdit, canMint, onRole, onActive, onRevoke, onGenerate, onProfile }: Props) {
   const [open, setOpen] = useState<string | null>(null);
   const [minting, setMinting] = useState<string | null>(null);
+  const [editing, setEditing] = useState<string | null>(null);
   const roleNames = roles.map((r) => r.name);
   return (
     <div className="table-wrap" tabIndex={0} role="region" aria-label="Users">
@@ -56,8 +61,10 @@ export function UsersTable({ users, roles, catalog, me, busy, canEdit, canMint, 
               <Fragment key={u.name}>
                 <tr>
                   <td>
-                    {u.name}
+                    <span className="strong">{shownName(u)}</span>
                     {u.name === me && <span className="tag">you</span>}
+                    {u.display_name && <div className="mono small muted">{u.name}</div>}
+                    {u.email && <div className="small muted">{u.email}</div>}
                   </td>
                   <td>{u.kind}</td>
                   <td>
@@ -94,6 +101,7 @@ export function UsersTable({ users, roles, catalog, me, busy, canEdit, canMint, 
                   </td>
                   <td className="small">{formatDateTime(u.created_at)}</td>
                   <td>
+                    <div className="btn-row nowrap">
                     <button
                       type="button"
                       className="btn btn-sm"
@@ -104,14 +112,42 @@ export function UsersTable({ users, roles, catalog, me, busy, canEdit, canMint, 
                       {live} active {expanded ? "▴" : "▾"}
                       <span className="visually-hidden"> tokens of {u.name}</span>
                     </button>
+                    {canEdit && onProfile && (
+                      <button
+                        type="button"
+                        className="btn btn-sm"
+                        aria-expanded={editing === u.name}
+                        onClick={() => setEditing(editing === u.name ? null : u.name)}
+                      >
+                        Profile<span className="visually-hidden"> of {u.name}</span>
+                      </button>
+                    )}
+                    </div>
                   </td>
                 </tr>
+                {editing === u.name && onProfile && (
+                  <tr>
+                    <td colSpan={7}>
+                      <ProfileForm
+                        idPrefix={`profile-${u.name}`}
+                        value={u}
+                        busy={busy === u.name}
+                        onSave={(b) => {
+                          onProfile(u.name, b);
+                          setEditing(null);
+                        }}
+                        onCancel={() => setEditing(null)}
+                      />
+                    </td>
+                  </tr>
+                )}
                 {expanded && (
                   <tr id={`tokens-${u.name}`}>
                     <td colSpan={7}>
                       <div className="user-tokens stack">
                         <TokenList
                           label={`Tokens of ${u.name}`}
+                          owner={u}
                           tokens={u.tokens ?? []}
                           busy={busy}
                           onRevoke={canEdit || u.name === me ? (t) => onRevoke(u.name, t) : undefined}

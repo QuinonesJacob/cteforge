@@ -200,10 +200,12 @@ def count_proposals(ctx: AppContext, user: User, status: ProposalStatus | None =
     return len(ctx.store.list_proposals(status))
 
 
-def get_proposal(ctx: AppContext, user: User, id: str) -> ProposalView:
+def get_proposal(ctx: AppContext, user: User, id: str, *, full_diff: bool = False) -> ProposalView:
+    """One proposal with its diff (`full_diff`: every unchanged line as context, for the
+    GUI's Full view; ADR 0029), impact and composition."""
     with _audit.audit_failures(ctx, user, AuditKind.REVIEW, **_audit_fields(id, "get_proposal")):
         require(user, Tool.LIST_PROPOSALS)
-        result = _apply.view(ctx, _get(ctx, id))
+        result = _apply.view(ctx, _get(ctx, id), full_diff=full_diff)
     _audit.record(
         ctx, user, AuditKind.REVIEW, fail_closed=False, **_audit_fields(id, "get_proposal")
     )

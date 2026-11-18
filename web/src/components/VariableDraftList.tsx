@@ -1,5 +1,6 @@
 import type { GrainCandidate, LiteralInfo, RangeCandidate } from "../api/types";
 import { descriptionRule, type VariableDraft } from "../lib/importBuilder";
+import { typeLabel } from "../lib/format";
 import { Badge } from "./Badge";
 
 interface Props {
@@ -11,7 +12,16 @@ interface Props {
   onRemove: (index: number) => void;
 }
 
+/** The variables made so far (ADR 0029: one card each, the values it covers first). */
 export function VariableDraftList({ drafts, byId, ranges, grainsById = {}, onEdit, onRemove }: Props) {
+  const shown = (ids: string[]) =>
+    ids
+      .map((id) => {
+        const lit = byId[id];
+        if (lit) return lit.is_string ? `'${lit.value}'` : lit.value;
+        return grainsById[id]?.sql ?? id;
+      })
+      .join(ids.length === 2 ? " … " : ", ");
   if (drafts.length === 0)
     return <p className="muted small">No variables yet. Literals you leave alone stay part of the SQL.</p>;
   return (
@@ -19,11 +29,14 @@ export function VariableDraftList({ drafts, byId, ranges, grainsById = {}, onEdi
       {drafts.map((d, i) => {
         const missing = descriptionRule(d, byId, ranges, grainsById).required && !d.description.trim();
         return (
-          <li key={d.name} className="draft-item">
-            <div>
-              <code>{d.name}</code> <span className="muted small">{d.type}</span>{" "}
-              <Badge tone={d.role === "changeable" ? "built" : "neutral"}>{d.role}</Badge>
-              {missing && <Badge tone="danger">needs description</Badge>}
+          <li key={d.name} className={`draft-item draft-${d.role}`}>
+            <div className="draft-main">
+              <div className="draft-values mono">{shown(d.literals)}</div>
+              <div>
+                <code className="strong">{d.name}</code> <span className="muted small">{typeLabel(d.type)}</span>{" "}
+                <span className={`draft-role draft-role-${d.role}`}>{d.role === "changeable" ? "Variable" : "Fixed"}</span>
+                {missing && <Badge tone="danger">needs description</Badge>}
+              </div>
               <div className="muted small mono">{d.literals.join(", ")}</div>
             </div>
             <div className="btn-row">

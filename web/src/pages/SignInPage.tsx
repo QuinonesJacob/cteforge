@@ -1,6 +1,7 @@
 import { useState, type FormEvent } from "react";
 import { errorMessage } from "../api/client";
 import { Field } from "../components/Field";
+import { Icon } from "../components/Icon";
 import { ThemeToggle } from "../components/ThemeToggle";
 import { useAuth } from "../state/AuthContext";
 
@@ -32,7 +33,7 @@ export function SignInPage() {
       <form className="card signin-card" onSubmit={submit} aria-labelledby="signin-title">
         <div className="brand brand-lg">
           <span className="brand-mark" aria-hidden="true">
-            c
+            <Icon name="brand" size={16} strokeWidth={2.4} />
           </span>
           cteforge
         </div>

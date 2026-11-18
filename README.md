@@ -43,14 +43,22 @@ uv run cteforge run --use rr=realization_rate \
 uv run cteforge serve                     # GUI + API + MCP on http://127.0.0.1:8765
 ```
 
-Open <http://127.0.0.1:8765> and sign in with the admin token. The GUI has five pages:
-**Library** (every definition and the proposals touching it on one page — filter by trust,
-approval, created by and verified by, or "needs my review"; each definition has a page with
-a run form, "joins to", "used by", its history, an Edit tab, and for a composed definition
-its parts and full compiled SQL; proposals open with their diff and checks), **Join map**
-(edges mined from the definitions with relationship, traps, notes and where they come
-from; propose annotations or new edges), **Import** (paste SQL, mark the literals that are
-variables, check, propose), **Audit** and **Settings** (users, roles, my tokens, team mode).
+Open <http://127.0.0.1:8765> and sign in with the admin token. The sidebar has
+**Library** (every definition and the proposals touching it on one page — search, filter by
+trust, approval, created by and verified by, sorted by relevance then trust; "Waiting on
+you" lists the proposals you may decide, oldest first, with their +/− lines; each
+definition has a page with its usage notes, the variables agents can fill and their
+original values, the trusted SQL, joins, "used by", history, "Propose a change", and for a
+composed definition its parts and full compiled SQL; a proposal opens with the proposer's
+note, a unified or side-by-side diff, checks and the decision), **Join map** (a list of the
+joins mined from the definitions: many / one side, keys, join-type variants and where each
+definition joins, the sources' trust, relationship evidence, traps and notes; annotate a
+join through a proposal), **Import** (paste SQL, mark the values that are variables,
+describe, submit), **Log** (what agents looked up and ran over MCP, every run and change, every refused call — not people's own reads: who, what, trust, outcome, compile ID)
+and **Settings** (connections, team mode, users & roles, roles, my tokens and your display
+name / email). The header shows the default connection and your user menu (tokens, your
+tools, light / dark theme, sign out). The GUI does not run queries: agents run through MCP,
+scheduled jobs through `POST /api/v1/run` or the CLI.
 
 ### Connect Claude Code (or any MCP client)
 
@@ -172,7 +180,7 @@ All commands act as `CTEFORGE_USER` against `CTEFORGE_DB_URL`. Run `cteforge COM
 | `search QUERY` · `run --use ALIAS=ID --vars JSON [--select SQL]` | Use the library |
 | `search-index rebuild [--force]` · `search-index download-model` | Meaning-search vectors and model (see Search) |
 | `db init` | Create the database |
-| `user add NAME [--role R] [--agent] [--bootstrap]` · `user list\|role\|deactivate\|activate` | Users (first token printed once) |
+| `user add NAME [--role R] [--agent] [--bootstrap]` · `user list\|role\|deactivate\|activate` · `user profile NAME [--display-name X] [--email Y]` | Users (first token printed once); display name / email (`""` clears) |
 | `token create NAME [--user U] [--expires D] [--only T,…]` · `token list\|revoke` | Personal access tokens (printed once) |
 | `role list\|create\|edit\|delete` | Roles: allowed / on-by-default tools |
 | `settings show` · `settings mode strict\|open` | Team mode |
@@ -272,7 +280,8 @@ Layering is enforced by import-linter (`uv run lint-imports`). Each directory ha
 [0018 MCP and auth](docs/decisions/0018-mcp-and-auth.md) ·
 [0019 HTTP API and GUI](docs/decisions/0019-http-api-and-gui.md) ·
 [0020 warehouse connectors](docs/decisions/0020-warehouse-connectors.md) ·
-[0023 meaning search](docs/decisions/0023-meaning-search.md).
+[0023 meaning search](docs/decisions/0023-meaning-search.md) ·
+[0029 GUI redesign](docs/decisions/0029-gui-redesign.md).
 
 ## Development
 

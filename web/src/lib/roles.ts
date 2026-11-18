@@ -89,3 +89,23 @@ export const canManageRoles = (u: User | null) => can(u, "manage_role");
 export const canManageSettings = (u: User | null) => can(u, "manage_settings");
 /** Generating tokens: never an agent (agents never see tokens; ADR 0027). */
 export const canMintOwnToken = (u: User | null) => Boolean(u && u.kind === "human" && u.active !== false);
+
+/** Settings sections (ADR 0029 sidebar), in order, for what the token holds. Admin sections
+ * are offered (and mounted) only with their tool, so others never call those routes. */
+export type SettingsSection = "connections" | "team" | "users" | "roles" | "tokens";
+export const SETTINGS_LABELS: Record<SettingsSection, string> = {
+  connections: "Connections",
+  team: "Team mode",
+  users: "Users & roles",
+  roles: "Roles",
+  tokens: "My tokens",
+};
+
+export function settingsSections(u: User | null): SettingsSection[] {
+  if (!u) return [];
+  return [
+    ...(canManageSettings(u) ? (["connections", "team"] as const) : []),
+    ...(canSeeUsers(u) ? (["users", "roles"] as const) : []),
+    "tokens" as const,
+  ];
+}
