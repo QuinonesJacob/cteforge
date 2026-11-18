@@ -186,11 +186,15 @@ def test_wrong_password_error_is_scrubbed(monkeypatch):
 
 
 def _normalized(rows):
-    """Cross-engine comparison: DuckDB and psycopg agree on Decimal and datetime."""
-    return [
-        tuple(str(v) if isinstance(v, Decimal | dt.datetime | dt.date) else v for v in r)
-        for r in rows
-    ]
+    """Cross-engine comparison: DuckDB returns ROUND(decimal / decimal) as a float where
+    Postgres returns NUMERIC; timestamps compare as text."""
+
+    def one(v):
+        if isinstance(v, Decimal | float):
+            return f"{float(v):.4f}"
+        return str(v) if isinstance(v, dt.datetime | dt.date) else v
+
+    return [tuple(one(v) for v in r) for r in rows]
 
 
 def test_definition_same_query_back_and_equal_to_duckdb(wh):
@@ -248,7 +252,7 @@ def test_services_import_checks_and_compile_and_run_on_postgres(ctx):
         metadata={k: ANN[k] for k in META_KEYS},
         annotations=[dict(a) for a in ANN["variables"]],
     )
-    errors = [i for i in out.proposal.issues if i.severity.value == "error"]
+    errors = [i for i in out.issues if i.severity.value == "error"]
     assert errors == [], errors
     assert out.auto_applied and out.definition is not None
     assert out.definition.state is DefinitionState.LLM_ANNOTATED  # checks ran on Postgres
