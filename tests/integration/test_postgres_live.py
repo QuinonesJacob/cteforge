@@ -272,5 +272,5 @@ def test_services_import_checks_and_compile_and_run_on_postgres(ctx):
     assert result.ran and result.rows, result.issues
     assert {row[1] for row in result.rows} == {"APAC"}
     quarters = {row[0] for row in result.rows}
-    assert quarters <= {dt.datetime(2026, 1, 1), dt.datetime(2026, 4, 1)}
+    assert quarters == {"2026-01-01T00:00:00", "2026-04-01T00:00:00"}  # JSON-safe rows
     assert "/* cteforge: realization_rate_by_grain v1" in result.sql
