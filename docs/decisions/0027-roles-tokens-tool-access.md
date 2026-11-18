@@ -191,3 +191,12 @@ deactivation, tokens); granting the admin role; editing the admin role.
   `review_proposal` or `verify`.
 - `verified_by_kind` on the definition card is looked up from the users table (a user's
   kind never changes); proposals store `decided_by_kind`.
+
+## Addendum (2026-11-17): security re-review
+- Functions that read a table / schema by NAME or run a SQL string have no table reference
+  for the raw-table gate to see, so they are refused as not read-only in every final
+  SELECT and definition (compose.checks `_SIDE_EFFECT_FUNCTIONS`): Postgres
+  `table_to_xml*`, `schema_to_xml*`, `database_to_xml*`, `cursor_to_xmlschema`, `ts_stat`
+  (joining `query_to_xml*` / `dblink`), ClickHouse `joinGet` / `joinGetOrNull`.
+- Known, accepted: narrowing a parent token does not narrow tokens it minted earlier (only
+  revoking cascades); a human token holding `manage_user` is effectively root (by design).

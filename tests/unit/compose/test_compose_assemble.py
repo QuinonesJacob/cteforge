@@ -447,6 +447,13 @@ def test_final_select_ctes_differing_only_in_case_are_rejected() -> None:
         "SELECT nextval('s') FROM rev",
         "SELECT pg_read_file('/etc/passwd') FROM rev",
         "SELECT * FROM rev, dblink('host=x', 'DELETE FROM t') AS t(a INT)",
+        # Read a whole table / schema by name: no table reference for checks to see.
+        "SELECT table_to_xml('accounts', true, false, '') AS x FROM rev",
+        "SELECT schema_to_xml('public', true, false, '') AS x FROM rev",
+        "SELECT database_to_xml(true, false, '') AS x FROM rev",
+        "SELECT TABLE_TO_XMLSCHEMA('accounts', true, false, '') AS x FROM rev",
+        "SELECT (SELECT count(*) FROM ts_stat('SELECT v FROM docs')) AS n FROM rev",
+        "SELECT ts_stat('SELECT v FROM docs') AS x FROM rev",
     ],
 )
 def test_side_effect_functions_are_not_read_only(select: str) -> None:
@@ -464,3 +471,10 @@ def test_side_effect_function_in_a_part_is_rejected() -> None:
 def test_duckdb_getenv_is_rejected() -> None:
     with pytest.raises(RenderError, match="getenv"):
         compose([REVENUE], "SELECT getenv('HOME') FROM rev", Dialect.DUCKDB)
+
+
+def test_clickhouse_join_get_reads_a_table_by_name_and_is_rejected() -> None:
+    rev = part("rev", "SELECT 1 AS a", dialect=Dialect.CLICKHOUSE)
+    for fn in ("joinGet", "joinGetOrNull"):
+        with pytest.raises(RenderError, match="(?i)joinget"):
+            compose([rev], f"SELECT {fn}('db.users', 'name', a) AS n FROM rev", Dialect.CLICKHOUSE)

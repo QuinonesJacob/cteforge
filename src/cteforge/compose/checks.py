@@ -143,6 +143,22 @@ _SIDE_EFFECT_FUNCTIONS = frozenset(
         "query_to_xmlschema",
         "query_to_xml_and_xmlschema",
         "cursor_to_xml",
+        "cursor_to_xmlschema",
+        # Postgres: read a whole table / schema / database by NAME (a string, not a table
+        # reference, so no check sees which table is read) or run a SQL string
+        "table_to_xml",
+        "table_to_xmlschema",
+        "table_to_xml_and_xmlschema",
+        "schema_to_xml",
+        "schema_to_xmlschema",
+        "schema_to_xml_and_xmlschema",
+        "database_to_xml",
+        "database_to_xmlschema",
+        "database_to_xml_and_xmlschema",
+        "ts_stat",
+        # ClickHouse: reads a Join-engine table named by a string
+        "joinget",
+        "joingetornull",
         # DuckDB: dynamic SQL, environment
         "query",
         "query_table",
