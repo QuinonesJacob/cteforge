@@ -517,6 +517,10 @@ def reject_mysql_hidden_sql(sql: str) -> None:
       check could not see e.g. `/*! INTO OUTFILE '...' */` or a hidden function call.
     - Optimizer hints naming MAX_EXECUTION_TIME or SET_VAR: they would lift the
       connector's statement timeout or change session settings for the statement.
+    - A comment that starts with non-ASCII whitespace (`--` + U+00A0, U+2000..U+200A,
+      U+3000, U+0085, ...): sqlglot starts a `--` comment before any Unicode space, MySQL
+      only before an ASCII space or control byte, so MySQL would read `- -<identifier>`
+      and run the rest of the line, which cteforge's checks never saw.
     Checked on sqlglot's MySQL tokens (comments inside string literals are text)."""
     try:
         tokens = sqlglot.tokenize(sql, read=str(Dialect.MYSQL))
@@ -524,6 +528,14 @@ def reject_mysql_hidden_sql(sql: str) -> None:
         raise SqlParseError(syntax_error_message(sql, Dialect.MYSQL, exc)) from exc
     for token in tokens:
         hint = token.token_type is TokenType.HINT
+        for comment in token.comments:
+            if comment[:1].isspace() and ord(comment[0]) > 127:
+                raise SqlParseError(
+                    f"The SQL has a comment that starts with the non-ASCII space "
+                    f"U+{ord(comment[0]):04X}. MySQL does not read that as a comment and would "
+                    "run the text after it, which cteforge cannot check; use a plain space "
+                    "after '--'."
+                )
         for text in [*token.comments, *([token.text] if hint else [])]:
             if text.startswith(("!", "M!")):
                 raise SqlParseError(

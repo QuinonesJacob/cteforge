@@ -97,6 +97,33 @@ def test_setting_hints_are_refused(sql):
         parse(sql, MY)
 
 
+@pytest.mark.parametrize("space", ["\u00a0", "\u0085", "\u2000", "\u200a", "\u2028", "\u3000"])
+@pytest.mark.parametrize(
+    "sql",
+    [
+        # MySQL reads "1 - -<identifier>" and runs the rest; sqlglot saw a comment.
+        "SELECT 1--{s}x, GET_LOCK('a', 0)\nFROM t",
+        "SELECT a FROM t WHERE b = 1--{s}b INTO OUTFILE '/var/lib/mysql-files/x'\n",
+        "SELECT 0--{s}b, LOAD_FILE('/etc/passwd')\nFROM t",
+    ],
+)
+def test_dash_comments_after_a_non_ascii_space_are_refused(sql, space):
+    with pytest.raises(SqlParseError, match="non-ASCII space"):
+        parse(sql.format(s=space), MY)
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "SELECT a FROM t -- \u00e9 accented comment",
+        "SELECT a FROM t WHERE b = 'x--\u00a0y'",
+        "SELECT `c--\u00a0d` FROM t",
+    ],
+)
+def test_unicode_in_ordinary_comments_strings_and_names_is_allowed(sql):
+    parse(sql, MY)
+
+
 @pytest.mark.parametrize(
     "sql",
     [

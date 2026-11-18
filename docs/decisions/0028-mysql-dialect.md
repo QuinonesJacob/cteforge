@@ -67,8 +67,11 @@ change a statement's own `max_execution_time`.
   executable comments `/*! ... */` (and MariaDB's `/*M! ... */`) — MySQL runs their content,
   every checker sees a comment, so `SELECT 1 /*! INTO OUTFILE '...' */` would pass any
   read-only check; and optimizer hints naming `MAX_EXECUTION_TIME` or `SET_VAR`, which would
-  lift the statement timeout or change session settings for the statement. Checked on
-  sqlglot's MySQL tokens, so text in string literals and line comments is not affected.
+  lift the statement timeout or change session settings for the statement; and a comment
+  that starts with non-ASCII whitespace (`--` + U+00A0, U+3000, ...): sqlglot starts a `--`
+  comment before any Unicode space, MySQL only before an ASCII space or control byte, so
+  MySQL would run the rest of the line as SQL (found in the security review, 2026-11-17).
+  Checked on sqlglot's MySQL tokens, so text in string literals is not affected.
   sqlglot writes line comments back as `/* */` with `*/` and `/*` broken up.
 - **Read-only guard** (all dialects, compose.checks.ensure_query — the real guard, before any
   SQL reaches a connector): SELECT ... INTO (`exp.Into`) and row locks were already refused;
